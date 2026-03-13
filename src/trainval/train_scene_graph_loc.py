@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import torch.optim as optim
 from gaussian_renderer import render
-from scene.cameras import MiniCam
 from torch import nn
 from torchvision.utils import save_image
 
@@ -25,6 +24,7 @@ from src.models.losses.room_retrieval import get_loss, get_val_room_retr_loss
 from src.models.patch_sg_aligner import PatchSGIEAligner
 from src.modules.sparse.basic import SparseTensor
 from utils import common
+from utils.gaussian_camera import build_minicam
 from utils.geometry import pose_quatmat_to_rotmat
 from utils.graphics_utils import focal2fov
 from utils.path_obj_pair_visualizer import PatchObjectPairVisualizer
@@ -475,7 +475,7 @@ class Trainer(EpochBasedTrainer):
             ]
 
             pose_camera_to_world = np.linalg.inv(pose_quatmat_to_rotmat(extrinsics))
-            viewpoint_camera = MiniCam(
+            viewpoint_camera = build_minicam(
                 width=int(intrinsics["width"]),
                 height=int(intrinsics["height"]),
                 fovy=focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"]),

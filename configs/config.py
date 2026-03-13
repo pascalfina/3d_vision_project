@@ -170,6 +170,7 @@ class DecoderConfig(BaseModel):
 
 
 class AutoencoderConfig(BaseModel):
+    guidance: bool = False
     encoder: EncoderConfig = Field(default_factory=EncoderConfig)
     decoder: DecoderConfig = Field(default_factory=DecoderConfig)
 

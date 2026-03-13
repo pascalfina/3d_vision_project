@@ -3,7 +3,7 @@
 args=("$@")
 
 # Set environment variables
-export VLSG_SPACE=$(pwd)
+source "$(dirname "${BASH_SOURCE[0]}")/../activate_objectx_env.sh"
 export RESUME_DIR="$VLSG_TRAINING_OUT_DIR"
 
 # get output directory argument if it exists
@@ -24,11 +24,7 @@ done
 timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 export VLSG_TRAINING_OUT_DIR="$SCRATCH/test_latent_autoencoder/$timestamp"
 
-# Initialize conda and activate the environment
-source .venv/bin/activate
-
 # Navigate to VLSG space
 cd "$VLSG_SPACE" || { echo "Failed to change directory to $VLSG_SPACE"; exit 1; }
-export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-splatting"
 
 python src/inference/structured_latent_inference.py --config configs/config.yaml  ${args[@]}

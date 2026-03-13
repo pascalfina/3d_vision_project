@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
 from safetensors.torch import load_file
@@ -19,6 +19,21 @@ from src.representations.gaussian.gaussian_model import Gaussian
 SCRATCH = os.environ.get("SCRATCH", "/scratch")
 
 
+def _resolve_trellis_model_path(
+    trellis_pipeline: dict[str, Any],
+    *keys: str,
+    fallback: Optional[str] = None,
+) -> str:
+    models = trellis_pipeline.get("args", {}).get("models", {})
+    for key in keys:
+        path = models.get(key)
+        if path:
+            return path
+    if fallback is not None:
+        return fallback
+    raise KeyError(keys[0])
+
+
 class LatentAutoencoder(nn.Module):
     def __init__(
         self,
@@ -34,7 +49,12 @@ class LatentAutoencoder(nn.Module):
             trellis_pipeline = json.load(f)
 
         if load_pretrained:
-            path = trellis_pipeline["args"]["models"]["slat_encoder"]
+            path = _resolve_trellis_model_path(
+                trellis_pipeline,
+                "slat_encoder",
+                "slat_enc",
+                fallback="ckpts/slat_enc_swin8_B_64l8_fp16",
+            )
             with open(f"{SCRATCH}/TRELLIS-image-large/{path}.json", "r") as f:
                 configs = json.load(f)
             state_dict = load_file(f"{SCRATCH}/TRELLIS-image-large/{path}.safetensors")

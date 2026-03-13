@@ -1,8 +1,44 @@
+import importlib
+import importlib.util
 from typing import *
 
 BACKEND = "spconv"
 DEBUG = False
 ATTN = "xformers"
+
+
+def _is_sparse_backend_available(backend: str) -> bool:
+    if backend == "spconv":
+        return importlib.util.find_spec("spconv.pytorch") is not None
+    if backend == "torchsparse":
+        return importlib.util.find_spec("torchsparse") is not None
+    return False
+
+
+def _is_attn_backend_available(backend: str) -> bool:
+    if backend == "xformers":
+        return importlib.util.find_spec("xformers.ops") is not None
+    if backend == "flash_attn":
+        return importlib.util.find_spec("flash_attn") is not None
+    if backend in {"sdpa", "naive"}:
+        return True
+    return False
+
+
+def _resolve_sparse_backend(preferred_backend: str) -> str:
+    candidates = [preferred_backend, "spconv", "torchsparse"]
+    for backend in candidates:
+        if _is_sparse_backend_available(backend):
+            return backend
+    raise RuntimeError("No supported sparse backend is available")
+
+
+def _resolve_attn_backend(preferred_backend: str) -> str:
+    candidates = [preferred_backend, "xformers", "flash_attn", "sdpa", "naive"]
+    for backend in candidates:
+        if _is_attn_backend_available(backend):
+            return backend
+    raise RuntimeError("No supported sparse attention backend is available")
 
 
 def __from_env():
@@ -25,8 +61,28 @@ def __from_env():
         BACKEND = env_sparse_backend
     if env_sparse_debug is not None:
         DEBUG = env_sparse_debug == "1"
-    if env_sparse_attn is not None and env_sparse_attn in ["xformers", "flash_attn"]:
+    if env_sparse_attn is not None and env_sparse_attn in [
+        "xformers",
+        "flash_attn",
+        "sdpa",
+        "naive",
+    ]:
         ATTN = env_sparse_attn
+
+    resolved_backend = _resolve_sparse_backend(BACKEND)
+    resolved_attn = _resolve_attn_backend(ATTN)
+    if resolved_backend != BACKEND:
+        print(
+            f"[SPARSE] Requested backend '{BACKEND}' is unavailable, "
+            f"falling back to '{resolved_backend}'"
+        )
+        BACKEND = resolved_backend
+    if resolved_attn != ATTN:
+        print(
+            f"[SPARSE] Requested attention '{ATTN}' is unavailable, "
+            f"falling back to '{resolved_attn}'"
+        )
+        ATTN = resolved_attn
 
     print(f"[SPARSE] Backend: {BACKEND}, Attention: {ATTN}")
 
@@ -36,7 +92,7 @@ __from_env()
 
 def set_backend(backend: Literal["spconv", "torchsparse"]):
     global BACKEND
-    BACKEND = backend
+    BACKEND = _resolve_sparse_backend(backend)
 
 
 def set_debug(debug: bool):
@@ -44,12 +100,9 @@ def set_debug(debug: bool):
     DEBUG = debug
 
 
-def set_attn(attn: Literal["xformers", "flash_attn"]):
+def set_attn(attn: Literal["xformers", "flash_attn", "sdpa", "naive"]):
     global ATTN
-    ATTN = attn
-
-
-import importlib
+    ATTN = _resolve_attn_backend(attn)
 
 __attributes = {
     "SparseTensor": "basic",

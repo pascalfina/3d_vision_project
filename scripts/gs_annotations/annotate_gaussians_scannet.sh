@@ -3,11 +3,7 @@
 args=("$@")
 
 # Environment setup
-export VLSG_SPACE="$(pwd)"
-export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-splatting"
-
-# Activate conda environment
-source .venv/bin/activate
+source "$(dirname "${BASH_SOURCE[0]}")/../activate_objectx_env.sh"
 
 iterations=7000
 densify_until_iter=15_000

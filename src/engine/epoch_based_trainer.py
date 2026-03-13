@@ -237,13 +237,15 @@ class EpochBasedTrainer(BaseTrainer):
                 output_dict, result_dict = self.val_step(
                     self.epoch, self.inner_iteration, data_dict
                 )
-            except RuntimeError as e:
+            except (RuntimeError, KeyError) as e:
                 self.logger.warning(e)
                 data_dict = self.release_tensors(data_dict)
-                output_dict = self.release_tensors(output_dict)
-                result_dict = self.release_tensors(result_dict)
-                del output_dict
-                del result_dict
+                if output_dict is not None:
+                    output_dict = self.release_tensors(output_dict)
+                    del output_dict
+                if result_dict is not None:
+                    result_dict = self.release_tensors(result_dict)
+                    del result_dict
                 del data_dict
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -272,6 +274,10 @@ class EpochBasedTrainer(BaseTrainer):
             torch.cuda.empty_cache()
 
         summary_dict = summary_board.summary()
+        if "loss" not in summary_dict:
+            self.logger.warning("Validation epoch produced no valid batches; skipping metrics.")
+            self.set_train_mode()
+            return
         message = "[Val] " + get_log_string(summary_dict, epoch=self.epoch, timer=timer)
         val_loss = summary_dict["loss"]
         if val_loss < self.best_val_loss:
