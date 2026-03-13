@@ -1,0 +1,31 @@
+seed: 42
+num_workers : 4
+
+model_name    : 'sgaligner'
+modules       : ['pct', 'gat', 'rel', 'attr']
+registration  : False
+scan_type     : 'subscan'
+
+data :
+  name            : Scan3R
+  root_dir        : /media/sayan/internal1/datasets/Scan3R/
+  subscan_dir     : /drive/dumps/sgaligner/subscans/Scan3R
+
+preprocess :
+  pc_resolutions      : [512]
+  subscenes_per_scene : 7
+  min_obj_points      : 50
+  anchor_type_name    : '' 
+
+model :
+  rel_dim             : 41
+  attr_dim            : 164
+  alignment_thresh    : 0.4
+
+train :
+  batch_size          : 2
+
+val :
+  batch_size          : 4
+  overlap_low         : 0.0
+  overlap_high        : 0.0

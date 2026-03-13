@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_store
+.vscode
+plots/
+output/
+check.py
+test.py
+*egg-info/
+logs/
+build/

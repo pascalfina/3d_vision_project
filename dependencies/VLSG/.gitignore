@@ -1,0 +1,18 @@
+# vscode
+.vscode
+
+# test
+test/
+
+# checkpoint
+checkpoint/*
+
+# implementation
+implementation/*
+
+# pycache
+__pycache__/
+*.pyc
+
+# out
+out/
