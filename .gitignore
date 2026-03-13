@@ -27,5 +27,27 @@ logs/
 *_ignore*
 
 # environment
+.venv
 .venv/
+.venv_objx/
 training_out/
+config.yaml
+.codex-backups/
+
+# cluster / local debug
+debug.txt
+slurm-*.out
+slurm-*.err
+
+# caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# vendored dependency build artifacts
+dependencies/**/build/
+dependencies/**/__pycache__/
+dependencies/VLSG/**/log_file_*.txt
+dependencies/VLSG/**/time_used*.txt
+
+

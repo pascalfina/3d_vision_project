@@ -1,6 +1,7 @@
 from typing import *
 
 import torch
+from torch.nn.functional import scaled_dot_product_attention as torch_sdpa
 
 from .. import ATTN, DEBUG, SparseTensor
 
@@ -8,6 +9,8 @@ if ATTN == "xformers":
     import xformers.ops as xops
 elif ATTN == "flash_attn":
     import flash_attn
+elif ATTN in {"sdpa", "naive"}:
+    pass
 else:
     raise ValueError(f"Unknown attention module: {ATTN}")
 
@@ -15,6 +18,44 @@ else:
 __all__ = [
     "sparse_scaled_dot_product_attention",
 ]
+
+
+def _dense_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    if ATTN == "sdpa":
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        out = torch_sdpa(q, k, v)
+        return out.permute(0, 2, 1, 3)
+    if ATTN == "naive":
+        scale = q.shape[-1] ** -0.5
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        attn = torch.softmax((q @ k.transpose(-2, -1)) * scale, dim=-1)
+        out = attn @ v
+        return out.permute(0, 2, 1, 3)
+    raise ValueError(f"Unknown dense attention fallback: {ATTN}")
+
+
+def _varlen_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_seqlen: List[int],
+    kv_seqlen: List[int],
+) -> torch.Tensor:
+    outputs = []
+    q_start = 0
+    kv_start = 0
+    for q_len, kv_len in zip(q_seqlen, kv_seqlen):
+        q_chunk = q[q_start : q_start + q_len].unsqueeze(0)
+        k_chunk = k[kv_start : kv_start + kv_len].unsqueeze(0)
+        v_chunk = v[kv_start : kv_start + kv_len].unsqueeze(0)
+        outputs.append(_dense_attention(q_chunk, k_chunk, v_chunk).squeeze(0))
+        q_start += q_len
+        kv_start += kv_len
+    return torch.cat(outputs, dim=0)
 
 
 @overload
@@ -290,6 +331,12 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
             out = flash_attn.flash_attn_varlen_func(
                 q, k, v, cu_seqlens_q, cu_seqlens_kv, max(q_seqlen), max(kv_seqlen)
             )
+    elif ATTN in {"sdpa", "naive"}:
+        if num_all_args == 1:
+            q, k, v = qkv.unbind(dim=1)
+        elif num_all_args == 2:
+            k, v = kv.unbind(dim=1)
+        out = _varlen_attention(q, k, v, q_seqlen, kv_seqlen)
     else:
         raise ValueError(f"Unknown attention module: {ATTN}")
 

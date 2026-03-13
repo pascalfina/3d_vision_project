@@ -320,18 +320,6 @@ class Scan3RObjectDataset(data.Dataset):
             data_dict["tot_obj_pts"] - data_dict["mean_obj_pts"]
         ) / (data_dict["std_obj_pts"] + 1e-6)
 
-        obj_ids_to_skip = []
-        for obj_id in object_ids:
-            gs_path = os.path.join(
-                self.scans_files_dir,
-                "gs_annotations",
-                scan_id,
-                str(obj_id),
-                f"voxel_output{self.suffix}.npz",
-            )
-            if not os.path.exists(gs_path):
-                obj_ids_to_skip.append(obj_id)
-
         obj_dict = {
             obj_id: {
                 "obj_ids": data_dict["obj_ids"][obj_idx : obj_idx + 1],
@@ -339,7 +327,6 @@ class Scan3RObjectDataset(data.Dataset):
                 "label": data_dict["label"][obj_idx : obj_idx + 1],
             }
             for obj_idx, obj_id in enumerate(object_ids)
-            if obj_id not in obj_ids_to_skip
         }
         return obj_dict
 

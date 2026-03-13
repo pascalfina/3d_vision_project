@@ -3,10 +3,7 @@
 args=("$@")
 
 # Environment setup
-export VLSG_SPACE=$(pwd)
-export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-splatting"
-
-source .venv/bin/activate
+source "$(dirname "${BASH_SOURCE[0]}")/../activate_objectx_env.sh"
 
 python preprocessing/voxel_anno/voxelise_features.py \
     --config "preprocessing/voxel_anno/voxel_anno.yaml" \

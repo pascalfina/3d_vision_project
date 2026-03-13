@@ -3,6 +3,7 @@ from enum import Enum
 from typing import *
 
 import torch
+from torch.nn.functional import scaled_dot_product_attention as torch_sdpa
 
 from .. import ATTN, DEBUG, SparseTensor
 
@@ -10,6 +11,8 @@ if ATTN == "xformers":
     import xformers.ops as xops
 elif ATTN == "flash_attn":
     import flash_attn
+elif ATTN in {"sdpa", "naive"}:
+    pass
 else:
     raise ValueError(f"Unknown attention module: {ATTN}")
 
@@ -17,6 +20,35 @@ else:
 __all__ = [
     "sparse_serialized_scaled_dot_product_self_attention",
 ]
+
+
+def _dense_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    if ATTN == "sdpa":
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        out = torch_sdpa(q, k, v)
+        return out.permute(0, 2, 1, 3)
+    if ATTN == "naive":
+        scale = q.shape[-1] ** -0.5
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        attn = torch.softmax((q @ k.transpose(-2, -1)) * scale, dim=-1)
+        out = attn @ v
+        return out.permute(0, 2, 1, 3)
+    raise ValueError(f"Unknown dense attention fallback: {ATTN}")
+
+
+def _varlen_self_attention(qkv_feats: torch.Tensor, seq_lens: List[int]) -> torch.Tensor:
+    outputs = []
+    start = 0
+    for seq_len in seq_lens:
+        chunk = qkv_feats[start : start + seq_len]
+        q, k, v = chunk.unbind(dim=1)
+        outputs.append(_dense_attention(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)).squeeze(0))
+        start += seq_len
+    return torch.cat(outputs, dim=0)
 
 
 class SerializeMode(Enum):
@@ -216,6 +248,9 @@ def sparse_serialized_scaled_dot_product_self_attention(
             out = xops.memory_efficient_attention(q, k, v)  # [B, N, H, C]
         elif ATTN == "flash_attn":
             out = flash_attn.flash_attn_qkvpacked_func(qkv_feats)  # [B, N, H, C]
+        elif ATTN in {"sdpa", "naive"}:
+            q, k, v = qkv_feats.unbind(dim=2)
+            out = _dense_attention(q, k, v)
         else:
             raise ValueError(f"Unknown attention module: {ATTN}")
         out = out.reshape(B * N, H, C)  # [M, H, C]
@@ -239,6 +274,8 @@ def sparse_serialized_scaled_dot_product_self_attention(
             out = flash_attn.flash_attn_varlen_qkvpacked_func(
                 qkv_feats, cu_seqlens, max(seq_lens)
             )  # [M, H, C]
+        elif ATTN in {"sdpa", "naive"}:
+            out = _varlen_self_attention(qkv_feats, seq_lens)
 
     out = out[bwd_indices]  # [T, H, C]
 

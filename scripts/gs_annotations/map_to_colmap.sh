@@ -3,10 +3,7 @@
 args=("$@")
 
 # Environment setup
-export VLSG_SPACE="$(pwd)"
-
-# Activate conda environment
-source .venv/bin/activate
+source "$(dirname "${BASH_SOURCE[0]}")/../activate_objectx_env.sh"
 
 
 xvfb-run -a  python preprocessing/gs_anno/map_to_colmap.py \
