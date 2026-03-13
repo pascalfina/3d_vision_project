@@ -1,0 +1,131 @@
+seed: 42
+
+data:
+  root_dir: "/home/yang/990Pro/scannet_seqs/data"
+  temporal: False
+  img_step: 25
+  resize_w: 448
+  resize_h: 336
+  patch_w: 32
+  patch_h: 24
+  gt_patch: "gt_patch_anno/patch_anno_24_32"
+  gt_patch_th: 0.7
+  feature_2D_name: "features_2D/dinov2_24_32"
+  inference_step: 25
+  img_encoding:
+    use_feature: True
+    img_rotate: False
+    patch_w: 32
+    patch_h: 24
+  cross_scene:
+    use_cross_scene: True
+    num_scenes: 9 # number of scenes 
+    num_negative_samples: -1 # number of negative samples 
+    use_tf_idf: False
+  scene_graph:
+    obj_img_patch: "Features3D/obj_dinov2_top10_l3"
+    obj_topk: 10
+    obj_patch_num: 100
+
+# for scene graph encoder
+sgaligner:
+  seed: 42
+  model_name    : 'sgaligner'
+  modules       : ['point', 'gat', 'rel', 'img_patch']
+  use_predicted : False
+  registration  : False
+  scan_type     : 'scan'
+  preprocess :
+    pc_resolutions      : [64, 128, 256, 512]
+    subscenes_per_scene : 1
+    filter_segment_size : 512
+    min_obj_points      : 50
+    anchor_type_name    : '' 
+
+  model :
+    rel_dim             : 9
+    attr_dim            : 164
+    img_patch_feat_dim  : 1536
+    img_emb_dim: 256
+    alignment_thresh    : 0.4
+    multi_view_aggregator: 'max'
+
+  pc_res: 512
+  use_pretrained: False
+
+# for 2D-3D object match
+model:
+  # GCVit backbone
+  backbone: 
+    # to be read in code from env varia, relative to VLSG_SPACE
+    use_pretrained: True
+    cfg_file: "./src/models/GCVit/configs/gcvit/cascade_mask_rcnn_gcvit_tiny_3x_coco.py"
+    pretrained: "./checkpoint/GCVit/gcvit_1k_tiny.pth.tar"
+    num_reduce: 0 # should be log2(resize_w/(32*patch_w))
+    backbone_dim: 1536 # fixed
+  # patch feature encoder
+  patch:
+    hidden_dims: [512, 512, 512] # last is the out dim
+    gcn_layers: 0
+    encoder_dim: 400
+  # 3D obj embedding encoder
+  obj:
+    embedding_dim: 556 # fixed
+    embedding_hidden_dims: [512, 512]
+    encoder_dim: 400
+  other:
+    drop: 0.0
+
+# for training loss
+# for training
+train:
+  batch_size: 32
+  num_workers: 16
+  use_pretrained: False
+  log_steps: 1
+  snapshot_steps: 1
+  optim:
+    lr: 0.0011
+    scheduler: "step"
+    lr_decay: 0.95
+    lr_decay_steps: 10500
+    lr_min: 0.0005
+    T_max: 1000
+    T_mult: 1
+    weight_decay: 0.000001
+    max_epoch: 10500
+    free_backbone_epoch: 10500 # freeze backbone until certain epochs
+    free_sgaligner_epoch: -1 # freeze sgaligner until certain epochs
+    grad_acc_steps: 1
+  loss:
+    use_temporal: False
+    loss_type: "ICLLossBothSidesSumOutLog"
+    alpha: 0.5
+    temperature: 0.1
+    margin: 0.5
+  data_aug:
+    use_aug: True
+    img:
+      rotation: 60.0
+      horizontal_flip: 0.5
+      vertical_flip: 0.5
+      color: 0.3
+    use_aug_3D: True
+    pcs:
+      granularity: [0.05, 0.2, 0.4]
+      magnitude: [0.2, 0.4, 0.4]
+# for validation
+val:
+  batch_size: 16
+  num_workers: 16
+  room_retrieval:
+    epsilon_th: 0.8
+    method_name: "SGA_PAGRI_E15_scannet_X10"
+other:
+  use_resume: True
+  # to be read in code from env varia, relative to VLSG_TRAINING_OUT_DIR
+  resume_folder: "" # to be read in code from env varia
+  resume: "./week13/SGAligner_PAGRI_scannet/epoch-15.pth.tar"
+
+# mode
+mode: "train"
