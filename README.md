@@ -84,6 +84,391 @@ After installing the dependencies, verify your environment:
   *(Ensure the GPU is detected and available for computation.)*
 
 
+## 🖥️ Cluster Setup (ETH Student Cluster, Recommended)
+
+This section documents the exact workflow that we used to get this repository running on the ETH student cluster. It is intentionally more detailed than the generic installation guide above, because the cluster setup had a few important pitfalls:
+
+- `requirements.txt` is not reliable as-is on the student cluster.
+- `/home` and `/work/scratch` have different quota bottlenecks.
+- CUDA extension builds must happen on a GPU node with a recent enough CUDA toolchain.
+- this private repository already vendors the formerly nested dependencies, so collaborators should **not** use a submodule-based setup anymore.
+
+If you are using **this private repository**, prefer the instructions in this section over the generic upstream setup.
+
+### 0. What Is Different in This Private Repository?
+
+This repository differs from the original upstream checkout in two important ways:
+
+1. Third-party dependencies are already **vendored into the main repository**.
+   - You do **not** need `git submodule update --init --recursive`.
+   - You should clone this repo as a normal Git repository.
+2. Several compatibility fixes that were needed on the cluster are already included in the codebase.
+   - safer attention backend fallbacks (`sdpa` / `naive`)
+   - compatibility fixes for the Gaussian Splatting camera and renderer APIs
+   - compatibility fixes for TRELLIS path resolution
+   - cluster helper scripts such as [`scripts/activate_objectx_env.sh`](scripts/activate_objectx_env.sh), [`run.sh`](run.sh), and [`run_all.sh`](run_all.sh)
+
+### 1. Storage, Quotas, and Where to Put Things
+
+Before you install anything, be aware of the cluster storage limits. The main lessons from our setup were:
+
+- `/home` is small and easy to fill up with virtual environments and pip caches.
+- `/work/scratch/$USER` is the correct place for the repository, data, and outputs.
+- `/work/scratch/$USER` is limited by **both** total size **and** file count.
+
+At the time of writing, the relevant limits we hit were:
+
+- `/home`: approximately **20 GB**
+- `/work/scratch/$USER`: approximately **100 GB**
+- `/work/scratch/$USER`: approximately **100000 files**
+
+Practical consequences:
+
+- keep the repository under `/work/scratch/$USER`
+- keep only **one** active virtual environment for this project
+- disable the pip cache
+- use `/tmp` for temporary build files
+- avoid creating duplicate environments (`.venv`, `.venv_objx`, `~/venvs/...`) unless you really need them
+
+Useful quota checks:
+
+```bash
+quota -s
+df -h /home/$USER
+du -sh /work/scratch/$USER 2>/dev/null
+find /work/scratch/$USER -xdev | wc -l
+```
+
+Useful cleanup commands:
+
+```bash
+rm -rf ~/.cache/pip
+rm -rf /tmp/pip-* /tmp/pip-install-* /tmp/pip-req-build-* /tmp/tmp*
+```
+
+### 2. Clone the Repository Correctly
+
+Because this repository uses Git LFS for `assets/teaser.png`, install Git LFS first and pull the LFS objects after cloning:
+
+```bash
+cd /work/scratch/$USER
+git lfs install
+git clone git@github.com:pascalfina/3d_vision_project.git object-x
+cd object-x
+git lfs pull
+```
+
+Important notes:
+
+- Do **not** use `--recurse-submodules`.
+- If a push later fails with a message about a missing LFS object, fetch the missing objects from upstream first:
+
+```bash
+git lfs fetch upstream --all
+git push origin main
+```
+
+### 3. Use the Login Node and GPU Nodes for Different Jobs
+
+Use the **login node** for:
+
+- cloning the repo
+- downloading datasets and metadata
+- light preprocessing
+- editing config files
+
+Use a **GPU node** for:
+
+- building CUDA extensions
+- DINOv2 feature extraction
+- any training or inference
+
+We used the following interactive GPU allocation:
+
+```bash
+srun -A 3dv --qos=3dv-team35 -p jobs -t 24:00:00 --pty bash --login
+```
+
+Once you are on the node, check that a GPU is visible:
+
+```bash
+hostname
+nvidia-smi
+```
+
+### 4. Recommended Environment Layout
+
+The environment we ended up using successfully is:
+
+- repository: `/work/scratch/$USER/object-x`
+- environment: `/work/scratch/$USER/object-x/.venv_objx`
+- dataset root: `/work/scratch/$USER/objectx-data`
+- model/output root: `/work/scratch/$USER`
+- temporary build files: `/tmp/$USER-objectx`
+
+Create the environment:
+
+```bash
+cd /work/scratch/$USER/object-x
+python3.9 -m venv .venv_objx
+source .venv_objx/bin/activate
+python -m pip install --upgrade pip setuptools wheel ninja
+```
+
+Set the build/runtime defaults:
+
+```bash
+export TMPDIR=/tmp/$USER-objectx
+mkdir -p "$TMPDIR"
+export PIP_NO_CACHE_DIR=1
+export PIP_CONFIG_FILE=/dev/null
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONNOUSERSITE=1
+```
+
+### 5. Why We Do Not Install `requirements.txt` Blindly
+
+On the student cluster, `pip install -r requirements.txt` caused multiple dependency conflicts and quota problems. The biggest ones we hit were:
+
+- Jupyter / `jsonschema` resolver conflicts
+- old MKL / NumPy pins
+- conflicting `attrs` versions
+- large optional packages that were not required for the Object-X core path
+
+For that reason, this repository includes:
+
+- [`requirements.cluster.txt`](requirements.cluster.txt)
+- [`requirements.runtime.txt`](requirements.runtime.txt)
+
+The cluster/runtime files are the safer starting point for this setup.
+
+### 6. Install the Core Python Stack
+
+Install the base packages first:
+
+```bash
+cd /work/scratch/$USER/object-x
+source .venv_objx/bin/activate
+
+python -m pip install --no-cache-dir numpy==1.23.5 scipy==1.9.3 attrs==25.4.0
+python -m pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0
+python -m pip install --no-cache-dir xformers==0.0.32.post2 torch-geometric spconv-cu121==2.3.8 cumm-cu121==0.7.11
+python -m pip install --no-cache-dir pccm ccimport pybind11 fire portalocker lark termcolor tqdm requests aiohttp psutil pyparsing ipython ipdb
+python -m pip install --no-cache-dir --no-deps -r requirements.runtime.txt
+```
+
+### 7. Always Activate Through the Helper Script
+
+After the environment exists, prefer:
+
+```bash
+cd /work/scratch/$USER/object-x
+source scripts/activate_objectx_env.sh
+```
+
+This script already does the things that mattered for us on the cluster:
+
+- loads `cuda/12.8`
+- activates `.venv_objx` (or `.venv` as a fallback)
+- unsets `LD_LIBRARY_PATH`
+- sets `TMPDIR`
+- sets `CUDA_HOME`
+- sets the safer attention defaults:
+  - `ATTN_BACKEND=sdpa`
+  - `SPARSE_ATTN_BACKEND=naive`
+- adds the repository and Gaussian Splatting code to `PYTHONPATH`
+
+Why this matters:
+
+- keeping an old `LD_LIBRARY_PATH` around caused PyTorch CUDA loader failures for us
+- using the safer attention backends avoided invalid-kernel crashes on our newer GPU architecture
+
+### 8. Build the CUDA Extensions on a GPU Node
+
+Do this only on a GPU node:
+
+```bash
+cd /work/scratch/$USER/object-x
+source scripts/activate_objectx_env.sh
+
+python -m pip install --no-cache-dir --no-build-isolation dependencies/gaussian-splatting/submodules/simple-knn
+python -m pip install --no-cache-dir --no-build-isolation dependencies/gaussian-splatting/submodules/diff-gaussian-rasterization
+```
+
+Then verify the full environment:
+
+```bash
+./run.sh --action check_env
+python -c "import src.trainval.train_latent_autoencoder; print('latent train import ok')"
+```
+
+### 9. TRELLIS Checkpoint Download
+
+The latent autoencoder depends on the TRELLIS checkpoint tree. Download it once to `SCRATCH`:
+
+```bash
+cd /work/scratch/$USER/object-x
+source .venv_objx/bin/activate
+
+python - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="JeffreyXiang/TRELLIS-image-large",
+    local_dir=f"/work/scratch/{os.environ['USER']}/TRELLIS-image-large",
+    resume_download=True,
+)
+PY
+```
+
+The current code expects:
+
+```bash
+/work/scratch/$USER/TRELLIS-image-large
+```
+
+and the `SCRATCH` environment variable should point to `/work/scratch/$USER`.
+
+### 10. Dataset Layout on the Cluster
+
+For the real dataset layout, follow the dataset generation section below. The important cluster-specific recommendation is to keep the root under scratch:
+
+```bash
+mkdir -p /work/scratch/$USER/objectx-data/{files,scenes}
+export DATA_ROOT_DIR=/work/scratch/$USER/objectx-data
+```
+
+We validated the pipeline first with a **tiny 3RScan smoke-test subset** before moving to the full dataset. This was useful because it let us test the entire training stack without waiting for a full data download.
+
+For the full setup you still need:
+
+1. **3RScan**
+2. **3DSSG**
+3. **Additional Meta Files**
+4. optional ScanNet / SceneGraphFusion data if you work on the ScanNet path
+
+### 11. Minimal 3RScan Smoke-Test Subset
+
+We used the official 3RScan toolkit to bootstrap a tiny sample:
+
+```bash
+cd /work/scratch/$USER
+git clone https://github.com/WaldJohannaU/3RScan.git 3RScan-toolkit
+cd 3RScan-toolkit
+bash setup.sh
+```
+
+This downloads:
+
+- `3RScan.json`
+- `objects.json`
+- `relationships.json`
+- one reference scan and one rescan
+
+We then linked that into our `DATA_ROOT_DIR` and added the missing metadata files from the official Object-X "Additional Meta Files" folder.
+
+### 12. Preprocessing Notes
+
+The preprocessing pipeline is split across CPU-friendly and GPU-heavy steps.
+
+Recommended split:
+
+- login node / light shell:
+  - metadata checks
+  - symlink creation
+  - light preprocessing
+- GPU node:
+  - DINOv2 feature generation
+  - any CUDA builds
+
+For the VLSG preprocessing, the environment that worked for us was:
+
+```bash
+cd /work/scratch/$USER/object-x
+source .venv_objx/bin/activate
+
+export DATA_ROOT_DIR=/work/scratch/$USER/objectx-data
+export Data_ROOT_DIR="$DATA_ROOT_DIR"
+export VLSG_SPACE=/work/scratch/$USER/object-x/dependencies/VLSG
+export PYTHONPATH="$VLSG_SPACE"
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONNOUSERSITE=1
+```
+
+Then run the preprocessing steps from the dataset section below.
+
+### 13. Running the Project
+
+We added a small runner abstraction to make the cluster workflow less fragile.
+
+Main files:
+
+- [`scripts/activate_objectx_env.sh`](scripts/activate_objectx_env.sh)
+- [`run.sh`](run.sh)
+- [`run_all.sh`](run_all.sh)
+- [`configs/objectx_runner.env`](configs/objectx_runner.env)
+- [`configs/objectx_train_params.env`](configs/objectx_train_params.env)
+
+Typical workflow:
+
+```bash
+cd /work/scratch/$USER/object-x
+source scripts/activate_objectx_env.sh
+export DATA_ROOT_DIR=/work/scratch/$USER/objectx-data
+export SCRATCH=/work/scratch/$USER
+
+./run.sh --action check_env
+./run.sh --action train_latent_autoencoder
+```
+
+For Slurm batch mode:
+
+```bash
+./run.sh --mode sbatch --action train_latent_autoencoder
+```
+
+The helper config [`configs/objectx_train_params.env`](configs/objectx_train_params.env) lets you override common training settings such as the maximum number of epochs. For quick smoke tests, we used:
+
+```bash
+TRAIN_MAX_EPOCH="10"
+```
+
+### 14. Common Errors We Hit and How We Fixed Them
+
+Below is a summary of the issues we actually encountered on the cluster.
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `Disk quota exceeded` under `/home/...` | environment and pip cache were stored in `/home` | move the repo and environment to `/work/scratch/$USER`, delete `~/.cache/pip`, keep only one environment |
+| `Disk quota exceeded` under `/work/scratch/...` even though plenty of GB were free | `/work/scratch` also has a file-count quota | do not create duplicate environments, disable pip cache, use `/tmp` for temporary build files, monitor `find /work/scratch/$USER -xdev | wc -l` |
+| `ResolutionImpossible` when installing `requirements.txt` | upstream requirements include conflicting Jupyter / MKL / legacy pins | use `requirements.runtime.txt` / `requirements.cluster.txt` and install the core stack explicitly |
+| `ImportError: ... libc10_cuda.so: undefined symbol: cudaGetDriverEntryPointByVersion` | wrong CUDA runtime was loaded through `LD_LIBRARY_PATH` | unset `LD_LIBRARY_PATH`; use `scripts/activate_objectx_env.sh` instead of ad-hoc environment variables |
+| `nvcc fatal: Unsupported gpu architecture 'compute_120'` | the system `nvcc` was too old for the GPU architecture we were using | build on a GPU node and load `cuda/12.8` |
+| `Directory 'dependencies/gaussian-splatting' is not installable` | the parent folder is not a Python package | install `simple-knn` and `diff-gaussian-rasterization` separately |
+| `ModuleNotFoundError: diff_gaussian_rasterization` or `simple_knn` | CUDA extensions were not built yet | install the two subpackages explicitly on a GPU node |
+| `No module named 'plotly'` / `No module named 'dash'` when importing Open3D | Open3D tried to load optional Plotly visualization modules | either install the optional Python packages or strip the Plotly/Dash visualization path if you only need core geometry functionality |
+| `RuntimeError: No CUDA devices available` during DINOv2 feature generation | DINOv2 preprocessing was started on a login node | run the feature generation scripts on a GPU node |
+| `FileNotFoundError` for `scannet8_relationships.txt`, `relationships.txt`, `scannet40_classes.txt`, etc. | the Additional Meta Files were missing from `DATA_ROOT_DIR/files` | download the official Object-X Additional Meta Files and place them under `files/` |
+| `ValueError: num_samples=0` in the toy subset | the tiny smoke-test subset did not contain the full expected set of preprocessing outputs | use the repo with the current compatibility fixes and treat the toy subset as a pipeline smoke test, not a final training setup |
+| `Git LFS upload failed` when pushing the private repo | an older LFS object from the imported history was missing locally | run `git lfs fetch upstream --all` and push again |
+
+### 15. Recommended Order of Operations
+
+If you want the shortest path to a working setup on the cluster, this is the order we recommend:
+
+1. clone this private repo with Git LFS
+2. create `.venv_objx` on `/work/scratch/$USER`
+3. install the core Python stack
+4. build the two Gaussian Splatting CUDA extensions on a GPU node
+5. run `./run.sh --action check_env`
+6. download TRELLIS to `/work/scratch/$USER/TRELLIS-image-large`
+7. prepare `DATA_ROOT_DIR`
+8. run the required preprocessing
+9. start with a short smoke-test run (`TRAIN_MAX_EPOCH="10"`)
+10. only then move to longer jobs and the full dataset
+
+
 ## 🪑 Dataset Generation
 
 ### 1. Downloading the Datasets
