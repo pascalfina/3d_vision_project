@@ -10,7 +10,7 @@ In order to train the structured latent representation, make sure the env `SCRAT
 
 Then run the following command:
 ```bash
-bash scripts/trainval/train_latent_autoencoder.sh
+bash scripts/train_val/train_latent_autoencoder.sh
 ```
 
 > **Important:** The next step assumes the final snapshot is saved to `pretrained/u3dgs_pretrained.pth.tar` otherwise set `inference.slat_model_path` to the path of the snapshot for the next step.
@@ -30,7 +30,7 @@ In order to train the U-3DGS representation, make sure the env `SCRATCH` is set 
 
 Then run the following command:
 ```bash
-bash scripts/trainval/train.sh \
+bash scripts/train_val/train.sh \
     autoencoder.encoder.voxel.channels=[16,32,64] # Res 16
 ```
 

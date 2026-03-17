@@ -257,7 +257,88 @@ python -m pip install --no-cache-dir pccm ccimport pybind11 fire portalocker lar
 python -m pip install --no-cache-dir --no-deps -r requirements.runtime.txt
 ```
 
-### 7. Always Activate Through the Helper Script
+### 7. Build `flash-attn` for ETH Blackwell GPUs (`sm_120`)
+
+On the ETH student cluster we ended up needing a **source build** of `flash-attn` on a GPU node to get a wheel that actually targets our GPU architecture. The important check is that the build log contains:
+
+```text
+-gencode arch=compute_120,code=sm_120
+```
+
+You can confirm the GPU capability on the node with:
+
+```bash
+python - <<'PY'
+import torch
+print("gpu:", torch.cuda.get_device_name(0))
+major, minor = torch.cuda.get_device_capability(0)
+print("capability:", (major, minor))
+print("target:", f"sm_{major}{minor}")
+PY
+```
+
+The build sequence that worked for us was:
+
+```bash
+cd /work/scratch/$USER/object-x
+source .venv_objx/bin/activate
+
+source /etc/profile.d/modules.sh 2>/dev/null || true
+module purge
+module load cuda/12.8
+
+unset LD_LIBRARY_PATH
+export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
+export PATH="$CUDA_HOME/bin:$PATH"
+
+export SRC_PARENT=/tmp/$USER-flashattn
+export SRC_DIR=$SRC_PARENT/src
+export BUILD_TMP=$SRC_PARENT/buildtmp
+
+rm -rf "$SRC_PARENT"
+mkdir -p "$BUILD_TMP"
+
+git clone --branch v2.8.2 --depth 1 https://github.com/Dao-AILab/flash-attention.git "$SRC_DIR"
+cd "$SRC_DIR"
+
+export TMPDIR="$BUILD_TMP"
+export PIP_NO_CACHE_DIR=1
+export MAX_JOBS=2
+export CMAKE_BUILD_PARALLEL_LEVEL=2
+export NVCC_THREADS=2
+export FORCE_CUDA=1
+export FLASH_ATTN_CUDA_ARCHS="120"
+export TORCH_CUDA_ARCH_LIST="12.0;12.0+PTX"
+
+python - <<'PY'
+from pathlib import Path
+import re
+
+p = Path("setup.py")
+s = p.read_text()
+s2 = re.sub(
+    r'os\\.getenv\\("FLASH_ATTN_CUDA_ARCHS",\\s*"[^"]*"\\)',
+    'os.getenv("FLASH_ATTN_CUDA_ARCHS", "120")',
+    s,
+)
+if s != s2:
+    p.write_text(s2)
+    print("patched setup.py default arch -> 120")
+else:
+    print("setup.py arch default already compatible")
+PY
+
+python -m pip uninstall -y flash-attn
+python -m pip install -v --no-cache-dir --no-build-isolation . 2>&1 | tee /work/scratch/$USER/object-x/flash_attn_build.log
+```
+
+Then verify the build log:
+
+```bash
+rg -n "compute_120|sm_120" /work/scratch/$USER/object-x/flash_attn_build.log
+```
+
+### 8. Always Activate Through the Helper Script
 
 After the environment exists, prefer:
 
@@ -273,17 +354,52 @@ This script already does the things that mattered for us on the cluster:
 - unsets `LD_LIBRARY_PATH`
 - sets `TMPDIR`
 - sets `CUDA_HOME`
-- sets the safer attention defaults:
-  - `ATTN_BACKEND=sdpa`
-  - `SPARSE_ATTN_BACKEND=naive`
 - adds the repository and Gaussian Splatting code to `PYTHONPATH`
 
 Why this matters:
 
 - keeping an old `LD_LIBRARY_PATH` around caused PyTorch CUDA loader failures for us
-- using the safer attention backends avoided invalid-kernel crashes on our newer GPU architecture
 
-### 8. Build the CUDA Extensions on a GPU Node
+### 9. Attention Backends We Recommend on the Cluster
+
+Once `flash-attn` is installed, the dense attention path should resolve to `flash_attn` automatically.
+
+For the ETH Blackwell GPUs we tested on, the sparse `xformers` attention path still crashed with:
+
+```text
+CUDA error (.../xformers/third_party/flash-attention/hopper/flash_fwd_launch_template.h:188): invalid argument
+```
+
+The stable runtime compromise for us was therefore:
+
+- dense attention: `flash_attn`
+- sparse attention: `sdpa`
+
+Use that by exporting:
+
+```bash
+export SPARSE_ATTN_BACKEND=sdpa
+```
+
+You can verify the active backends with:
+
+```bash
+python - <<'PY'
+import src.modules.attention as a
+import src.modules.sparse as s
+print("dense backend:", a.BACKEND)
+print("sparse backend:", s.ATTN)
+PY
+```
+
+On our working cluster setup this prints:
+
+```text
+dense backend: flash_attn
+sparse backend: sdpa
+```
+
+### 10. Build the CUDA Extensions on a GPU Node
 
 Do this only on a GPU node:
 
@@ -302,7 +418,7 @@ Then verify the full environment:
 python -c "import src.trainval.train_latent_autoencoder; print('latent train import ok')"
 ```
 
-### 9. TRELLIS Checkpoint Download
+### 11. TRELLIS Checkpoint Download
 
 The latent autoencoder depends on the TRELLIS checkpoint tree. Download it once to `SCRATCH`:
 
@@ -330,7 +446,7 @@ The current code expects:
 
 and the `SCRATCH` environment variable should point to `/work/scratch/$USER`.
 
-### 10. Dataset Layout on the Cluster
+### 12. Dataset Layout on the Cluster
 
 For the real dataset layout, follow the dataset generation section below. The important cluster-specific recommendation is to keep the root under scratch:
 
@@ -348,7 +464,7 @@ For the full setup you still need:
 3. **Additional Meta Files**
 4. optional ScanNet / SceneGraphFusion data if you work on the ScanNet path
 
-### 11. Minimal 3RScan Smoke-Test Subset
+### 13. Minimal 3RScan Smoke-Test Subset
 
 We used the official 3RScan toolkit to bootstrap a tiny sample:
 
@@ -368,7 +484,7 @@ This downloads:
 
 We then linked that into our `DATA_ROOT_DIR` and added the missing metadata files from the official Object-X "Additional Meta Files" folder.
 
-### 12. Preprocessing Notes
+### 14. Preprocessing Notes
 
 The preprocessing pipeline is split across CPU-friendly and GPU-heavy steps.
 
@@ -398,7 +514,7 @@ export PYTHONNOUSERSITE=1
 
 Then run the preprocessing steps from the dataset section below.
 
-### 13. Running the Project
+### 15. Running the Project
 
 We added a small runner abstraction to make the cluster workflow less fragile.
 
@@ -434,7 +550,7 @@ The helper config [`configs/objectx_train_params.env`](configs/objectx_train_par
 TRAIN_MAX_EPOCH="10"
 ```
 
-### 14. Common Errors We Hit and How We Fixed Them
+### 16. Common Errors We Hit and How We Fixed Them
 
 Below is a summary of the issues we actually encountered on the cluster.
 
@@ -445,6 +561,8 @@ Below is a summary of the issues we actually encountered on the cluster.
 | `ResolutionImpossible` when installing `requirements.txt` | upstream requirements include conflicting Jupyter / MKL / legacy pins | use `requirements.runtime.txt` / `requirements.cluster.txt` and install the core stack explicitly |
 | `ImportError: ... libc10_cuda.so: undefined symbol: cudaGetDriverEntryPointByVersion` | wrong CUDA runtime was loaded through `LD_LIBRARY_PATH` | unset `LD_LIBRARY_PATH`; use `scripts/activate_objectx_env.sh` instead of ad-hoc environment variables |
 | `nvcc fatal: Unsupported gpu architecture 'compute_120'` | the system `nvcc` was too old for the GPU architecture we were using | build on a GPU node and load `cuda/12.8` |
+| `flash-attn` builds, but the log only shows `sm_80` / `sm_90` | the build did not actually target the Blackwell GPU architecture | build from source on a GPU node, force `FLASH_ATTN_CUDA_ARCHS="120"`, and verify that the log contains `compute_120` / `sm_120` |
+| `CUDA error (... xformers ... flash_fwd_launch_template.h:188): invalid argument` | sparse `xformers` attention was unstable on our `sm_120` cluster GPUs | keep dense `flash_attn`, export `SPARSE_ATTN_BACKEND=sdpa`, and only revisit sparse `xformers` after moving to a newer Torch/xFormers stack |
 | `Directory 'dependencies/gaussian-splatting' is not installable` | the parent folder is not a Python package | install `simple-knn` and `diff-gaussian-rasterization` separately |
 | `ModuleNotFoundError: diff_gaussian_rasterization` or `simple_knn` | CUDA extensions were not built yet | install the two subpackages explicitly on a GPU node |
 | `No module named 'plotly'` / `No module named 'dash'` when importing Open3D | Open3D tried to load optional Plotly visualization modules | either install the optional Python packages or strip the Plotly/Dash visualization path if you only need core geometry functionality |
@@ -453,7 +571,7 @@ Below is a summary of the issues we actually encountered on the cluster.
 | `ValueError: num_samples=0` in the toy subset | the tiny smoke-test subset did not contain the full expected set of preprocessing outputs | use the repo with the current compatibility fixes and treat the toy subset as a pipeline smoke test, not a final training setup |
 | `Git LFS upload failed` when pushing the private repo | an older LFS object from the imported history was missing locally | run `git lfs fetch upstream --all` and push again |
 
-### 15. Recommended Order of Operations
+### 17. Recommended Order of Operations
 
 If you want the shortest path to a working setup on the cluster, this is the order we recommend:
 
@@ -539,7 +657,7 @@ bash scripts/voxel_annotations/voxelise_features.sh --split {split}
 Generate Gaussian splat annotations using the following commands:
 ```bash
 bash scripts/gs_annotations/map_to_colmap.sh --split {split}
-bash scripts/gs_annotations/annotate_gaussian.sh --split {split}
+bash scripts/gs_annotations/annotate_gaussians.sh --split {split}
 ```
 
 ---
@@ -575,7 +693,7 @@ bash scripts/voxel_annotations/voxelise_features_scannet.sh
 To generate Gaussian splat annotations, execute:
 ```bash
 bash scripts/gs_annotations/map_to_colmap_scannet.sh
-bash scripts/gs_annotations/annotate_gaussian_scannet.sh
+bash scripts/gs_annotations/annotate_gaussians_scannet.sh
 ```
 
 ---
