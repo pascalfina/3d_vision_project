@@ -32,8 +32,10 @@ def write_cameras_txt(intrinsics: Dict[str, np.ndarray], scan_id: str) -> None:
     with open(os.path.join(cameras_dir, "cameras.txt"), "w") as f:
         f.write("# Camera list with one line of data per camera:\n")
         f.write("#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
+        width = int(round(float(intrinsics["width"])))
+        height = int(round(float(intrinsics["height"])))
         f.write(
-            f"1 PINHOLE {intrinsics['width']} {intrinsics['height']} "
+            f"1 PINHOLE {width} {height} "
             f"{intrinsics['intrinsic_mat'][0,0]} {intrinsics['intrinsic_mat'][1,1]} "
             f"{intrinsics['intrinsic_mat'][0, 2]} {intrinsics['intrinsic_mat'][1, 2]}\n"
         )
@@ -62,9 +64,11 @@ def write_images_txt(
         scan_id (str): Scan identifier.
     """
 
-    images_dir = os.path.join(output_dir, scan_id, "sparse", "0")
+    sparse_dir = os.path.join(output_dir, scan_id, "sparse", "0")
+    images_dir = os.path.join(output_dir, scan_id, "images")
+    os.makedirs(sparse_dir, exist_ok=True)
     os.makedirs(images_dir, exist_ok=True)
-    with open(os.path.join(images_dir, "images.txt"), "w") as f:
+    with open(os.path.join(sparse_dir, "images.txt"), "w") as f:
         f.write("# Image list with one line of data per image:\n")
         f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, IMAGE_PATH\n")
 
@@ -78,7 +82,11 @@ def write_images_txt(
             full_path = osp.join(
                 root_dir, "scenes", scan_id, "sequence", f"frame-{path}.color.jpg"
             )
-            f.write(f"{idx+1} {qw} {qx} {qy} {qz} {tx} {ty} {tz} 1 {full_path}\n")
+            image_name = osp.basename(full_path)
+            link_path = osp.join(images_dir, image_name)
+            if not osp.lexists(link_path):
+                os.symlink(full_path, link_path)
+            f.write(f"{idx+1} {qw} {qx} {qy} {qz} {tx} {ty} {tz} 1 {image_name}\n")
             f.write("0.0 0.0 -1\n")
 
 
@@ -206,9 +214,8 @@ def map_to_colmap(data_dir: str, scan_id: str) -> None:
     )
     intrinsics = scan3r.load_intrinsics(osp.join(data_dir, "scenes"), scan_id)
     frame_idxs = scan3r.load_frame_idxs(osp.join(data_dir, "scenes"), scan_id)
-    image_poses = scan3r.load_frame_poses(
-        osp.join(data_dir, "scenes"), scan_id, frame_idxs=frame_idxs
-    )
+    # load_frame_poses/load_pose append "scenes" internally, so pass the data root here
+    image_poses = scan3r.load_frame_poses(data_dir, scan_id, frame_idxs=frame_idxs)
     write_cameras_txt(intrinsics, scan_id)
     write_images_txt(image_poses, frame_idxs, scan_id)
     write_points3D_txt(mesh_file, scan_id)

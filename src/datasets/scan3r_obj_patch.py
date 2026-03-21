@@ -476,7 +476,8 @@ class Scan3RPatchObjectDataset(data.Dataset):
         for scan in self.all_scans_split:
             if scan not in scans_same_scene:
                 candidate_scans.append(scan)
-        sampled_scans = random.sample(candidate_scans, num_scenes)
+        sample_size = min(num_scenes, len(candidate_scans))
+        sampled_scans = random.sample(candidate_scans, sample_size)
         return sampled_scans
 
     def sample_candidate_scenes_for_scans(
@@ -491,8 +492,9 @@ class Scan3RPatchObjectDataset(data.Dataset):
             for scan in self.all_scans_split
             if self.scans2refscans[scan] not in ref_scans
         ]
+        sample_size = min(num_scenes, len(additional_candidate_sample_pool))
         additional_candidates = random.sample(
-            additional_candidate_sample_pool, num_scenes
+            additional_candidate_sample_pool, sample_size
         )
         for scan_id in scan_ids:
             candidate_scans[scan_id] = list(set(additional_candidates))

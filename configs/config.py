@@ -1,3 +1,4 @@
+import ast
 import functools
 import os
 import os.path as osp
@@ -329,7 +330,11 @@ def update_configs(
     config = Config(**data)
     for arg in args:
         key, value = arg.split("=")
-        value = eval(value)
+        try:
+            value = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            # Allow bare string overrides like /path/to/checkpoint.pth.tar.
+            value = value
         rsetattr(config, key, value)
 
     if do_ensure_dir:

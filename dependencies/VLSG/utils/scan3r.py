@@ -5,6 +5,7 @@ from glob import glob
 from plyfile import PlyData, PlyElement
 from scipy.spatial.transform import Rotation as R
 import pickle
+import gzip
 
 def get_scan_ids(dirname, split):
     filepath = osp.join(dirname, '{}_scans.txt'.format(split))
@@ -156,15 +157,25 @@ def load_patch_feature_scans(data_root_dir, feature_folder, scan_id, skip=None):
     return features_scan_step
 
 def load_pkl_data(filename):
-    with open(filename, 'rb') as handle:
+    gz_filename = f"{filename}.gz"
+    opener = gzip.open if osp.exists(gz_filename) and not osp.exists(filename) else open
+    target = gz_filename if osp.exists(gz_filename) and not osp.exists(filename) else filename
+    with opener(target, 'rb') as handle:
         data_dict = pickle.load(handle)
     return data_dict
 
 
 def load_gt_2D_anno(data_root_dir, scan_id, skip=None):
-    import cv2
     anno_imgs = {}
     frame_idxs = load_frame_idxs(osp.join(data_root_dir, "scenes"), scan_id, skip)
+    pkl_file = osp.join(data_root_dir, "files", 'gt_projection', 'obj_id_pkl', scan_id + ".pkl")
+    if osp.exists(pkl_file) or osp.exists(f"{pkl_file}.gz"):
+        anno_imgs_all = load_pkl_data(pkl_file)
+        for frame_idx in frame_idxs:
+            anno_imgs[frame_idx] = anno_imgs_all[frame_idx]
+        return anno_imgs
+
+    import cv2
     anno_folder = osp.join(data_root_dir, "files", 'gt_projection/obj_id', scan_id)
     for frame_idx in frame_idxs:
         anno_img_file = osp.join(anno_folder, "frame-{}.jpg".format(frame_idx))

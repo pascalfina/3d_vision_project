@@ -84,11 +84,14 @@ class Scan3RSceneGraphDataset(data.Dataset):
                 self.scans2refscans[scan["reference"]] = ref_scan_id
 
         self.resplit = "resplit_" if self.cfg.data.resplit else ""
-        ref_scans_split = np.genfromtxt(
-            osp.join(
-                self.scans_files_dir, "{}_{}scans.txt".format(self.split, self.resplit)
-            ),
-            dtype=str,
+        ref_scans_split = np.atleast_1d(
+            np.genfromtxt(
+                osp.join(
+                    self.scans_files_dir,
+                    "{}_{}scans.txt".format(self.split, self.resplit),
+                ),
+                dtype=str,
+            )
         )
         self.all_scans_split = []
         for ref_scan in ref_scans_split:

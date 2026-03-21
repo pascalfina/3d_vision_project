@@ -93,7 +93,18 @@ class SceneGraph2UnstructuredLatentPipeline:
         return torch.cat((sparse_splat.dense(), dense_splat), dim=1)
 
     def _sparsify(self, dense_splat):
-        coords = torch.nonzero(dense_splat[:, -1] > 0.1, as_tuple=False)
+        occupancy_threshold = float(
+            os.environ.get("OBJECTX_INFER_OCC_THRESHOLD", "0.1")
+        )
+        max_voxels = int(os.environ.get("OBJECTX_INFER_MAX_VOXELS", "0"))
+        occupancy = dense_splat[:, -1]
+        coords = torch.nonzero(occupancy > occupancy_threshold, as_tuple=False)
+        if max_voxels > 0 and coords.shape[0] > max_voxels:
+            scores = occupancy[
+                coords[:, 0], coords[:, 1], coords[:, 2], coords[:, 3]
+            ]
+            keep = torch.topk(scores, k=max_voxels, largest=True, sorted=False).indices
+            coords = coords[keep]
         feats = dense_splat[coords[:, 0], :-1, coords[:, 1], coords[:, 2], coords[:, 3]]
         return SparseTensor(
             coords=coords.int(),
@@ -154,15 +165,46 @@ class SceneGraph2UnstructuredLatentPipeline:
                 means[idx],
                 scales[idx],
             )
-            self.save_render_orbit(
-                [copy.deepcopy(reconstruction[i]) for i in idx],
-                scan_id,
-                means[idx],
-                scales[idx],
-            )
-            self.save_render_orbit_gs(scan_id, obj_ids[idx], means[idx], scales[idx])
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            try:
+                self.save_render_orbit(
+                    [copy.deepcopy(reconstruction[i]) for i in idx],
+                    scan_id,
+                    means[idx],
+                    scales[idx],
+                )
+            except (torch.OutOfMemoryError, RuntimeError) as exc:
+                _LOGGER.warning(
+                    f"Skipping orbit rendering for {scan_id[0]} due to GPU error: {exc}"
+                )
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            if self._get_env_bool("OBJECTX_VIS_SKIP_GS", False):
+                _LOGGER.info(
+                    f"Skipping rendered_gs output for {scan_id[0]} "
+                    "because OBJECTX_VIS_SKIP_GS=1"
+                )
+            else:
+                try:
+                    self.save_render_orbit_gs(
+                        scan_id, obj_ids[idx], means[idx], scales[idx]
+                    )
+                except (torch.OutOfMemoryError, RuntimeError) as exc:
+                    _LOGGER.warning(
+                        f"Skipping rendered_gs output for {scan_id[0]} due to GPU error: {exc}"
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+    def _get_env_bool(self, name, default=False):
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return value.lower() not in {"0", "false", "no", "off", ""}
 
     def save_embedding(self, embedding, means, scales, obj_ids, scan_id):
+        os.makedirs(self.output_dir, exist_ok=True)
         output_path = osp.join(self.output_dir, f"{scan_id[0]}_ulat.npz")
         _LOGGER.info(f"Saving to {output_path}")
         np.savez(
@@ -174,6 +216,7 @@ class SceneGraph2UnstructuredLatentPipeline:
         )
 
     def save_scene(self, reconstruction, scan_id, means, scales):
+        os.makedirs("vis", exist_ok=True)
         def _scale(x):
             i, splat = x
             if splat._xyz.numel() <= 0:
@@ -397,9 +440,9 @@ class SceneGraph2UnstructuredLatentPipeline:
         scene_center = object_positions.mean(axis=0)  # Mean position of objects
 
         # Set camera path parameters
-        num_frames = 120  # Number of frames for a smooth orbit
-        radius = 2.0  # Distance of the camera from the scene center
-        height = 1.0  # Keep the camera at the same height as the scene center
+        num_frames = int(os.environ.get("OBJECTX_VIS_NUM_FRAMES", "120"))
+        radius = float(os.environ.get("OBJECTX_VIS_RADIUS", "2.0"))
+        height = float(os.environ.get("OBJECTX_VIS_HEIGHT", "1.0"))
         angle_step = 2 * np.pi / num_frames  # Step size for rotation
 
         rendered_frames = []
@@ -407,18 +450,24 @@ class SceneGraph2UnstructuredLatentPipeline:
         # Get intrinsics for frustum visualization
         intrinsics = self.dataset.image_intrinsics[scene_id]
         poses = np.stack(list(self.dataset.image_poses[scene_id].values()))
+        render_scale = float(os.environ.get("OBJECTX_VIS_RENDER_SCALE", "1.0"))
+        render_width = max(64, int(round(intrinsics["width"] * render_scale)))
+        render_height = max(64, int(round(intrinsics["height"] * render_scale)))
+        fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
+        fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
 
-        gs_mesh = mesh.splat_to_mesh(
-            splat=copy.deepcopy(representation).to_pt(),
-            Ks=intrinsics["intrinsic_mat"],
-            world_to_cams=poses,
-            width=intrinsics["width"],
-            height=intrinsics["height"],
-            sh_degree_to_use=0,
-            near_plane=0.01,
-            far_plane=100.0,
-        )
-        o3d.io.write_triangle_mesh(f"{output_dir}/{scene_id}_mesh.ply", gs_mesh)
+        if self._get_env_bool("OBJECTX_VIS_EXPORT_MESH", True):
+            gs_mesh = mesh.splat_to_mesh(
+                splat=copy.deepcopy(representation).to_pt(),
+                Ks=intrinsics["intrinsic_mat"],
+                world_to_cams=poses,
+                width=render_width,
+                height=render_height,
+                sh_degree_to_use=0,
+                near_plane=0.01,
+                far_plane=100.0,
+            )
+            o3d.io.write_triangle_mesh(f"{output_dir}/{scene_id}_mesh.ply", gs_mesh)
 
         for i in range(num_frames):
             theta = i * angle_step
@@ -454,10 +503,10 @@ class SceneGraph2UnstructuredLatentPipeline:
 
             # Create camera instance
             viewpoint_camera = build_minicam(
-                width=int(intrinsics["width"]),
-                height=int(intrinsics["height"]),
-                fovy=focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"]),
-                fovx=focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"]),
+                width=render_width,
+                height=render_height,
+                fovy=fovy,
+                fovx=fovx,
                 znear=0.01,
                 zfar=100.0,
                 R=viewmat[:3, :3].T,
@@ -495,15 +544,31 @@ class SceneGraph2UnstructuredLatentPipeline:
     ):
         os.makedirs(output_dir, exist_ok=True)
         scene_id = scene_ids[0]
-        obj_ids = obj_ids if type(obj_ids) == list else [obj_ids]
+        if isinstance(obj_ids, torch.Tensor):
+            obj_ids = obj_ids.detach().cpu().reshape(-1).tolist()
+        elif isinstance(obj_ids, np.ndarray):
+            obj_ids = obj_ids.reshape(-1).tolist()
+        elif not isinstance(obj_ids, list):
+            obj_ids = [obj_ids]
+        obj_ids = [int(obj_id) for obj_id in obj_ids]
 
         # load gaussian splat representation
-        reconstruction = [
-            GaussianSplat.load_ply(
-                f"{self.cfg.data.root_dir}/files/gs_annotations/{scene_id}/{obj_id}/point_cloud/iteration_7000/point_cloud.ply"
-            ).to_torch()
-            for obj_id in obj_ids
-        ]
+        reconstruction = []
+        for obj_id in obj_ids:
+            ply_path = (
+                f"{self.cfg.data.root_dir}/files/gs_annotations/{scene_id}/{obj_id}/"
+                "point_cloud/iteration_7000/point_cloud.ply"
+            )
+            if not osp.exists(ply_path):
+                _LOGGER.warning(f"Missing gs annotation ply: {ply_path}")
+                continue
+            reconstruction.append(GaussianSplat.load_ply(ply_path).to_torch())
+
+        if len(reconstruction) == 0:
+            _LOGGER.warning(
+                f"No gs_annotations found for scene {scene_id}; skipping rendered_gs output."
+            )
+            return
 
         # Create the representation
         representation = GaussianSplat(
@@ -640,7 +705,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--objects_id", type=int, nargs="+", default=None, help="Specific object."
     )
-    parser.add_argument("--split", type=str, default="train", help="Specific split.")
     return parser.parse_known_args()
 
 

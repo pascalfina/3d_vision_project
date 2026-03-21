@@ -2,6 +2,9 @@ import itertools
 import logging
 import os
 import os.path as osp
+import gc
+import resource
+import tempfile
 from argparse import ArgumentParser, Namespace
 from typing import Dict, Tuple
 
@@ -21,6 +24,22 @@ from utils import visualisation as vis
 _LOGGER = logging.getLogger(__name__)
 
 
+def _load_dino_model(model_name: str):
+    local_hub_dir = os.getenv("OBJECTX_DINOV2_HUB_DIR")
+    if not local_hub_dir:
+        torch_home = os.getenv("TORCH_HOME")
+        if torch_home:
+            local_hub_dir = osp.join(torch_home, "hub", "facebookresearch_dinov2_main")
+        else:
+            local_hub_dir = osp.expanduser("~/.cache/torch/hub/facebookresearch_dinov2_main")
+    if osp.isdir(local_hub_dir):
+        _LOGGER.info("Loading DINOv2 from local hub cache: %s", local_hub_dir)
+        return torch.hub.load(local_hub_dir, model_name, source="local")
+
+    _LOGGER.info("Loading DINOv2 from torch hub repo")
+    return torch.hub.load("facebookresearch/dinov2", model_name)
+
+
 def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
     images = images.reshape(-1, 3, images.shape[-2], images.shape[-1]).cpu()
     inputs = transform(images).cuda()
@@ -36,11 +55,30 @@ def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
     return patch_embeddings
 
 
+def _log_rss(prefix: str) -> None:
+    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    _LOGGER.info("%s | max_rss_mb=%.1f", prefix, rss_mb)
+
+
 def _save_featured_voxel(
     voxel: torch.Tensor, output_file: str = "voxel_output_dense.npz"
 ):
-
-    np.savez(output_file, voxel.cpu().numpy())
+    # Keep float16 storage for space, but avoid compressed npz because the
+    # compression step can cause large transient RAM spikes on the cluster.
+    voxel_np = voxel.half().cpu().numpy()
+    output_dir = osp.dirname(output_file)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".tmp_voxel_", suffix=".npz", dir=output_dir
+    )
+    os.close(fd)
+    try:
+        with open(tmp_path, "wb") as f:
+            np.savez(f, arr_0=voxel_np)
+        os.replace(tmp_path, output_file)
+    finally:
+        if osp.exists(tmp_path):
+            os.remove(tmp_path)
+        del voxel_np
     _LOGGER.info(f"Voxel saved to {output_file}")
 
 
@@ -136,18 +174,10 @@ def voxelise_features(
     scenes_dir = osp.join(root_dir, "scenes")
     frame_idxs = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
     extrinsics = scan3r.load_frame_poses(
-        data_dir=scenes_dir, scan_id=scan_id, frame_idxs=frame_idxs
+        data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
     intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
     mask = scan3r.load_masks(data_dir=root_dir, scan_id=scan_id)
-    rendered = [
-        Image.open(f"{root_dir}/scenes/{scan_id}/sequence/frame-{frame_id}.color.jpg")
-        for frame_id in frame_idxs
-    ]
-    rendered = [
-        torch.Tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
-        for image in rendered
-    ]
     mesh = scan3r.load_ply_mesh(
         data_dir=scenes_dir,
         scan_id=scan_id,
@@ -158,6 +188,8 @@ def voxelise_features(
         scan_id=scan_id,
         label_file_name="labels.instances.annotated.v2.ply",
     )["vertex"]["objectId"]
+    max_views = int(os.getenv("OBJECTX_VOXEL_MAX_VIEWS", "150"))
+    _log_rss(f"[2.5] loaded scan {scan_id} with {len(frame_idxs)} frames")
 
     for obj in obj_data["objects"]:
         try:
@@ -177,6 +209,9 @@ def voxelise_features(
                 str(obj["id"]),
                 "mean_scale_dense.npz",
             )
+
+            os.makedirs(osp.dirname(voxel_path), exist_ok=True)
+            os.makedirs(osp.dirname(mean_scale_path), exist_ok=True)
 
             if (
                 osp.exists(mean_scale_path)
@@ -213,26 +248,35 @@ def voxelise_features(
                 continue
 
             # STEP 5: Render the object
-            pose_camera_to_world = [
-                np.linalg.inv(extrinsics[frame_idx]) for frame_idx in extrinsics
-            ]
+            selected_frame_ids = []
+            selected_masks = []
+            for frame_id in frame_idxs:
+                obj_mask = np.where(mask[frame_id] == int(obj_id), 1, 0)
+                if obj_mask.sum() > 0:
+                    selected_frame_ids.append(frame_id)
+                    selected_masks.append(obj_mask)
+                if len(selected_frame_ids) >= max_views:
+                    break
 
-            masks = [mask[frame_id] for frame_id in frame_idxs]
-            masks = [np.where(mask == int(obj_id), 1, 0) for mask in masks]
-            rendered_obj = [
-                image * mask[None, :, :] for image, mask in zip(rendered, masks)
-            ]
-            # remove empty images
-            idx_empty = [i for i, r in enumerate(rendered_obj) if r.sum() == 0]
-            rendered_obj = [
-                r for i, r in enumerate(rendered_obj) if i not in idx_empty
-            ][:150]
+            if len(selected_frame_ids) == 0:
+                _LOGGER.info(f"Skipping {scan_id} ({obj['id']}) because object is not visible in frames")
+                continue
+
+            rendered_obj = []
+            for frame_id, obj_mask in zip(selected_frame_ids, selected_masks):
+                image = Image.open(
+                    f"{root_dir}/scenes/{scan_id}/sequence/frame-{frame_id}.color.jpg"
+                ).convert("RGB")
+                image_t = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
+                rendered_obj.append(image_t * torch.from_numpy(obj_mask[None, :, :]))
+
             rendered_obj = torch.stack(rendered_obj).float()
             pose_camera_to_world = [
-                pose
-                for i, pose in enumerate(pose_camera_to_world)
-                if i not in idx_empty
-            ][:150]
+                np.linalg.inv(extrinsics[frame_id]) for frame_id in selected_frame_ids
+            ]
+            _log_rss(
+                f"[2.5] object {scan_id}/{obj_id} selected_frames={len(selected_frame_ids)}"
+            )
 
             # STEP 6: Project the voxel to the image
             projection = _project_to_image(
@@ -289,8 +333,26 @@ def voxelise_features(
                     voxel_grid,
                     output_file=voxel_path,
                 )
+                _log_rss(f"[2.5] saved voxel {scan_id}/{obj_id}")
         except (FileNotFoundError, RuntimeError, ValueError) as e:
             _LOGGER.exception(f"Error processing {scan_id} ({obj_id}): {e}")
+        finally:
+            for name in [
+                "segmented_mesh",
+                "voxel_grid",
+                "rendered_obj",
+                "pose_camera_to_world",
+                "projection",
+                "patch_embeddings",
+                "patchtokens",
+                "selected_masks",
+                "selected_frame_ids",
+            ]:
+                if name in locals():
+                    del locals()[name]
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
 def process_data(
@@ -400,7 +462,7 @@ if __name__ == "__main__":
     cfg = update_configs(args.config, unknown, do_ensure_dir=False)
     root_dir = cfg.data.root_dir
 
-    model = torch.hub.load("facebookresearch/dinov2", args.model)
+    model = _load_dino_model(args.model)
     model.eval().cuda()
     transform = transforms.Compose(
         [

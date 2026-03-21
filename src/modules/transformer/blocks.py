@@ -31,8 +31,10 @@ class AbsolutePositionEmbedder(nn.Module):
         Returns:
             an (N, D) Tensor of positional embeddings.
         """
-        self.freqs = self.freqs.to(x.device)
-        out = torch.outer(x, self.freqs)
+        dtype = x.dtype if x.is_floating_point() else torch.float32
+        freqs = self.freqs.to(device=x.device, dtype=dtype)
+        x = x.to(dtype)
+        out = torch.outer(x, freqs)
         out = torch.cat([torch.sin(out), torch.cos(out)], dim=-1)
         return out
 
@@ -51,7 +53,12 @@ class AbsolutePositionEmbedder(nn.Module):
             embed = torch.cat(
                 [
                     embed,
-                    torch.zeros(N, self.channels - embed.shape[1], device=embed.device),
+                    torch.zeros(
+                        N,
+                        self.channels - embed.shape[1],
+                        device=embed.device,
+                        dtype=embed.dtype,
+                    ),
                 ],
                 dim=-1,
             )
