@@ -51,3 +51,4 @@ dependencies/VLSG/**/log_file_*.txt
 dependencies/VLSG/**/time_used*.txt
 
 
+*.log
