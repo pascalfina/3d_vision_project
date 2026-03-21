@@ -60,18 +60,26 @@ def stage_scan(src_scan_dir: Path, tmp_scan_dir: Path):
     tmp_scan_dir.mkdir(parents=True, exist_ok=True)
 
     for item in src_scan_dir.iterdir():
-        if item.name == "sequence.zip":
+        if item.name in {"sequence.zip", "sequence"}:
             continue
         target = tmp_scan_dir / item.name
         if target.exists() or target.is_symlink():
             target.unlink()
         os.symlink(item, target)
 
-    (tmp_scan_dir / "sequence").mkdir(exist_ok=True)
-    subprocess.run(
-        ["unzip", "-qo", str(src_scan_dir / "sequence.zip"), "-d", str(tmp_scan_dir / "sequence")],
-        check=True,
-    )
+    src_zip = src_scan_dir / "sequence.zip"
+    src_seq = src_scan_dir / "sequence"
+    dst_seq = tmp_scan_dir / "sequence"
+    if src_zip.exists():
+        dst_seq.mkdir(exist_ok=True)
+        subprocess.run(
+            ["unzip", "-qo", str(src_zip), "-d", str(dst_seq)],
+            check=True,
+        )
+    elif src_seq.exists():
+        os.symlink(src_seq, dst_seq)
+    else:
+        raise FileNotFoundError(f"Neither sequence.zip nor sequence/ found in {src_scan_dir}")
 
 
 def cleanup_scan(tmp_scan_dir: Path):
