@@ -4,6 +4,7 @@ import os
 import os.path as osp
 import pickle
 import zipfile
+import gzip
 
 import colorlog
 import numpy as np
@@ -75,11 +76,16 @@ def assert_dir(path):
 
 
 def load_pkl_data(filename):
+    gz_filename = f"{filename}.gz"
     try:
-        with open(filename, "rb") as handle:
+        opener = gzip.open if osp.exists(gz_filename) and not osp.exists(filename) else open
+        target = gz_filename if osp.exists(gz_filename) and not osp.exists(filename) else filename
+        with opener(target, "rb") as handle:
             data_dict = pickle.load(handle)
     except Exception as e:
-        with open(filename, "rb") as handle:
+        opener = gzip.open if osp.exists(gz_filename) and not osp.exists(filename) else open
+        target = gz_filename if osp.exists(gz_filename) and not osp.exists(filename) else filename
+        with opener(target, "rb") as handle:
             data_dict = pickle5.load(handle)
     return data_dict
 

@@ -69,6 +69,7 @@ class SceneGraph2StructuredLatentPipeline:
             self.save_scene(reconstruction, scan_id, means, scales)
 
     def save_embedding(self, embedding, means, scales, obj_ids, scan_id):
+        common.ensure_dir(self.output_dir)
         output_path = osp.join(self.output_dir, f"{scan_id[0]}_slat.npz")
         _LOGGER.info(f"Saving to {output_path}")
         np.savez(
@@ -81,6 +82,7 @@ class SceneGraph2StructuredLatentPipeline:
         )
 
     def save_scene(self, reconstruction, scan_id, means, scales):
+        common.ensure_dir("vis")
         def _scale(x):
             i, splat = x
             assert (

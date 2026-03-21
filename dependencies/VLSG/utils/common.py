@@ -2,6 +2,7 @@ import json
 import os
 import os.path as osp
 import pickle
+import gzip
 import numpy as np
 
 def ensure_dir(path):
@@ -12,7 +13,10 @@ def assert_dir(path):
     assert osp.exists(path)
 
 def load_pkl_data(filename):
-    with open(filename, 'rb') as handle:
+    gz_filename = f"{filename}.gz"
+    opener = gzip.open if osp.exists(gz_filename) and not osp.exists(filename) else open
+    target = gz_filename if osp.exists(gz_filename) and not osp.exists(filename) else filename
+    with opener(target, 'rb') as handle:
         data_dict = pickle.load(handle)
     return data_dict
 

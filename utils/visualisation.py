@@ -6,8 +6,6 @@ import random
 import sys
 from collections import Counter
 from copy import deepcopy
-from nis import cat
-from tkinter import font
 from typing import Any, Dict
 
 import matplotlib.pyplot as plt

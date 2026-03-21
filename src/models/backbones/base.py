@@ -130,9 +130,8 @@ class SparseTransformerBase(nn.Module):
     def forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
         h = self.input_layer(x)  # Maps channels to model_channels
         if self.pe_mode == "ape":
-            h = h + self.pos_embedder(
-                x.coords[:, 1:]
-            )  # Add absolute position embedding
+            pe = self.pos_embedder(x.coords[:, 1:].to(self.dtype))
+            h = h + pe.type(h.feats.dtype)  # Add absolute position embedding
         h = h.type(self.dtype)
         for block in self.blocks:
             h = block(h)  # Apply transformer block
