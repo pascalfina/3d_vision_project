@@ -1,0 +1,13 @@
+{
+  "manifest": "/work/scratch/pafina/objectx-data-sparse10-keep75pct/files/step2_slat_pairs_keep75pct_manifest.json",
+  "epochs": 30,
+  "batch_size": 1,
+  "num_workers": 0,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "hidden_channels": 32,
+  "num_blocks": 3,
+  "grid_size": 64,
+  "seed": 42,
+  "amp": true
+}

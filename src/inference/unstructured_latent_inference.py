@@ -256,23 +256,27 @@ class SceneGraph2UnstructuredLatentPipeline:
             i, splat = x
             if splat._xyz.numel() <= 0:
                 return None
+            device = reconstruction[i].get_xyz.device
+            dtype = reconstruction[i].get_xyz.dtype
+            scale = torch.as_tensor(scales[i], device=device, dtype=dtype)
+            mean = torch.as_tensor(means[i], device=device, dtype=dtype)
             assert (
                 splat._xyz.min() >= -1e-2 and splat._xyz.max() <= 1 + 1e-2
             ), f"{splat._xyz.min()} {splat._xyz.max()}"
             splat.rescale(
-                torch.tensor([2, 2, 2], device=reconstruction[i].get_xyz.device)
+                torch.tensor([2, 2, 2], device=device, dtype=dtype)
             )
             assert (
                 splat._xyz.min() >= -1e-2 and splat._xyz.max() <= 2.0 + 1e-2
             ), f"{splat._xyz.min()} {splat._xyz.max()}"
             splat.translate(
-                -torch.tensor([1, 1, 1], device=reconstruction[i].get_xyz.device)
+                -torch.tensor([1, 1, 1], device=device, dtype=dtype)
             )
             assert (
                 splat._xyz.min() >= -1.0 - 1e-2 and splat._xyz.max() <= 1.0 + 1e-2
             ), f"{splat._xyz.min()} {splat._xyz.max()}"
-            splat.rescale(scales[i])
-            splat.translate(means[i])
+            splat.rescale(scale)
+            splat.translate(mean)
             return splat
 
         reconstruction = list(map(lambda x: _scale(x), enumerate(reconstruction)))
@@ -310,23 +314,27 @@ class SceneGraph2UnstructuredLatentPipeline:
             i, splat = x
             if splat._xyz.numel() <= 0:
                 return splat
+            device = reconstruction[i].get_xyz.device
+            dtype = reconstruction[i].get_xyz.dtype
+            scale = torch.as_tensor(scales[i], device=device, dtype=dtype)
+            mean = torch.as_tensor(means[i], device=device, dtype=dtype)
             assert (
                 splat._xyz.min() >= -1e-2 and splat._xyz.max() <= 1 + 1e-2
             ), f"{splat._xyz.min()} {splat._xyz.max()}"
             splat.rescale(
-                torch.tensor([2, 2, 2], device=reconstruction[i].get_xyz.device)
+                torch.tensor([2, 2, 2], device=device, dtype=dtype)
             )
             assert (
                 splat._xyz.min() >= -1e-2 and splat._xyz.max() <= 2.0 + 1e-2
             ), f"{splat._xyz.min()} {splat._xyz.max()}"
             splat.translate(
-                -torch.tensor([1, 1, 1], device=reconstruction[i].get_xyz.device)
+                -torch.tensor([1, 1, 1], device=device, dtype=dtype)
             )
             assert (
                 splat._xyz.min() >= -1.0 - 1e-2 and splat._xyz.max() <= 1.0 + 1e-2
             ), f"{splat._xyz.min()} {splat._xyz.max()}"
-            splat.rescale(scales[i])
-            splat.translate(means[i])
+            splat.rescale(scale)
+            splat.translate(mean)
             return splat
 
         reconstruction = list(map(lambda x: _scale(x), enumerate(reconstruction)))
@@ -431,14 +439,18 @@ class SceneGraph2UnstructuredLatentPipeline:
             if splat._xyz.numel() <= 0:
                 print(f"Splat {i} is empty.")
                 return splat
+            device = reconstruction[i].get_xyz.device
+            dtype = reconstruction[i].get_xyz.dtype
+            scale = torch.as_tensor(scales[i], device=device, dtype=dtype)
+            mean = torch.as_tensor(means[i], device=device, dtype=dtype)
             splat.rescale(
-                torch.tensor([2, 2, 2], device=reconstruction[i].get_xyz.device)
+                torch.tensor([2, 2, 2], device=device, dtype=dtype)
             )
             splat.translate(
-                -torch.tensor([1, 1, 1], device=reconstruction[i].get_xyz.device)
+                -torch.tensor([1, 1, 1], device=device, dtype=dtype)
             )
-            splat.rescale(scales[i])
-            splat.translate(means[i])
+            splat.rescale(scale)
+            splat.translate(mean)
             return splat
 
         # Apply transformation to all objects
