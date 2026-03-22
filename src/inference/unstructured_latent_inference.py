@@ -16,7 +16,7 @@ from configs import Config, update_configs
 from src.datasets import Scan3RSceneGraphDataset
 from src.models.autoencoder import AutoEncoder
 from src.models.latent_autoencoder import LatentAutoencoder
-from src.modules.sparse.basic import SparseTensor
+from src.modules.sparse.basic import SparseTensor, sparse_cat
 from src.representations import Gaussian
 from utils import common, mesh, torch_util
 from utils.gaussian_camera import build_minicam
@@ -53,6 +53,9 @@ class SceneGraph2UnstructuredLatentPipeline:
         self.vis = visualize
         self.rep_config = _REPRESENTATION_CONFIG
         self.output_dir = osp.join(cfg.data.root_dir, cfg.inference.output_dir)
+        self.max_objects_per_chunk = int(
+            os.environ.get("OBJECTX_SLAT_MAX_OBJECTS_PER_CHUNK", "16")
+        )
 
     def load_model(self):
         self.latent_autoencoder = LatentAutoencoder(
@@ -115,31 +118,63 @@ class SceneGraph2UnstructuredLatentPipeline:
         with torch.no_grad():
             _LOGGER.info(f"Getting item: {idx}")
             data_dict = self.dataset.collate_fn([self.dataset[idx]])
-            data_dict = (
-                torch_util.to_cuda(data_dict)
+            scene_graphs = data_dict["scene_graphs"]
+            tot_obj_splat = (
+                scene_graphs["tot_obj_splat"].to("cuda")
                 if torch.cuda.is_available()
-                else data_dict
+                else scene_graphs["tot_obj_splat"]
             )
             # Stage 1.
-            sparse_splat = self.latent_autoencoder.encode(data_dict)
+            if (
+                torch.cuda.is_available()
+                and self.max_objects_per_chunk > 0
+                and tot_obj_splat.shape[0] > self.max_objects_per_chunk
+            ):
+                sparse_chunks = []
+                total_objects = tot_obj_splat.shape[0]
+                for start in range(0, total_objects, self.max_objects_per_chunk):
+                    end = min(start + self.max_objects_per_chunk, total_objects)
+                    chunk = tot_obj_splat[start:end]
+                    _LOGGER.info(
+                        "Encoding object chunk %s:%s/%s for %s",
+                        start,
+                        end,
+                        total_objects,
+                        scene_graphs["scene_ids"][0],
+                    )
+                    sparse_chunks.append(
+                        self.latent_autoencoder.encode(
+                            {"scene_graphs": {"tot_obj_splat": chunk}}
+                        )
+                    )
+                    torch.cuda.empty_cache()
+                sparse_splat = sparse_cat(sparse_chunks, dim=0)
+            else:
+                sparse_splat = self.latent_autoencoder.encode(
+                    {"scene_graphs": {"tot_obj_splat": tot_obj_splat}}
+                )
 
             # Stage 2.
-            data_dict["scene_graphs"]["tot_obj_dense_splat"] = self._densify(
-                sparse_splat
-            )
-            embedding = self.model.encode(data_dict)
+            stage2_scene_graphs = {
+                "batch_size": scene_graphs["batch_size"],
+                "tot_obj_dense_splat": self._densify(sparse_splat),
+            }
+            embedding = self.model.encode({"scene_graphs": stage2_scene_graphs})
             # Stage 2.
-            reconstruction_dense = self.model.decode(embedding)
-            reconstruction_sparse = self._sparsify(reconstruction_dense)
+            if self.vis:
+                reconstruction_dense = self.model.decode(embedding)
+                reconstruction_sparse = self._sparsify(reconstruction_dense)
 
-            # Stage 1.
-            reconstruction = self.latent_autoencoder.decode(reconstruction_sparse)
+                # Stage 1.
+                reconstruction = self.latent_autoencoder.decode(reconstruction_sparse)
+            else:
+                reconstruction = None
 
             means, scales, obj_ids, scan_id = (
-                data_dict["scene_graphs"]["mean_obj_splat"],
-                data_dict["scene_graphs"]["scale_obj_splat"],
-                data_dict["scene_graphs"]["obj_ids"],
-                data_dict["scene_graphs"]["scene_ids"][0],
+                scene_graphs["mean_obj_splat"],
+                scene_graphs["scale_obj_splat"],
+                scene_graphs["obj_ids"],
+                scene_graphs["scene_ids"][0],
             )
 
         self.save_embedding(embedding, means, scales, obj_ids, scan_id)

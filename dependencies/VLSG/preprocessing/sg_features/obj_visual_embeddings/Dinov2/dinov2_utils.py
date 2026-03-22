@@ -93,4 +93,5 @@ class DinoV2ExtractFeatures:
         return res
     
     def __del__(self):
-        self.fh_handle.remove()
+        if hasattr(self, "fh_handle"):
+            self.fh_handle.remove()
