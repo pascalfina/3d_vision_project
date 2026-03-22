@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import os.path as osp
 
 import numpy as np
@@ -8,6 +9,7 @@ import torch
 from configs import Config, update_configs
 from src.datasets import Scan3RSceneGraphDataset
 from src.models.latent_autoencoder import LatentAutoencoder
+from src.modules.sparse.basic import sparse_cat
 from src.representations import Gaussian
 from utils import common, torch_util
 
@@ -34,6 +36,9 @@ class SceneGraph2StructuredLatentPipeline:
         self.vis = visualize
         self.rep_config = _REPRESENTATION_CONFIG
         self.output_dir = osp.join(cfg.data.root_dir, cfg.inference.output_dir)
+        self.max_objects_per_chunk = int(
+            os.environ.get("OBJECTX_SLAT_MAX_OBJECTS_PER_CHUNK", "16")
+        )
 
     def load_model(self):
         model = LatentAutoencoder(cfg=self.cfg.autoencoder, device=self.device)
@@ -44,24 +49,51 @@ class SceneGraph2StructuredLatentPipeline:
     def inference(self, idx):
         with torch.no_grad():
             data_dict = self.dataset.collate_fn([self.dataset[idx]])
-            data_dict = (
-                torch_util.to_cuda(data_dict)
+            scene_graphs = data_dict["scene_graphs"]
+            tot_obj_splat = (
+                scene_graphs["tot_obj_splat"].to("cuda")
                 if torch.cuda.is_available()
-                else data_dict
+                else scene_graphs["tot_obj_splat"]
             )
-            if data_dict["scene_graphs"]["tot_obj_splat"].shape[0] > 100:
+            if tot_obj_splat.shape[0] > 100:
                 _LOGGER.info(
-                    f"Skipping {data_dict['scene_graphs']['scene_ids'][0]} due to large number of objects"
+                    f"Skipping {scene_graphs['scene_ids'][0]} due to large number of objects"
                 )
                 return
-            embedding = self.model.encode(data_dict)
+            if (
+                torch.cuda.is_available()
+                and self.max_objects_per_chunk > 0
+                and tot_obj_splat.shape[0] > self.max_objects_per_chunk
+            ):
+                embeddings = []
+                total_objects = tot_obj_splat.shape[0]
+                for start in range(0, total_objects, self.max_objects_per_chunk):
+                    end = min(start + self.max_objects_per_chunk, total_objects)
+                    chunk = tot_obj_splat[start:end]
+                    _LOGGER.info(
+                        "Encoding object chunk %s:%s/%s for %s",
+                        start,
+                        end,
+                        total_objects,
+                        scene_graphs["scene_ids"][0],
+                    )
+                    chunk_embedding = self.model.encode(
+                        {"scene_graphs": {"tot_obj_splat": chunk}}
+                    )
+                    embeddings.append(chunk_embedding)
+                    torch.cuda.empty_cache()
+                embedding = sparse_cat(embeddings, dim=0)
+            else:
+                embedding = self.model.encode(
+                    {"scene_graphs": {"tot_obj_splat": tot_obj_splat}}
+                )
             means, scales, obj_ids, scan_id = (
-                data_dict["scene_graphs"]["mean_obj_splat"],
-                data_dict["scene_graphs"]["scale_obj_splat"],
-                data_dict["scene_graphs"]["obj_ids"],
-                data_dict["scene_graphs"]["scene_ids"][0],
+                scene_graphs["mean_obj_splat"],
+                scene_graphs["scale_obj_splat"],
+                scene_graphs["obj_ids"],
+                scene_graphs["scene_ids"][0],
             )
-            reconstruction = self.model.decode(embedding)
+            reconstruction = self.model.decode(embedding) if self.vis else None
 
         self.save_embedding(embedding, means, scales, obj_ids, scan_id)
 
