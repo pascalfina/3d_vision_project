@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -95,7 +96,10 @@ def main():
 
     sys.path.insert(0, str(repo_root))
     from configs import update_configs
+    from utils import common
     import preprocessing.voxel_anno.voxelise_features as vf
+
+    common.init_log(level=logging.INFO)
 
     cfg = update_configs(args.config, [], do_ensure_dir=False)
 

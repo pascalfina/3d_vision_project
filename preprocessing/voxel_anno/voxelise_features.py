@@ -97,10 +97,76 @@ def _project_to_image(
     voxel = voxel * 2.0 - 1.0
     assert voxel.min() >= -1.0 and voxel.max() <= 1.0
     voxel = voxel * scale + mean
-    uv = utils3d.torch.project_cv(
+    uv, linear_depth = utils3d.torch.project_cv(
         voxel.float(), extrinsics.float(), intrinsics.float()
-    )[0]
-    return uv
+    )
+    return uv, linear_depth
+
+
+def _load_depth_shift(data_dir: str, scan_id: str) -> float:
+    info_path = osp.join(data_dir, scan_id, "sequence", "_info.txt")
+    with open(info_path) as f:
+        for line in f:
+            if line.startswith("m_depthShift"):
+                return float(line.split("=", 1)[1].strip())
+    return 1000.0
+
+
+def _compute_voxel_observations(
+    projection_color: torch.Tensor,
+    projection_depth: torch.Tensor,
+    linear_depth: torch.Tensor,
+    selected_masks: list[np.ndarray],
+    selected_depths: list[np.ndarray],
+    color_size: Tuple[float, float],
+    depth_size: Tuple[float, float],
+    depth_abs_tol: float,
+    depth_rel_tol: float,
+) -> np.ndarray:
+    color_uv = projection_color.cpu().numpy()
+    depth_uv = projection_depth.cpu().numpy()
+    linear_depth = linear_depth.cpu().numpy()
+    masks = np.stack(selected_masks).astype(np.bool_)
+    depth_maps = np.stack(selected_depths).astype(np.float32)
+
+    color_width, color_height = color_size
+    depth_width, depth_height = depth_size
+    num_views = color_uv.shape[0]
+    view_idx = np.arange(num_views)[:, None]
+
+    color_x = np.rint(color_uv[..., 0]).astype(np.int64)
+    color_y = np.rint(color_uv[..., 1]).astype(np.int64)
+    color_in_bounds = (
+        (color_x >= 0)
+        & (color_x < int(color_width))
+        & (color_y >= 0)
+        & (color_y < int(color_height))
+    )
+    color_x_clip = np.clip(color_x, 0, int(color_width) - 1)
+    color_y_clip = np.clip(color_y, 0, int(color_height) - 1)
+    color_hits = masks[view_idx, color_y_clip, color_x_clip]
+    color_visible = color_in_bounds & color_hits
+
+    depth_x = np.rint(depth_uv[..., 0]).astype(np.int64)
+    depth_y = np.rint(depth_uv[..., 1]).astype(np.int64)
+    depth_in_bounds = (
+        (depth_x >= 0)
+        & (depth_x < int(depth_width))
+        & (depth_y >= 0)
+        & (depth_y < int(depth_height))
+    )
+    depth_x_clip = np.clip(depth_x, 0, int(depth_width) - 1)
+    depth_y_clip = np.clip(depth_y, 0, int(depth_height) - 1)
+    sampled_depth = depth_maps[view_idx, depth_y_clip, depth_x_clip]
+    positive_depth = sampled_depth > 0.0
+    depth_tolerance = np.maximum(depth_abs_tol, depth_rel_tol * sampled_depth)
+    depth_visible = (
+        depth_in_bounds
+        & positive_depth
+        & (np.abs(sampled_depth - linear_depth) <= depth_tolerance)
+    )
+
+    return color_visible & depth_visible
 
 
 def _segment_mesh(
@@ -177,6 +243,23 @@ def voxelise_features(
         data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
     intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
+    filter_unobserved = os.getenv("OBJECTX_VOXEL_FILTER_UNOBSERVED", "0").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    }
+    depth_intrinsics = None
+    depth_shift = None
+    depth_abs_tol = float(os.getenv("OBJECTX_VOXEL_DEPTH_ABS_TOL", "0.05"))
+    depth_rel_tol = float(os.getenv("OBJECTX_VOXEL_DEPTH_REL_TOL", "0.02"))
+    depth_map_cache = {}
+    if filter_unobserved:
+        depth_intrinsics = scan3r.load_intrinsics(
+            data_dir=scenes_dir, scan_id=scan_id, type="depth"
+        )
+        depth_shift = _load_depth_shift(scenes_dir, scan_id)
     mask = scan3r.load_masks(data_dir=root_dir, scan_id=scan_id)
     mesh = scan3r.load_ply_mesh(
         data_dir=scenes_dir,
@@ -263,12 +346,26 @@ def voxelise_features(
                 continue
 
             rendered_obj = []
+            selected_depths = []
             for frame_id, obj_mask in zip(selected_frame_ids, selected_masks):
                 image = Image.open(
                     f"{root_dir}/scenes/{scan_id}/sequence/frame-{frame_id}.color.jpg"
                 ).convert("RGB")
                 image_t = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
                 rendered_obj.append(image_t * torch.from_numpy(obj_mask[None, :, :]))
+                if filter_unobserved:
+                    if frame_id not in depth_map_cache:
+                        depth_map_cache[frame_id] = scan3r.load_depth_map(
+                            osp.join(
+                                root_dir,
+                                "scenes",
+                                scan_id,
+                                "sequence",
+                                f"frame-{frame_id}.depth.pgm",
+                            ),
+                            depth_shift,
+                        )
+                    selected_depths.append(depth_map_cache[frame_id])
 
             rendered_obj = torch.stack(rendered_obj).float()
             pose_camera_to_world = [
@@ -279,17 +376,56 @@ def voxelise_features(
             )
 
             # STEP 6: Project the voxel to the image
-            projection = _project_to_image(
+            projection_color, linear_depth = _project_to_image(
                 torch.Tensor(voxel_grid),
                 torch.Tensor(mean),
                 torch.Tensor([scale]),
                 torch.from_numpy(np.stack(pose_camera_to_world)),
                 torch.from_numpy(intrinsics["intrinsic_mat"]),
             )  # Shape: (Nimages, Npoints, 2)
+            observed_views = None
+            observed_voxels = None
+            if filter_unobserved:
+                projection_depth, _ = _project_to_image(
+                    torch.Tensor(voxel_grid),
+                    torch.Tensor(mean),
+                    torch.Tensor([scale]),
+                    torch.from_numpy(np.stack(pose_camera_to_world)),
+                    torch.from_numpy(depth_intrinsics["intrinsic_mat"]),
+                )
+                observed_views = _compute_voxel_observations(
+                    projection_color=projection_color,
+                    projection_depth=projection_depth,
+                    linear_depth=linear_depth,
+                    selected_masks=selected_masks,
+                    selected_depths=selected_depths,
+                    color_size=(intrinsics["width"], intrinsics["height"]),
+                    depth_size=(
+                        depth_intrinsics["width"],
+                        depth_intrinsics["height"],
+                    ),
+                    depth_abs_tol=depth_abs_tol,
+                    depth_rel_tol=depth_rel_tol,
+                )
+                observed_voxels = observed_views.any(axis=0)
+                _LOGGER.info(
+                    "[2.5] object %s/%s observed_voxels=%s/%s",
+                    scan_id,
+                    obj_id,
+                    int(observed_voxels.sum()),
+                    int(observed_voxels.shape[0]),
+                )
+                if not np.any(observed_voxels):
+                    _LOGGER.info(
+                        "Skipping %s (%s) because no voxels passed visibility checks",
+                        scan_id,
+                        obj_id,
+                    )
+                    continue
 
             # STEP 7: Normalize the projection to [-1, 1]
             projection = (
-                projection
+                projection_color
                 / torch.Tensor([intrinsics["width"], intrinsics["height"]]).float()
             ) * 2.0 - 1.0
 
@@ -312,9 +448,19 @@ def voxelise_features(
                 .numpy()
             )  # Shape: (Nimages, Npoints, 1024)
 
-            patchtokens = np.mean(patchtokens, axis=0).astype(
-                np.float16
-            )  # Shape: (Npoints, 1024)
+            if filter_unobserved:
+                observation_weights = observed_views.astype(np.float32)[..., None]
+                observation_count = observation_weights.sum(axis=0)
+                patchtokens = np.divide(
+                    (patchtokens * observation_weights).sum(axis=0),
+                    np.clip(observation_count, 1.0, None),
+                )
+                patchtokens = patchtokens[observed_voxels]
+                voxel_grid = voxel_grid[observed_voxels]
+            else:
+                patchtokens = np.mean(patchtokens, axis=0)
+
+            patchtokens = patchtokens.astype(np.float16)  # Shape: (Npoints, 1024)
             assert patchtokens.shape[0] == voxel_grid.shape[0]
             assert patchtokens.shape[1] == 1024
             assert voxel_grid.shape[1] == 3
@@ -343,10 +489,16 @@ def voxelise_features(
                 "rendered_obj",
                 "pose_camera_to_world",
                 "projection",
+                "projection_color",
+                "projection_depth",
+                "linear_depth",
+                "observed_views",
+                "observed_voxels",
                 "patch_embeddings",
                 "patchtokens",
                 "selected_masks",
                 "selected_frame_ids",
+                "selected_depths",
             ]:
                 if name in locals():
                     del locals()[name]
