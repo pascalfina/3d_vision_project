@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.models.backbones.unet import ResBlock3d
+from src.models.backbones.unet import ResBlock3d, norm_layer
 
 
 class SmallSLATCompletionCNN(nn.Module):
@@ -15,12 +15,19 @@ class SmallSLATCompletionCNN(nn.Module):
         num_blocks: int = 3,
     ) -> None:
         super().__init__()
+        if hidden_channels % 32 != 0:
+            raise ValueError(
+                f"hidden_channels must be divisible by 32 for GroupNorm, got {hidden_channels}"
+            )
         self.input_layer = nn.Conv3d(in_channels, hidden_channels, kernel_size=3, padding=1)
         self.blocks = nn.Sequential(
-            *[ResBlock3d(hidden_channels, hidden_channels, norm_type="batch") for _ in range(num_blocks)]
+            *[
+                ResBlock3d(hidden_channels, hidden_channels, norm_type="group")
+                for _ in range(num_blocks)
+            ]
         )
         self.output_layer = nn.Sequential(
-            nn.BatchNorm3d(hidden_channels),
+            norm_layer("group", hidden_channels),
             nn.ReLU(inplace=True),
             nn.Conv3d(hidden_channels, out_channels, kernel_size=3, padding=1),
         )

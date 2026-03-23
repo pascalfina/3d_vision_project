@@ -11,10 +11,10 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/work/scratch/pafina/object-x}"
 CONFIG_PATH="${CONFIG_PATH:-$REPO_DIR/scripts/train_val/train_step2_slat_completion.json}"
 TIMESTAMP="$(date +%Y-%m-%d_%H-%M-%S)"
-OUTPUT_DIR="${OUTPUT_DIR:-/work/scratch/pafina/step2_slat_completion_${TIMESTAMP}}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/runs/step2_slat_completion_${TIMESTAMP}}"
 
 cd "$REPO_DIR"
-mkdir -p "$REPO_DIR/debug" "$OUTPUT_DIR"
+mkdir -p "$REPO_DIR/debug" "$REPO_DIR/runs" "$OUTPUT_DIR"
 source scripts/activate_objectx_env.sh
 
 echo "SLURM_JOB_ID=$SLURM_JOB_ID"

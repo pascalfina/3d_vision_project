@@ -16,12 +16,22 @@ class Step2SLATPairDataset(data.Dataset):
         split: str,
         grid_size: int = 64,
         require_missing_voxels: bool = True,
+        augment: bool = False,
+        flip_prob: float = 0.5,
+        rot90_prob: float = 0.5,
+        feature_noise_std: float = 0.01,
+        observed_dropout_prob: float = 0.05,
     ) -> None:
         super().__init__()
         self.manifest_path = Path(manifest_path)
         self.split = split
         self.grid_size = grid_size
         self.require_missing_voxels = require_missing_voxels
+        self.augment = augment
+        self.flip_prob = flip_prob
+        self.rot90_prob = rot90_prob
+        self.feature_noise_std = feature_noise_std
+        self.observed_dropout_prob = observed_dropout_prob
         manifest = json.loads(self.manifest_path.read_text())
         self.samples = self._build_samples(manifest)
 
@@ -76,6 +86,55 @@ class Step2SLATPairDataset(data.Dataset):
         dense[0, x, y, z] = torch.from_numpy(values).float()
         return dense
 
+    def _apply_augmentations(
+        self,
+        input_feats: torch.Tensor,
+        observed_mask: torch.Tensor,
+        target_feats: torch.Tensor,
+        full_support_mask: torch.Tensor,
+        missing_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        tensors = [
+            input_feats,
+            observed_mask,
+            target_feats,
+            full_support_mask,
+            missing_mask,
+        ]
+
+        for spatial_dim in (1, 2, 3):
+            if torch.rand(()) < self.flip_prob:
+                tensors = [torch.flip(t, dims=(spatial_dim,)) for t in tensors]
+
+        if torch.rand(()) < self.rot90_prob:
+            k = int(torch.randint(low=0, high=4, size=(1,)).item())
+            if k:
+                tensors = [torch.rot90(t, k=k, dims=(1, 2)) for t in tensors]
+
+        input_feats, observed_mask, target_feats, full_support_mask, missing_mask = tensors
+
+        if self.observed_dropout_prob > 0:
+            drop_mask = (
+                (torch.rand_like(observed_mask) < self.observed_dropout_prob)
+                & (observed_mask > 0.5)
+            ).float()
+            keep_mask = 1.0 - drop_mask
+            input_feats = input_feats * keep_mask
+            observed_mask = observed_mask * keep_mask
+            missing_mask = full_support_mask * (1.0 - observed_mask)
+
+        if self.feature_noise_std > 0:
+            noise = torch.randn_like(input_feats) * self.feature_noise_std
+            input_feats = input_feats + noise * observed_mask
+
+        return (
+            input_feats,
+            observed_mask,
+            target_feats,
+            full_support_mask,
+            missing_mask,
+        )
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = self.samples[index]
         pair = np.load(sample["path"], allow_pickle=True)
@@ -93,6 +152,21 @@ class Step2SLATPairDataset(data.Dataset):
             full_coords, np.ones(len(full_coords), dtype=np.uint8), shape
         )
         missing_mask_dense = full_support_dense * (1.0 - observed_mask_dense)
+
+        if self.augment:
+            (
+                sparse_feats,
+                observed_mask_dense,
+                target_feats,
+                full_support_dense,
+                missing_mask_dense,
+            ) = self._apply_augmentations(
+                input_feats=sparse_feats,
+                observed_mask=observed_mask_dense,
+                target_feats=target_feats,
+                full_support_mask=full_support_dense,
+                missing_mask=missing_mask_dense,
+            )
 
         return {
             "scene_id": sample["scene_id"],
