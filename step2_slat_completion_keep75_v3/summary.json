@@ -1,0 +1,18 @@
+{
+  "best_epoch": 101,
+  "best_val_loss": 2.6945792620853553,
+  "last_epoch": 250,
+  "last_train_loss": 1.3003056207761414,
+  "last_val_loss": 2.8324152235654134,
+  "test_metrics": {
+    "loss": 2.5499985943841534,
+    "rmse": 1.596871502151677,
+    "nrmse_pct": 54.91215402161417,
+    "baseline_loss": 8.45674004968189,
+    "improvement_pct": 69.84655340706524,
+    "voxel_acc_pct": 40.261268637354405,
+    "missing_voxels": 5149.336,
+    "feature_count": 41194.688,
+    "accuracy_tol_factor": 0.25
+  }
+}
