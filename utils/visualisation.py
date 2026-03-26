@@ -158,8 +158,14 @@ def save_point(coords: np.array, features: np.array, filename: str) -> None:
     # Create a point cloud from the voxel
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(coords)
-    pca = PCA(n_components=3)
-    colors = pca.fit_transform(features)
+    if features.shape[0] < 2 or features.shape[1] == 0:
+        colors = np.zeros((features.shape[0], 3), dtype=np.float32)
+    else:
+        n_components = max(1, min(3, features.shape[0], features.shape[1]))
+        pca = PCA(n_components=n_components)
+        colors = pca.fit_transform(features)
+        if colors.shape[1] < 3:
+            colors = np.pad(colors, ((0, 0), (0, 3 - colors.shape[1])), mode="constant")
     colors = (
         (colors - np.min(colors, axis=0))
         / (np.max(colors, axis=0) - np.min(colors, axis=0))
@@ -189,11 +195,21 @@ def save_voxel_as_ply(
 
     points, features = featured_voxel[:, :3], featured_voxel[:, 3:]
     if show_color:
-        pca = PCA(n_components=3)
-        pca_features = pca.fit_transform(features)
+        if features.shape[0] < 2 or features.shape[1] == 0:
+            pca_features = np.zeros((features.shape[0], 3), dtype=np.float32)
+        else:
+            n_components = max(1, min(3, features.shape[0], features.shape[1]))
+            pca = PCA(n_components=n_components)
+            pca_features = pca.fit_transform(features)
+            if pca_features.shape[1] < 3:
+                pca_features = np.pad(
+                    pca_features, ((0, 0), (0, 3 - pca_features.shape[1])), mode="constant"
+                )
 
         pca_features -= pca_features.min(axis=0)
-        pca_features /= pca_features.max(axis=0)
+        denom = pca_features.max(axis=0)
+        denom[denom == 0] = 1.0
+        pca_features /= denom
         pca_features = pca_features * 0.6
 
         import matplotlib.cm as cm

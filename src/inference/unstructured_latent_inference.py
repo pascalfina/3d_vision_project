@@ -238,6 +238,79 @@ class SceneGraph2UnstructuredLatentPipeline:
             return default
         return value.lower() not in {"0", "false", "no", "off", ""}
 
+    def _get_bg_color(self) -> torch.Tensor:
+        raw = (os.environ.get("OBJECTX_VIS_BG_COLOR") or "0,0,0").strip()
+        try:
+            parts = [float(x) for x in raw.split(",")]
+            if len(parts) != 3:
+                raise ValueError
+        except ValueError:
+            _LOGGER.warning(
+                "Invalid OBJECTX_VIS_BG_COLOR=%s, falling back to black", raw
+            )
+            parts = [0.0, 0.0, 0.0]
+        return torch.tensor(parts, device="cuda")
+
+    def _postprocess_render(self, rendered_image: torch.Tensor) -> torch.Tensor:
+        exposure = float(os.environ.get("OBJECTX_VIS_EXPOSURE", "1.0"))
+        gamma = float(os.environ.get("OBJECTX_VIS_GAMMA", "1.0"))
+        black_floor = float(os.environ.get("OBJECTX_VIS_BLACK_FLOOR", "0.0"))
+        image = rendered_image.clamp(0.0, 1.0)
+        if exposure != 1.0:
+            image = (image * exposure).clamp(0.0, 1.0)
+        if black_floor > 0.0:
+            image = torch.maximum(
+                image,
+                torch.full_like(image, min(max(black_floor, 0.0), 1.0)),
+            )
+        if gamma != 1.0:
+            gamma = max(gamma, 1e-4)
+            image = image.pow(gamma).clamp(0.0, 1.0)
+        return image
+
+    def _get_orbit_mode(self, num_objects: int) -> str:
+        mode = (os.environ.get("OBJECTX_VIS_ORBIT_MODE") or "auto").strip().lower()
+        if mode in {"legacy", "object", "auto"}:
+            if mode != "auto":
+                return mode
+        return "object" if num_objects <= 5 else "legacy"
+
+    def _compute_orbit_camera_params(
+        self,
+        object_positions: np.ndarray,
+        *,
+        num_objects: int,
+        fovx: float,
+        fovy: float,
+    ) -> tuple[np.ndarray, float, float]:
+        bbox_min = object_positions.min(axis=0)
+        bbox_max = object_positions.max(axis=0)
+        scene_center = (bbox_min + bbox_max) / 2.0
+        bbox_extent = np.maximum(bbox_max - bbox_min, 1e-3)
+        bbox_diag = float(np.linalg.norm(bbox_extent))
+        mode = self._get_orbit_mode(num_objects)
+
+        if mode == "legacy":
+            radius = float(os.environ.get("OBJECTX_VIS_RADIUS", "2.0"))
+            height = float(os.environ.get("OBJECTX_VIS_HEIGHT", "1.0"))
+            return scene_center, radius, height
+
+        fit_margin = float(os.environ.get("OBJECTX_VIS_FIT_MARGIN", "1.8"))
+        min_radius = float(os.environ.get("OBJECTX_VIS_MIN_RADIUS", "0.35"))
+        min_height = float(os.environ.get("OBJECTX_VIS_MIN_HEIGHT", "0.1"))
+        vertical_lift = float(os.environ.get("OBJECTX_VIS_VERTICAL_LIFT", "0.15"))
+
+        # Fit the orbit distance to the object extent and field of view.
+        safe_half_fov = max(0.15, min(float(fovx), float(fovy)) / 2.0)
+        max_half_extent = float(np.max(bbox_extent)) / 2.0
+        radius = max(
+            min_radius,
+            fit_margin * max_half_extent / np.tan(safe_half_fov),
+            0.6 * bbox_diag,
+        )
+        height = max(min_height, vertical_lift * bbox_extent[1] + 0.1 * bbox_diag)
+        return scene_center, radius, height
+
     def save_embedding(self, embedding, means, scales, obj_ids, scan_id):
         os.makedirs(self.output_dir, exist_ok=True)
         output_path = osp.join(self.output_dir, f"{scan_id[0]}_ulat.npz")
@@ -364,6 +437,7 @@ class SceneGraph2UnstructuredLatentPipeline:
         predicted_images = []
         ground_truth_images = []
         rendered_frames = []
+        bg_color = self._get_bg_color()
         scene_id = scene_ids[0]
         intrinsics = self.dataset.image_intrinsics[scene_id]
         poses = self.dataset.image_poses[scene_id]
@@ -408,8 +482,9 @@ class SceneGraph2UnstructuredLatentPipeline:
                     "compute_cov3D_python": False,
                     "convert_SHs_python": False,
                 },
-                bg_color=torch.tensor((0.0, 0.0, 0.0), device="cuda"),
+                bg_color=bg_color,
             )["render"]
+            rendered_image = self._postprocess_render(rendered_image)
 
             predicted_images.append(rendered_image)
             ground_truth_images.append(image)
@@ -482,17 +557,13 @@ class SceneGraph2UnstructuredLatentPipeline:
             [reconstruction[i]._rotation for i in range(len(reconstruction))]
         )
 
-        # Compute the centroid of all objects (Center of the scene)
         object_positions = representation._xyz.detach().cpu().numpy()
-        scene_center = object_positions.mean(axis=0)  # Mean position of objects
 
-        # Set camera path parameters
         num_frames = int(os.environ.get("OBJECTX_VIS_NUM_FRAMES", "120"))
-        radius = float(os.environ.get("OBJECTX_VIS_RADIUS", "2.0"))
-        height = float(os.environ.get("OBJECTX_VIS_HEIGHT", "1.0"))
         angle_step = 2 * np.pi / num_frames  # Step size for rotation
 
         rendered_frames = []
+        bg_color = self._get_bg_color()
 
         # Get intrinsics for frustum visualization
         intrinsics = self.dataset.image_intrinsics[scene_id]
@@ -502,6 +573,12 @@ class SceneGraph2UnstructuredLatentPipeline:
         render_height = max(64, int(round(intrinsics["height"] * render_scale)))
         fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
         fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
+        scene_center, radius, height = self._compute_orbit_camera_params(
+            object_positions,
+            num_objects=len(reconstruction),
+            fovx=fovx,
+            fovy=fovy,
+        )
 
         if self._get_env_bool("OBJECTX_VIS_EXPORT_MESH", True):
             gs_mesh = mesh.splat_to_mesh(
@@ -568,8 +645,9 @@ class SceneGraph2UnstructuredLatentPipeline:
                     "compute_cov3D_python": False,
                     "convert_SHs_python": False,
                 },
-                bg_color=torch.tensor((0.0, 0.0, 0.0), device="cuda"),
+                bg_color=bg_color,
             )["render"]
+            rendered_image = self._postprocess_render(rendered_image)
 
             frame_path = f"{output_dir}/{scene_ids[0]}_frame_{i:03d}.png"
             save_image(rendered_image, frame_path)
@@ -626,19 +704,13 @@ class SceneGraph2UnstructuredLatentPipeline:
             rotation=torch.cat([splat.rotation for splat in reconstruction]),
         )
 
-        # Compute the centroid of all objects (Center of the scene)
         object_positions = representation.xyz.detach().cpu().numpy()
-        scene_center = object_positions.mean(axis=0)  # Mean position of objects
 
-        print(f"Scene Center: {scene_center}")
-
-        # Set camera path parameters
-        num_frames = 120  # Number of frames for a smooth orbit
-        radius = 2.0  # Distance of the camera from the scene center
-        height = 1.5  # Keep the camera at the same height as the scene center
+        num_frames = int(os.environ.get("OBJECTX_VIS_NUM_FRAMES", "120"))
         angle_step = 2 * np.pi / num_frames  # Step size for rotation
 
         rendered_frames = []
+        bg_color = self._get_bg_color()
 
         # Get intrinsics for frustum visualization
         intrinsics = self.dataset.image_intrinsics[scene_id]
@@ -655,6 +727,14 @@ class SceneGraph2UnstructuredLatentPipeline:
             far_plane=100.0,
         )
         o3d.io.write_triangle_mesh(f"{output_dir}/{scene_id}_mesh.ply", gs_mesh)
+        fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
+        fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
+        scene_center, radius, height = self._compute_orbit_camera_params(
+            object_positions,
+            num_objects=len(reconstruction),
+            fovx=fovx,
+            fovy=fovy,
+        )
 
         for i in range(num_frames):
             theta = i * angle_step
@@ -708,8 +788,9 @@ class SceneGraph2UnstructuredLatentPipeline:
                     "compute_cov3D_python": False,
                     "convert_SHs_python": False,
                 },
-                bg_color=torch.tensor((0.0, 0.0, 0.0), device="cuda"),
+                bg_color=bg_color,
             )["render"]
+            rendered_image = self._postprocess_render(rendered_image)
 
             frame_path = f"{output_dir}/{scene_ids[0]}_frame_{i:03d}.png"
             save_image(rendered_image, frame_path)
