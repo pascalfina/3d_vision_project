@@ -1,0 +1,76 @@
+\documentclass{ol-softwaremanual}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{hyperref}
+\usepackage[a4paper,top=4.2cm,bottom=4.2cm,left=3.2cm,right=3.2cm]{geometry}
+
+\title{3D Object Reconstruction Project\\Current Progress Overview}
+\version{0.1.0}
+\author{Pascal Fina}
+
+\begin{document}
+
+\maketitle
+
+\section{Current Status}
+\begin{itemize}
+  \item We successfully set up and ran the main Object-X preprocessing pipeline on our data.
+  \item In particular, we generated the intermediate object representations needed by Object-X, including voxel-based object annotations and object-level visual features.
+  \item Based on this preprocessing, we generated the Object-X latent representations, in particular the structured latents (\texttt{SLAT}) and unstructured latents (\texttt{ULAT}).
+  \item We verified that the pretrained Object-X pipeline can reconstruct meaningful 3D outputs from these latents.
+  \item This means that the reconstruction pipeline is already working end-to-end on our subset.
+\end{itemize}
+
+\section{Sparse vs Full Setup}
+\begin{itemize}
+  \item We created a sparse-view versus full-view setup for the same scenes.
+  \item We defined a 10-scene benchmark with train, validation, and test scenes.
+  \item We first generated sparse-view versions of the scenes by keeping only a subset of the available input views.
+  \item For these sparse scenes, we then intentionally removed voxels that were not actually observed under the retained views, so the sparse inputs reflect real partial evidence rather than full geometry.
+  \item After that, we generated both full-view latents and sparse-view latents for the same scenes.
+  \item This gives us a clean setup where the sparse input contains only partial observations and the full version serves as the completion target.
+\end{itemize}
+
+\section{Training Data for Step 2}
+\begin{itemize}
+  \item We converted the data into an object-level training dataset.
+  \item In total, we created 315 object pairs from the 10 scenes.
+  \item Each pair contains a sparse latent as input and a full latent as the target.
+  \item This gives us exactly the data needed to learn completion from partial observations.
+\end{itemize}
+
+\section{Current Model}
+\begin{itemize}
+  \item We are already training a first completion baseline on these latent pairs.
+  \item The current model is a small 3D U-Net / 3D CNN-style network operating directly in the structured latent space.
+  \item Its goal is to take a partial object latent and predict the corresponding complete object latent.
+\end{itemize}
+
+\section{Main Result So Far}
+\begin{itemize}
+  \item The model is already learning meaningful completions.
+  \item In the best run so far, we reached a validation loss of about 2.69.
+  \item On the test set, we observed about 69.8\% improvement over the baseline and around 40\% voxel accuracy in the current metric.
+  \item This shows that the project is already in the reconstruction/completion stage, not in an early setup stage anymore.
+\end{itemize}
+
+\section{Current Practical Limitations}
+\begin{itemize}
+  \item A major practical issue has been storage quota on the cluster scratch space.
+  \item The full preprocessing and latent-generation pipeline produces a large amount of intermediate data, especially voxel annotations, latent files, and derived reconstruction artifacts.
+  \item Because of these quota constraints, we are currently not in a good position to preprocess, store, and use the full 3RScan dataset at once with the current setup.
+  \item For this reason, we worked on a smaller controlled subset first in order to get the full pipeline running correctly and to validate the reconstruction/completion approach.
+  \item A possible improvement would be to obtain more storage quota, or to use an additional storage solution that allows us to stage or stream parts of the dataset from external storage when needed.
+  \item If more quota or a suitable storage workflow were available, scaling the current pipeline to a much larger part of 3RScan would be significantly easier.
+\end{itemize}
+
+\section{Conclusion}
+\begin{itemize}
+  \item Our current work is directly focused on reconstructing complete 3D objects from partial observations.
+  \item We are explicitly working on completion of unseen object parts in the Object-X latent space.
+  \item Therefore, the current pipeline is clearly aligned with 3D object reconstruction/completion.
+\end{itemize}
+
+\end{document}
