@@ -45,6 +45,17 @@ def output_exists(scratch_root: Path, scan_id: str) -> bool:
     return False
 
 
+def resolve_mask_source() -> str:
+    source = (os.environ.get("OBJECTX_MASK_SOURCE") or "gt_projection").strip()
+    aliases = {
+        "gt": "gt_projection",
+        "gt_projection": "gt_projection",
+        "pred": "pred_projection",
+        "pred_projection": "pred_projection",
+    }
+    return aliases.get(source, source)
+
+
 def stage_scan(src_scan_dir: Path, tmp_scan_dir: Path):
     if tmp_scan_dir.exists():
         shutil.rmtree(tmp_scan_dir)
@@ -91,10 +102,23 @@ def prepare_tmp_layout(scratch_root: Path, tmp_root: Path):
         safe_unlink(dst)
         os.symlink(src, dst)
 
-    src = scratch_root / "files" / "gt_projection"
-    dst = tmp_root / "files" / "gt_projection"
-    safe_unlink(dst)
-    os.symlink(src, dst)
+    mask_dirname = resolve_mask_source()
+    src = scratch_root / "files" / mask_dirname
+    if not src.exists():
+        raise FileNotFoundError(
+            f"Mask source directory does not exist: {src} "
+            f"(OBJECTX_MASK_SOURCE={mask_dirname})"
+        )
+
+    actual_dst = tmp_root / "files" / mask_dirname
+    safe_unlink(actual_dst)
+    os.symlink(src, actual_dst)
+
+    alias_dst = tmp_root / "files" / "gt_projection"
+    if alias_dst != actual_dst:
+        safe_unlink(alias_dst)
+        os.symlink(src, alias_dst)
+    print(f"[feat3d] using mask source {mask_dirname}", flush=True)
 
 
 def write_single_scan_split(tmp_root: Path, split: str, scan_id: str):

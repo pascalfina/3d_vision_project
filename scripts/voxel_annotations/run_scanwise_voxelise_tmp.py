@@ -30,6 +30,37 @@ def load_scan_ids(root: Path, split: str) -> list[str]:
     return [x.strip() for x in path.read_text().splitlines() if x.strip()]
 
 
+def resolve_mask_source() -> str:
+    source = (os.environ.get("OBJECTX_MASK_SOURCE") or "gt_projection").strip()
+    aliases = {
+        "gt": "gt_projection",
+        "gt_projection": "gt_projection",
+        "pred": "pred_projection",
+        "pred_projection": "pred_projection",
+    }
+    return aliases.get(source, source)
+
+
+def ensure_cache_env() -> None:
+    cache_root = os.environ.get("OBJECTX_CACHE_ROOT") or "/work/scratch/pafina/objectx-cache"
+    torch_home = os.environ.get("TORCH_HOME") or str(Path(cache_root) / "torch")
+    xdg_cache = os.environ.get("XDG_CACHE_HOME") or str(Path(cache_root) / "xdg")
+    mpl_cache = os.environ.get("MPLCONFIGDIR") or str(Path(cache_root) / "matplotlib")
+    dinov2_hub_dir = os.environ.get("OBJECTX_DINOV2_HUB_DIR") or str(
+        Path(torch_home) / "hub" / "facebookresearch_dinov2_main"
+    )
+
+    os.environ.setdefault("OBJECTX_CACHE_ROOT", cache_root)
+    os.environ.setdefault("TORCH_HOME", torch_home)
+    os.environ.setdefault("XDG_CACHE_HOME", xdg_cache)
+    os.environ.setdefault("MPLCONFIGDIR", mpl_cache)
+    os.environ.setdefault("OBJECTX_DINOV2_HUB_DIR", dinov2_hub_dir)
+
+    Path(torch_home).mkdir(parents=True, exist_ok=True)
+    Path(xdg_cache).mkdir(parents=True, exist_ok=True)
+    Path(mpl_cache).mkdir(parents=True, exist_ok=True)
+
+
 def all_outputs_exist(scratch_root: Path, obj_data: dict) -> bool:
     scan_id = obj_data["scan"]
     for obj in obj_data["objects"]:
@@ -93,6 +124,7 @@ def main():
     repo_root = Path(args.repo_root)
     scratch_root = Path(args.scratch_root)
     tmp_root = Path(args.tmp_root)
+    ensure_cache_env()
 
     sys.path.insert(0, str(repo_root))
     from configs import update_configs
@@ -124,26 +156,56 @@ def main():
                 dst.unlink()
             os.symlink(src, dst)
 
-    for name in ["gt_projection"]:
-        src = scratch_root / "files" / name
-        dst = tmp_root / "files" / name
-        if dst.exists() or dst.is_symlink():
-            if dst.is_dir() and not dst.is_symlink():
-                shutil.rmtree(dst)
+    mask_dirname = resolve_mask_source()
+    src = scratch_root / "files" / mask_dirname
+    if not src.exists():
+        raise FileNotFoundError(
+            f"Mask source directory does not exist: {src} "
+            f"(OBJECTX_MASK_SOURCE={mask_dirname})"
+        )
+
+    actual_dst = tmp_root / "files" / mask_dirname
+    if actual_dst.exists() or actual_dst.is_symlink():
+        if actual_dst.is_dir() and not actual_dst.is_symlink():
+            shutil.rmtree(actual_dst)
+        else:
+            actual_dst.unlink()
+    os.symlink(src, actual_dst)
+
+    alias_dst = tmp_root / "files" / "gt_projection"
+    if alias_dst != actual_dst:
+        if alias_dst.exists() or alias_dst.is_symlink():
+            if alias_dst.is_dir() and not alias_dst.is_symlink():
+                shutil.rmtree(alias_dst)
             else:
-                dst.unlink()
-        os.symlink(src, dst)
+                alias_dst.unlink()
+        os.symlink(src, alias_dst)
+    print(f"[2.5] using mask source {mask_dirname}", flush=True)
+    print(
+        f"[2.5] using cache root {os.environ['OBJECTX_CACHE_ROOT']} "
+        f"(hub={os.environ['OBJECTX_DINOV2_HUB_DIR']})",
+        flush=True,
+    )
 
     os.environ["DATA_ROOT_DIR"] = str(tmp_root)
+    visualize = os.environ.get("OBJECTX_VOXEL_VISUALIZE", "0").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    }
     vf.args = argparse.Namespace(
         config=args.config,
         split=args.split,
         model_dir=str(scratch_root),
         model=args.model,
-        visualize=False,
+        visualize=visualize,
         vis_dir=str(repo_root / "vis"),
         dry_run=False,
         override=args.override,
+        mask_source=mask_dirname,
+        object_source=os.environ.get("OBJECTX_VOXEL_OBJECT_SOURCE"),
     )
     vf.root_dir = str(tmp_root)
     vf.model = vf._load_dino_model(args.model)

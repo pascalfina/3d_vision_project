@@ -1,4 +1,5 @@
 import json
+import os
 import os.path as osp
 import pickle
 import re
@@ -689,21 +690,36 @@ def get_scan3r_path(path: str):
     return scan3r_path
 
 
-def load_masks(data_dir, scan_id):
-    mask_file = osp.join(data_dir, "files/gt_projection/obj_id_pkl", f"{scan_id}.pkl")
+def resolve_mask_source(mask_source: str = None) -> str:
+    source = (mask_source or os.getenv("OBJECTX_MASK_SOURCE") or "gt_projection").strip()
+    aliases = {
+        "gt": "gt_projection",
+        "gt_projection": "gt_projection",
+        "pred": "pred_projection",
+        "pred_projection": "pred_projection",
+    }
+    return aliases.get(source, source)
+
+
+def get_mask_dir(data_dir: str, mask_source: str = None) -> str:
+    return osp.join(data_dir, "files", resolve_mask_source(mask_source), "obj_id_pkl")
+
+
+def load_masks(data_dir, scan_id, mask_source: str = None):
+    mask_file = osp.join(get_mask_dir(data_dir, mask_source), f"{scan_id}.pkl")
     mask = common.load_pkl_data(mask_file)
     return mask
 
 
-def load_mask(data_dir, scan_id, frame_idx):
-    mask_file = osp.join(data_dir, "files/gt_projection/obj_id_pkl", f"{scan_id}.pkl")
+def load_mask(data_dir, scan_id, frame_idx, mask_source: str = None):
+    mask_file = osp.join(get_mask_dir(data_dir, mask_source), f"{scan_id}.pkl")
     mask = common.load_pkl_data(mask_file)
     mask = mask[frame_idx]
     return mask
 
 
-def load_frame_idxs_per_obj(obj_id, data_dir, scan_id):
-    save_pkl_dir = osp.join(data_dir, "files/gt_projection/obj_id_pkl")
+def load_frame_idxs_per_obj(obj_id, data_dir, scan_id, mask_source: str = None):
+    save_pkl_dir = get_mask_dir(data_dir, mask_source)
     obj_id_imgs = common.load_pkl_data(osp.join(save_pkl_dir, f"{scan_id}.pkl"))
 
     frames = []

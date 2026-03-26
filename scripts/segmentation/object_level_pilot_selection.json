@@ -1,0 +1,32 @@
+{
+  "name": "predseg_object_level_pilot_v1",
+  "description": "Five larger objects from five different benchmark scenes for object-level predseg testing.",
+  "default_split": "val",
+  "objects": [
+    {
+      "scan_id": "0ad2d38f-79e2-2212-98d2-9b5060e5e9b5",
+      "obj_id": 14,
+      "label": "nightstand"
+    },
+    {
+      "scan_id": "6bde604b-9162-246f-8fb2-2dea80e7fb4c",
+      "obj_id": 12,
+      "label": "coffee table"
+    },
+    {
+      "scan_id": "8eabc451-5af7-2f32-87b5-026aa18e3190",
+      "obj_id": 1,
+      "label": "toilet"
+    },
+    {
+      "scan_id": "5341b7e3-8a66-2cdd-8709-66a2159f0017",
+      "obj_id": 10,
+      "label": "oven"
+    },
+    {
+      "scan_id": "e61b0e04-bada-2f31-82d6-72831a602ba7",
+      "obj_id": 42,
+      "label": "cabinet"
+    }
+  ]
+}

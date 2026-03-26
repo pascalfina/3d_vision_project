@@ -34,6 +34,17 @@ def load_scan_ids(root: Path, split: str) -> list[str]:
     return [x.strip() for x in path.read_text().splitlines() if x.strip()]
 
 
+def resolve_mask_source() -> str:
+    source = (os.environ.get("OBJECTX_MASK_SOURCE") or "gt_projection").strip()
+    aliases = {
+        "gt": "gt_projection",
+        "gt_projection": "gt_projection",
+        "pred": "pred_projection",
+        "pred_projection": "pred_projection",
+    }
+    return aliases.get(source, source)
+
+
 def stage_scan(src_scan_dir: Path, tmp_scan_dir: Path):
     if tmp_scan_dir.exists():
         shutil.rmtree(tmp_scan_dir)
@@ -66,12 +77,12 @@ def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: l
     (tmp_root / "files").mkdir(parents=True, exist_ok=True)
 
     # Link persistent metadata and preprocessed artifacts.
+    mask_dirname = resolve_mask_source()
     link_names = [
         "3RScan.json",
         "objects.json",
         "scannet40_classes.txt",
         "orig",
-        "gt_projection",
         "gs_annotations",
         "Features3D",
     ]
@@ -81,6 +92,18 @@ def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: l
         safe_unlink(dst)
         if src.exists():
             os.symlink(src, dst)
+
+    mask_src = scratch_root / "files" / mask_dirname
+    if mask_src.exists():
+        actual_dst = tmp_root / "files" / mask_dirname
+        safe_unlink(actual_dst)
+        os.symlink(mask_src, actual_dst)
+
+        alias_dst = tmp_root / "files" / "gt_projection"
+        if alias_dst != actual_dst:
+            safe_unlink(alias_dst)
+            os.symlink(mask_src, alias_dst)
+    print(f"[infer] using mask source {mask_dirname}", flush=True)
 
     # Write one-line split file for targeted inference, or mirror the requested split.
     split_file = tmp_root / "files" / f"{split}_resplit_scans.txt"
