@@ -21,6 +21,18 @@ __pycache__/
 **/out/
 **/tmp*/
 **/vis/
+!vis/
+vis/*
+!vis/rendered/
+!vis/rendered_gs/
+vis/rendered/*
+vis/rendered_gs/*
+!vis/rendered/*.mp4
+!vis/rendered/*.mov
+!vis/rendered/*.gif
+!vis/rendered_gs/*.mp4
+!vis/rendered_gs/*.mov
+!vis/rendered_gs/*.gif
 
 # temporary files
 logs/
