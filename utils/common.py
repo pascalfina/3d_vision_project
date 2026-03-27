@@ -3,6 +3,7 @@ import logging
 import os
 import os.path as osp
 import pickle
+import sys
 import zipfile
 import gzip
 
@@ -11,6 +12,22 @@ import numpy as np
 import pickle5
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _install_numpy_pickle_compat():
+    """Alias newer numpy pickle module paths for older runtime envs."""
+    if "numpy._core" not in sys.modules:
+        sys.modules["numpy._core"] = np.core
+    for name in [
+        "multiarray",
+        "numeric",
+        "umath",
+        "_multiarray_umath",
+        "_dtype",
+    ]:
+        module = getattr(np.core, name, None)
+        if module is not None:
+            sys.modules.setdefault(f"numpy._core.{name}", module)
 
 
 class BatchEncoder(json.JSONEncoder):
@@ -77,6 +94,7 @@ def assert_dir(path):
 
 def load_pkl_data(filename):
     gz_filename = f"{filename}.gz"
+    _install_numpy_pickle_compat()
     try:
         opener = gzip.open if osp.exists(gz_filename) and not osp.exists(filename) else open
         target = gz_filename if osp.exists(gz_filename) and not osp.exists(filename) else filename

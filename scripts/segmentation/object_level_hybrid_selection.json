@@ -1,0 +1,17 @@
+{
+  "name": "predseg_object_level_hybrid_v1",
+  "description": "Two-object subset with oven and cabinet for hybrid fusion end-to-end testing.",
+  "default_split": "val",
+  "objects": [
+    {
+      "scan_id": "5341b7e3-8a66-2cdd-8709-66a2159f0017",
+      "obj_id": 10,
+      "label": "oven"
+    },
+    {
+      "scan_id": "e61b0e04-bada-2f31-82d6-72831a602ba7",
+      "obj_id": 42,
+      "label": "cabinet"
+    }
+  ]
+}
