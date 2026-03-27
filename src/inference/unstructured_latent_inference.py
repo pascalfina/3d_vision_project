@@ -8,6 +8,7 @@ import imageio
 import numpy as np
 import open3d as o3d
 import torch
+import torch.nn.functional as F
 from gaussian_renderer import render
 from PIL import Image
 from torchvision.utils import save_image
@@ -140,6 +141,189 @@ class SceneGraph2UnstructuredLatentPipeline:
             values.append(int(item))
         return values
 
+    def _slice_sparse_by_batch_range(self, sparse_tensor, start_batch, end_batch):
+        coords = sparse_tensor.coords
+        feats = sparse_tensor.feats
+        keep = (coords[:, 0] >= start_batch) & (coords[:, 0] < end_batch)
+        chunk_coords = coords[keep].clone()
+        chunk_feats = feats[keep]
+        if chunk_coords.numel() == 0:
+            return None
+        chunk_coords[:, 0] -= int(start_batch)
+        return SparseTensor(coords=chunk_coords.int(), feats=chunk_feats)
+
+    def _make_empty_gaussian(self):
+        gaussian = Gaussian(
+            sh_degree=0,
+            aabb=[-0.0, -0.0, -0.0, 1.0, 1.0, 1.0],
+            mininum_kernel_size=self.rep_config["3d_filter_kernel_size"],
+            scaling_bias=self.rep_config["scaling_bias"],
+            opacity_bias=self.rep_config["opacity_bias"],
+            scaling_activation=self.rep_config["scaling_activation"],
+            device=self.device,
+        )
+        gaussian._xyz = torch.zeros((0, 3), device=self.device, dtype=torch.float32)
+        gaussian._features_dc = torch.zeros(
+            (0, 1, 3), device=self.device, dtype=torch.float32
+        )
+        gaussian._features_rest = None
+        gaussian._opacity = torch.zeros((0, 1), device=self.device, dtype=torch.float32)
+        gaussian._scaling = torch.zeros((0, 3), device=self.device, dtype=torch.float32)
+        gaussian._rotation = torch.zeros((0, 4), device=self.device, dtype=torch.float32)
+        return gaussian
+
+    def _extract_support_coords_by_batch(self, sparse_tensor, total_objects):
+        coords = sparse_tensor.coords
+        support = []
+        for batch_idx in range(int(total_objects)):
+            keep = coords[:, 0] == batch_idx
+            if keep.any():
+                support.append(coords[keep, 1:4].clone().int())
+            else:
+                support.append(
+                    torch.zeros((0, 3), device=coords.device, dtype=torch.int32)
+                )
+        return support
+
+    def _mask_gaussian(self, splat, mask):
+        if mask is None:
+            return splat
+        if mask.dtype != torch.bool:
+            mask = mask.bool()
+        splat._xyz = splat._xyz[mask]
+        splat._features_dc = splat._features_dc[mask]
+        if splat._features_rest is not None:
+            splat._features_rest = splat._features_rest[mask]
+        splat._opacity = splat._opacity[mask]
+        splat._scaling = splat._scaling[mask]
+        splat._rotation = splat._rotation[mask]
+        return splat
+
+    def _constrain_reconstruction_to_support(
+        self, reconstruction, support_coords_by_batch, label
+    ):
+        if not self._get_env_bool("OBJECTX_VIS_SUPPORT_CONSTRAIN", False):
+            return reconstruction
+
+        dilate_voxels = max(
+            0, self._get_env_int("OBJECTX_VIS_SUPPORT_DILATE_VOXELS", 2)
+        )
+        max_scale_voxels = self._get_env_float(
+            "OBJECTX_VIS_SUPPORT_MAX_SCALE_VOXELS", 3.0
+        )
+        max_scale_local = (
+            (max_scale_voxels / 64.0) if max_scale_voxels > 0.0 else None
+        )
+        min_keep = max(1, self._get_env_int("OBJECTX_VIS_SUPPORT_MIN_KEEP", 16))
+
+        constrained = []
+        total_before = 0
+        total_after = 0
+        for idx, splat in enumerate(reconstruction):
+            if splat is None or splat._xyz is None or splat._xyz.numel() == 0:
+                constrained.append(splat)
+                continue
+
+            total_before += int(splat._xyz.shape[0])
+            support = (
+                support_coords_by_batch[idx]
+                if idx < len(support_coords_by_batch)
+                else None
+            )
+            if support is None or support.numel() == 0:
+                constrained.append(splat)
+                total_after += int(splat._xyz.shape[0])
+                continue
+
+            device = splat.get_xyz.device
+            support = support.to(device=device, dtype=torch.long)
+            occupancy = torch.zeros(
+                (1, 1, 64, 64, 64), device=device, dtype=torch.float32
+            )
+            occupancy[0, 0, support[:, 0], support[:, 1], support[:, 2]] = 1.0
+            if dilate_voxels > 0:
+                kernel = 2 * dilate_voxels + 1
+                occupancy = F.max_pool3d(
+                    occupancy, kernel_size=kernel, stride=1, padding=dilate_voxels
+                )
+
+            q = torch.clamp((splat.get_xyz * 64.0).long(), min=0, max=63)
+            keep = occupancy[0, 0, q[:, 0], q[:, 1], q[:, 2]] > 0.5
+
+            if max_scale_local is not None:
+                keep &= splat.get_scaling.max(dim=1).values <= max_scale_local
+
+            keep_count = int(keep.sum().item())
+            if keep_count < min_keep:
+                opacity = splat.get_opacity.reshape(-1)
+                topk = min(min_keep, int(opacity.numel()))
+                top_idx = torch.topk(opacity, k=topk, largest=True, sorted=False).indices
+                keep = torch.zeros_like(keep)
+                keep[top_idx] = True
+                keep_count = int(keep.sum().item())
+
+            constrained.append(self._mask_gaussian(splat, keep))
+            total_after += keep_count
+
+        _LOGGER.info(
+            "Support-constrained gaussian cleanup for %s kept %s/%s gaussians (dilate_voxels=%s max_scale_voxels=%s)",
+            label,
+            total_after,
+            total_before,
+            dilate_voxels,
+            max_scale_voxels,
+        )
+        return constrained
+
+    def _decode_sparse_in_object_chunks(self, reconstruction_sparse, objects_per_chunk):
+        total_objects = int(reconstruction_sparse.shape[0])
+        if objects_per_chunk <= 0 or total_objects <= objects_per_chunk:
+            return self.latent_autoencoder.decode(reconstruction_sparse)
+
+        decoded = []
+        for start in range(0, total_objects, objects_per_chunk):
+            end = min(start + objects_per_chunk, total_objects)
+            chunk_size = end - start
+            sparse_chunk = self._slice_sparse_by_batch_range(
+                reconstruction_sparse, start, end
+            )
+            if sparse_chunk is None:
+                _LOGGER.warning(
+                    "Skipping empty decode chunk %s:%s/%s", start, end, total_objects
+                )
+                decoded.extend(
+                    [self._make_empty_gaussian() for _ in range(chunk_size)]
+                )
+                continue
+            _LOGGER.info(
+                "Decoding gaussian object chunk %s:%s/%s sparse_coords=%s",
+                start,
+                end,
+                total_objects,
+                sparse_chunk.coords.shape[0],
+            )
+            chunk_decoded = self.latent_autoencoder.decode(sparse_chunk)
+            if len(chunk_decoded) != chunk_size:
+                _LOGGER.warning(
+                    "Decode chunk %s:%s/%s returned %s objects, expected %s; padding/truncating to preserve alignment",
+                    start,
+                    end,
+                    total_objects,
+                    len(chunk_decoded),
+                    chunk_size,
+                )
+                if len(chunk_decoded) < chunk_size:
+                    chunk_decoded = chunk_decoded + [
+                        self._make_empty_gaussian()
+                        for _ in range(chunk_size - len(chunk_decoded))
+                    ]
+                else:
+                    chunk_decoded = chunk_decoded[:chunk_size]
+            decoded.extend(chunk_decoded)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        return decoded
+
     def _decode_gaussians_with_retry(self, reconstruction_dense):
         occ_candidates = [
             float(os.environ.get("OBJECTX_INFER_OCC_THRESHOLD", "0.1"))
@@ -150,6 +334,9 @@ class SceneGraph2UnstructuredLatentPipeline:
             self._get_env_int_list(
                 "OBJECTX_INFER_MAX_VOXELS_FALLBACKS", "200000,150000,120000,80000"
             )
+        )
+        decode_objects_per_chunk = int(
+            os.environ.get("OBJECTX_INFER_DECODE_OBJECTS_PER_CHUNK", "0")
         )
 
         tried = set()
@@ -167,20 +354,25 @@ class SceneGraph2UnstructuredLatentPipeline:
                 )
                 try:
                     _LOGGER.info(
-                        "Decoding gaussians with occ_threshold=%s max_voxels=%s sparse_coords=%s",
+                        "Decoding gaussians with occ_threshold=%s max_voxels=%s sparse_coords=%s decode_objects_per_chunk=%s",
                         occ,
                         max_voxels,
                         reconstruction_sparse.coords.shape[0],
+                        decode_objects_per_chunk,
                     )
-                    return self.latent_autoencoder.decode(reconstruction_sparse)
+                    return self._decode_sparse_in_object_chunks(
+                        reconstruction_sparse,
+                        decode_objects_per_chunk,
+                    )
                 except (torch.OutOfMemoryError, RuntimeError) as exc:
                     last_exc = exc
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     _LOGGER.warning(
-                        "Gaussian decode retry failed with occ_threshold=%s max_voxels=%s: %s",
+                        "Gaussian decode retry failed with occ_threshold=%s max_voxels=%s decode_objects_per_chunk=%s: %s",
                         occ,
                         max_voxels,
+                        decode_objects_per_chunk,
                         exc,
                     )
         if last_exc is not None:
@@ -226,6 +418,9 @@ class SceneGraph2UnstructuredLatentPipeline:
                 sparse_splat = self.latent_autoencoder.encode(
                     {"scene_graphs": {"tot_obj_splat": tot_obj_splat}}
                 )
+            support_coords_by_batch = self._extract_support_coords_by_batch(
+                sparse_splat, tot_obj_splat.shape[0]
+            )
 
             # Stage 2.
             stage2_scene_graphs = {
@@ -238,6 +433,11 @@ class SceneGraph2UnstructuredLatentPipeline:
                 reconstruction_dense = self.model.decode(embedding)
                 reconstruction = self._decode_gaussians_with_retry(
                     reconstruction_dense
+                )
+                reconstruction = self._constrain_reconstruction_to_support(
+                    reconstruction,
+                    support_coords_by_batch,
+                    f"{scene_graphs['scene_ids'][0]}_decode",
                 )
             else:
                 reconstruction = None
