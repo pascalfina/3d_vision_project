@@ -61,6 +61,12 @@ def parse_args():
         help="Frame selection mode used before lifting/fusion.",
     )
     parser.add_argument(
+        "--object-source",
+        default="tsdf_masks",
+        choices=["lifted_masks", "tsdf_masks", "hybrid_masks"],
+        help="Which object-construction path to evaluate as the fused result.",
+    )
+    parser.add_argument(
         "--k",
         action="append",
         type=int,
@@ -224,6 +230,7 @@ def compute_metrics_for_object(
     label: str,
     mask_source: str,
     frame_selection: str,
+    object_source: str,
     ks: list[int],
 ) -> list[dict]:
     scene_source_root = resolve_scene_source_root(
@@ -241,7 +248,9 @@ def compute_metrics_for_object(
     depth_shift = vf._load_depth_shift(str(scenes_dir), scan_id)
 
     frame_ids, obj_masks = build_visible_frames(scene_source_root, scan_id, obj_id, masks)
-    frame_ids, obj_masks = vf._filter_selected_masks(frame_ids, obj_masks, object_source="tsdf_masks")
+    frame_ids, obj_masks = vf._filter_selected_masks(
+        frame_ids, obj_masks, object_source=object_source
+    )
 
     mean, scale, gt_voxels = load_gt_geometry(baseline_root, scan_id, obj_id)
     gt_set = voxel_set(gt_voxels)
@@ -268,20 +277,23 @@ def compute_metrics_for_object(
                     depth_shift,
                 )
             selected_depths.append(depth_cache[frame_id])
-        pose_camera_to_world = [np.linalg.inv(extrinsics[frame_id]) for frame_id in selected_frame_ids]
+        pose_camera_to_world = vf._resolve_pose_camera_to_world(
+            extrinsics, selected_frame_ids
+        )
+        pose_world_to_camera = vf._invert_pose_list(pose_camera_to_world)
 
         projection_color, linear_depth = vf._project_to_image(
             torch.tensor(gt_voxels, dtype=torch.float32),
             torch.tensor(mean, dtype=torch.float32),
             torch.tensor([scale], dtype=torch.float32),
-            torch.from_numpy(np.stack(pose_camera_to_world)),
+            torch.from_numpy(np.stack(pose_world_to_camera)),
             torch.from_numpy(intrinsics["intrinsic_mat"]),
         )
         projection_depth, _ = vf._project_to_image(
             torch.tensor(gt_voxels, dtype=torch.float32),
             torch.tensor(mean, dtype=torch.float32),
             torch.tensor([scale], dtype=torch.float32),
-            torch.from_numpy(np.stack(pose_camera_to_world)),
+            torch.from_numpy(np.stack(pose_world_to_camera)),
             torch.from_numpy(depth_intrinsics["intrinsic_mat"]),
         )
         observed_views = vf._compute_voxel_observations(
@@ -317,20 +329,40 @@ def compute_metrics_for_object(
         }
         vf.args = argparse.Namespace(visualize=False)
         with temp_env(env):
-            fused_voxels, _, _ = vf._build_tsdf_object_voxel_grid(
-                scan_id=scan_id,
-                obj_id=obj_id,
-                selected_masks=selected_masks,
-                selected_depths=selected_depths,
-                pose_camera_to_world=pose_camera_to_world,
-                depth_intrinsics=depth_intrinsics,
-            )
+            if object_source == "lifted_masks":
+                fused_voxels, _, _ = vf._build_lifted_object_voxel_grid(
+                    scan_id=scan_id,
+                    obj_id=obj_id,
+                    selected_masks=selected_masks,
+                    selected_depths=selected_depths,
+                    pose_camera_to_world=pose_camera_to_world,
+                    depth_intrinsics=depth_intrinsics,
+                )
+            elif object_source == "hybrid_masks":
+                fused_voxels, _, _ = vf._build_hybrid_object_voxel_grid(
+                    scan_id=scan_id,
+                    obj_id=obj_id,
+                    selected_masks=selected_masks,
+                    selected_depths=selected_depths,
+                    pose_camera_to_world=pose_camera_to_world,
+                    depth_intrinsics=depth_intrinsics,
+                )
+            else:
+                fused_voxels, _, _ = vf._build_tsdf_object_voxel_grid(
+                    scan_id=scan_id,
+                    obj_id=obj_id,
+                    selected_masks=selected_masks,
+                    selected_depths=selected_depths,
+                    pose_camera_to_world=pose_camera_to_world,
+                    depth_intrinsics=depth_intrinsics,
+                )
         fused_set = voxel_set(fused_voxels)
 
         metric = {
             "scan_id": scan_id,
             "obj_id": int(obj_id),
             "label": label,
+            "object_source": object_source,
             "k": int(k),
             "selected_frames": len(selected_frame_ids),
             "frame_ids": selected_frame_ids,
@@ -469,6 +501,7 @@ def main():
                 label=obj.get("label", "unknown"),
                 mask_source=args.mask_source,
                 frame_selection=args.frame_selection,
+                object_source=args.object_source,
                 ks=ks,
             )
             all_rows.extend(rows)

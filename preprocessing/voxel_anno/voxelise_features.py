@@ -290,7 +290,7 @@ def _clean_object_mask(mask: np.ndarray) -> np.ndarray:
 def _filter_selected_masks(
     selected_frame_ids: list[str], selected_masks: list[np.ndarray], object_source: str
 ) -> tuple[list[str], list[np.ndarray]]:
-    if object_source not in {"lifted_masks", "tsdf_masks"}:
+    if object_source not in {"lifted_masks", "tsdf_masks", "hybrid_masks"}:
         return selected_frame_ids, selected_masks
 
     clean_masks = os.getenv("OBJECTX_VOXEL_CLEAN_MASKS", "1").lower() not in {
@@ -469,8 +469,39 @@ def _resolve_object_source() -> str:
         "fused": "tsdf_masks",
         "fused_masks": "tsdf_masks",
         "tsdf_masks": "tsdf_masks",
+        "hybrid": "hybrid_masks",
+        "hybrid_masks": "hybrid_masks",
+        "union": "hybrid_masks",
     }
     return aliases.get(source, source)
+
+
+def _resolve_pose_camera_to_world(
+    extrinsics: Dict[str, np.ndarray], frame_ids: list[str]
+) -> list[np.ndarray]:
+    mode = (os.getenv("OBJECTX_VOXEL_POSE_MODE") or "raw").strip().lower()
+    aliases = {
+        "raw": "raw",
+        "direct": "raw",
+        "camera_to_world": "raw",
+        "cam2world": "raw",
+        "invert": "invert",
+        "inverse": "invert",
+        "world_to_camera": "invert",
+        "world2cam": "invert",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in {"raw", "invert"}:
+        raise ValueError(
+            f"Unsupported OBJECTX_VOXEL_POSE_MODE={mode!r}; expected 'raw' or 'invert'"
+        )
+    if mode == "raw":
+        return [np.array(extrinsics[frame_id], copy=True) for frame_id in frame_ids]
+    return [np.linalg.inv(extrinsics[frame_id]) for frame_id in frame_ids]
+
+
+def _invert_pose_list(poses: list[np.ndarray]) -> list[np.ndarray]:
+    return [np.linalg.inv(pose).astype(np.float32) for pose in poses]
 
 
 def _normalize_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
@@ -599,7 +630,7 @@ def _lift_masked_points(
     intrinsic = depth_intrinsics["intrinsic_mat"].astype(np.float32)
     intrinsic_inv = np.linalg.inv(intrinsic).astype(np.float32)
     pixel_stride = max(1, int(os.getenv("OBJECTX_VOXEL_LIFT_PIXEL_STRIDE", "1")))
-    coord_system = os.getenv("OBJECTX_VOXEL_LIFT_COORD_SYSTEM", "scan3r").strip().lower()
+    coord_system = os.getenv("OBJECTX_VOXEL_LIFT_COORD_SYSTEM", "pinhole").strip().lower()
 
     lifted_points = []
     for obj_mask, depth_map, camera_to_world in zip(
@@ -660,14 +691,14 @@ def _lift_masked_points(
     return filtered_points
 
 
-def _build_lifted_object_voxel_grid(
+def _prepare_lifted_geometry(
     scan_id: str,
     obj_id: int,
     selected_masks: list[np.ndarray],
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     lifted_points = _lift_masked_points(
         selected_masks=selected_masks,
         selected_depths=selected_depths,
@@ -695,15 +726,58 @@ def _build_lifted_object_voxel_grid(
         normalized_points, mean, scale = _normalize_points(lifted_points)
     else:
         normalized_points, mean, scale = normalized_with_reference
-    voxel_grid = _voxelize_normalized_points(normalized_points, dilate_iters=1)
+    return lifted_points, normalized_points, mean, scale
+
+
+def _finalize_object_voxel_grid(
+    voxel_grid: np.ndarray,
+    *,
+    scan_id: str,
+    obj_id: int,
+    variant: str,
+) -> np.ndarray:
+    voxel_grid = np.unique(voxel_grid.astype(np.int32), axis=0)
     voxel_grid = _keep_largest_voxel_component(voxel_grid)
     if voxel_grid.size == 0:
-        raise ValueError("No voxels created from lifted masked points")
+        raise ValueError(f"No voxels created from {variant}")
     min_voxels = int(os.getenv("OBJECTX_VOXEL_MIN_VOXELS", "0"))
     if voxel_grid.shape[0] < max(0, min_voxels):
         raise ValueError(
-            f"Too few voxels ({voxel_grid.shape[0]}) for object quality threshold"
+            f"Too few {variant} voxels ({voxel_grid.shape[0]}) for object quality threshold"
         )
+    _LOGGER.info(
+        "[2.5] object %s/%s %s_voxels=%s",
+        scan_id,
+        obj_id,
+        variant,
+        int(voxel_grid.shape[0]),
+    )
+    return voxel_grid
+
+
+def _build_lifted_object_voxel_grid(
+    scan_id: str,
+    obj_id: int,
+    selected_masks: list[np.ndarray],
+    selected_depths: list[np.ndarray],
+    pose_camera_to_world: list[np.ndarray],
+    depth_intrinsics: dict,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    lifted_points, normalized_points, mean, scale = _prepare_lifted_geometry(
+        scan_id=scan_id,
+        obj_id=obj_id,
+        selected_masks=selected_masks,
+        selected_depths=selected_depths,
+        pose_camera_to_world=pose_camera_to_world,
+        depth_intrinsics=depth_intrinsics,
+    )
+    voxel_grid = _voxelize_normalized_points(normalized_points, dilate_iters=1)
+    voxel_grid = _finalize_object_voxel_grid(
+        voxel_grid,
+        scan_id=scan_id,
+        obj_id=obj_id,
+        variant="lifted",
+    )
 
     if args.visualize or os.getenv("OBJECTX_VOXEL_WRITE_LIFTED_PLY", "0") == "1":
         _save_point_cloud(lifted_points, f"vis/{scan_id}_{obj_id}_lifted_points_world.ply")
@@ -723,7 +797,9 @@ def _build_tsdf_object_voxel_grid(
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    lifted_points = _lift_masked_points(
+    lifted_points, normalized_points, mean, scale = _prepare_lifted_geometry(
+        scan_id=scan_id,
+        obj_id=obj_id,
         selected_masks=selected_masks,
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
@@ -735,21 +811,6 @@ def _build_tsdf_object_voxel_grid(
         obj_id,
         int(lifted_points.shape[0]),
     )
-    if lifted_points.shape[0] == 0:
-        raise ValueError("No valid 3D points after lifting masked depth")
-    min_lifted_points = int(os.getenv("OBJECTX_VOXEL_MIN_LIFTED_POINTS", "0"))
-    if lifted_points.shape[0] < max(0, min_lifted_points):
-        raise ValueError(
-            f"Too few lifted points ({lifted_points.shape[0]}) for object quality threshold"
-        )
-
-    normalized_with_reference = _normalize_points_with_reference(
-        lifted_points, scan_id=scan_id, obj_id=obj_id
-    )
-    if normalized_with_reference is None:
-        _, mean, scale = _normalize_points(lifted_points)
-    else:
-        _, mean, scale = normalized_with_reference
 
     tsdf_resolution = int(os.getenv("OBJECTX_VOXEL_TSDF_RESOLUTION", "96"))
     tsdf_sdf_trunc = float(
@@ -827,11 +888,6 @@ def _build_tsdf_object_voxel_grid(
     fallback_to_lifted = os.getenv(
         "OBJECTX_VOXEL_TSDF_FALLBACK_TO_LIFTED", "1"
     ).lower() not in {"0", "false", "no", "off", ""}
-    normalized_points = (
-        (lifted_points - mean[None, :]) * (1.0 / (2.0 * scale))
-    ).astype(np.float32)
-    normalized_points = np.clip(normalized_points, -0.5 + 1e-6, 0.5 - 1e-6)
-
     if len(tsdf_mesh.vertices) == 0 or len(tsdf_mesh.triangles) == 0:
         if not fallback_to_lifted:
             raise ValueError("TSDF fusion produced an empty mesh")
@@ -841,16 +897,12 @@ def _build_tsdf_object_voxel_grid(
             obj_id,
         )
         voxel_grid = _voxelize_normalized_points(normalized_points, dilate_iters=1)
-        voxel_grid = _keep_largest_voxel_component(voxel_grid)
-        if voxel_grid.size == 0:
-            raise ValueError(
-                "TSDF mesh empty and fallback lifted-point voxelization produced no voxels"
-            )
-        min_voxels = int(os.getenv("OBJECTX_VOXEL_MIN_VOXELS", "0"))
-        if voxel_grid.shape[0] < max(0, min_voxels):
-            raise ValueError(
-                f"Too few fallback voxels ({voxel_grid.shape[0]}) for object quality threshold"
-            )
+        voxel_grid = _finalize_object_voxel_grid(
+            voxel_grid,
+            scan_id=scan_id,
+            obj_id=obj_id,
+            variant="fallback_lifted",
+        )
         if args.visualize or os.getenv("OBJECTX_VOXEL_WRITE_LIFTED_PLY", "0") == "1":
             _save_point_cloud(
                 lifted_points, f"vis/{scan_id}_{obj_id}_lifted_points_world.ply"
@@ -877,7 +929,6 @@ def _build_tsdf_object_voxel_grid(
     )
     tsdf_dilate_iters = int(os.getenv("OBJECTX_VOXEL_TSDF_DILATE_ITERS", "0"))
     voxel_grid = np.array([voxel.grid_index for voxel in voxel_grid_o3d.get_voxels()])
-    voxel_grid = np.unique(voxel_grid.astype(np.int32), axis=0)
     for _ in range(max(0, tsdf_dilate_iters)):
         voxel_centers = ((voxel_grid.astype(np.float32) + 0.5) / 64.0) - 0.5
         tmp_point_cloud = o3d.geometry.PointCloud()
@@ -891,16 +942,56 @@ def _build_tsdf_object_voxel_grid(
             max_bound=(0.5, 0.5, 0.5),
         )
         voxel_grid = _dilate_voxels(tmp_voxel_grid)
-    voxel_grid = _keep_largest_voxel_component(voxel_grid)
-    if voxel_grid.size == 0:
-        raise ValueError("No voxels created from TSDF mesh")
-    min_voxels = int(os.getenv("OBJECTX_VOXEL_MIN_VOXELS", "0"))
-    if voxel_grid.shape[0] < max(0, min_voxels):
-        raise ValueError(
-            f"Too few TSDF voxels ({voxel_grid.shape[0]}) for object quality threshold"
-        )
+    voxel_grid = _finalize_object_voxel_grid(
+        voxel_grid,
+        scan_id=scan_id,
+        obj_id=obj_id,
+        variant="tsdf",
+    )
 
     return voxel_grid, mean, scale
+
+
+def _build_hybrid_object_voxel_grid(
+    scan_id: str,
+    obj_id: int,
+    selected_masks: list[np.ndarray],
+    selected_depths: list[np.ndarray],
+    pose_camera_to_world: list[np.ndarray],
+    depth_intrinsics: dict,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    lifted_voxel_grid, mean, scale = _build_lifted_object_voxel_grid(
+        scan_id=scan_id,
+        obj_id=obj_id,
+        selected_masks=selected_masks,
+        selected_depths=selected_depths,
+        pose_camera_to_world=pose_camera_to_world,
+        depth_intrinsics=depth_intrinsics,
+    )
+    tsdf_voxel_grid, _, _ = _build_tsdf_object_voxel_grid(
+        scan_id=scan_id,
+        obj_id=obj_id,
+        selected_masks=selected_masks,
+        selected_depths=selected_depths,
+        pose_camera_to_world=pose_camera_to_world,
+        depth_intrinsics=depth_intrinsics,
+    )
+    merged = np.concatenate([lifted_voxel_grid, tsdf_voxel_grid], axis=0)
+    merged = _finalize_object_voxel_grid(
+        merged,
+        scan_id=scan_id,
+        obj_id=obj_id,
+        variant="hybrid",
+    )
+    _LOGGER.info(
+        "[2.5] object %s/%s hybrid_union lifted=%s tsdf=%s merged=%s",
+        scan_id,
+        obj_id,
+        int(lifted_voxel_grid.shape[0]),
+        int(tsdf_voxel_grid.shape[0]),
+        int(merged.shape[0]),
+    )
+    return merged, mean, scale
 
 
 @torch.no_grad()
@@ -937,7 +1028,11 @@ def voxelise_features(
     depth_abs_tol = float(os.getenv("OBJECTX_VOXEL_DEPTH_ABS_TOL", "0.05"))
     depth_rel_tol = float(os.getenv("OBJECTX_VOXEL_DEPTH_REL_TOL", "0.02"))
     depth_map_cache = {}
-    requires_depth = filter_unobserved or object_source in {"lifted_masks", "tsdf_masks"}
+    requires_depth = filter_unobserved or object_source in {
+        "lifted_masks",
+        "tsdf_masks",
+        "hybrid_masks",
+    }
     if requires_depth:
         depth_intrinsics = scan3r.load_intrinsics(
             data_dir=scenes_dir, scan_id=scan_id, type="depth"
@@ -1061,9 +1156,9 @@ def voxelise_features(
                     selected_depths.append(depth_map_cache[frame_id])
 
             rendered_obj = torch.stack(rendered_obj).float()
-            pose_camera_to_world = [
-                np.linalg.inv(extrinsics[frame_id]) for frame_id in selected_frame_ids
-            ]
+            pose_camera_to_world = _resolve_pose_camera_to_world(
+                extrinsics, selected_frame_ids
+            )
             _log_rss(
                 f"[2.5] object {scan_id}/{obj_id} selected_frames={len(selected_frame_ids)}"
             )
@@ -1080,6 +1175,15 @@ def voxelise_features(
                 )
             elif object_source == "tsdf_masks":
                 voxel_grid, mean, scale = _build_tsdf_object_voxel_grid(
+                    scan_id=scan_id,
+                    obj_id=obj_id,
+                    selected_masks=selected_masks,
+                    selected_depths=selected_depths,
+                    pose_camera_to_world=pose_camera_to_world,
+                    depth_intrinsics=depth_intrinsics,
+                )
+            elif object_source == "hybrid_masks":
+                voxel_grid, mean, scale = _build_hybrid_object_voxel_grid(
                     scan_id=scan_id,
                     obj_id=obj_id,
                     selected_masks=selected_masks,
@@ -1110,11 +1214,13 @@ def voxelise_features(
                 continue
 
             # STEP 5: Project the voxel to the image
+            pose_world_to_camera = _invert_pose_list(pose_camera_to_world)
+
             projection_color, linear_depth = _project_to_image(
                 torch.Tensor(voxel_grid),
                 torch.Tensor(mean),
                 torch.Tensor([scale]),
-                torch.from_numpy(np.stack(pose_camera_to_world)),
+                torch.from_numpy(np.stack(pose_world_to_camera)),
                 torch.from_numpy(intrinsics["intrinsic_mat"]),
             )  # Shape: (Nimages, Npoints, 2)
             observed_views = None
@@ -1124,7 +1230,7 @@ def voxelise_features(
                     torch.Tensor(voxel_grid),
                     torch.Tensor(mean),
                     torch.Tensor([scale]),
-                    torch.from_numpy(np.stack(pose_camera_to_world)),
+                    torch.from_numpy(np.stack(pose_world_to_camera)),
                     torch.from_numpy(depth_intrinsics["intrinsic_mat"]),
                 )
                 observed_views = _compute_voxel_observations(

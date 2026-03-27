@@ -95,11 +95,13 @@ class SceneGraph2UnstructuredLatentPipeline:
         ] = 1.0
         return torch.cat((sparse_splat.dense(), dense_splat), dim=1)
 
-    def _sparsify(self, dense_splat):
-        occupancy_threshold = float(
-            os.environ.get("OBJECTX_INFER_OCC_THRESHOLD", "0.1")
-        )
-        max_voxels = int(os.environ.get("OBJECTX_INFER_MAX_VOXELS", "0"))
+    def _sparsify(self, dense_splat, occupancy_threshold=None, max_voxels=None):
+        if occupancy_threshold is None:
+            occupancy_threshold = float(
+                os.environ.get("OBJECTX_INFER_OCC_THRESHOLD", "0.1")
+            )
+        if max_voxels is None:
+            max_voxels = int(os.environ.get("OBJECTX_INFER_MAX_VOXELS", "0"))
         occupancy = dense_splat[:, -1]
         coords = torch.nonzero(occupancy > occupancy_threshold, as_tuple=False)
         if max_voxels > 0 and coords.shape[0] > max_voxels:
@@ -113,6 +115,77 @@ class SceneGraph2UnstructuredLatentPipeline:
             coords=coords.int(),
             feats=feats,
         )
+
+    def _get_env_float_list(self, name, default=""):
+        raw = os.environ.get(name, default)
+        if not raw:
+            return []
+        values = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            values.append(float(item))
+        return values
+
+    def _get_env_int_list(self, name, default=""):
+        raw = os.environ.get(name, default)
+        if not raw:
+            return []
+        values = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            values.append(int(item))
+        return values
+
+    def _decode_gaussians_with_retry(self, reconstruction_dense):
+        occ_candidates = [
+            float(os.environ.get("OBJECTX_INFER_OCC_THRESHOLD", "0.1"))
+        ] + self._get_env_float_list(
+            "OBJECTX_INFER_OCC_THRESHOLD_FALLBACKS", "0.15,0.2,0.25,0.3"
+        )
+        max_candidates = [int(os.environ.get("OBJECTX_INFER_MAX_VOXELS", "0"))] + (
+            self._get_env_int_list(
+                "OBJECTX_INFER_MAX_VOXELS_FALLBACKS", "200000,150000,120000,80000"
+            )
+        )
+
+        tried = set()
+        last_exc = None
+        for occ in occ_candidates:
+            for max_voxels in max_candidates:
+                key = (round(float(occ), 6), int(max_voxels))
+                if key in tried:
+                    continue
+                tried.add(key)
+                reconstruction_sparse = self._sparsify(
+                    reconstruction_dense,
+                    occupancy_threshold=occ,
+                    max_voxels=max_voxels,
+                )
+                try:
+                    _LOGGER.info(
+                        "Decoding gaussians with occ_threshold=%s max_voxels=%s sparse_coords=%s",
+                        occ,
+                        max_voxels,
+                        reconstruction_sparse.coords.shape[0],
+                    )
+                    return self.latent_autoencoder.decode(reconstruction_sparse)
+                except (torch.OutOfMemoryError, RuntimeError) as exc:
+                    last_exc = exc
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    _LOGGER.warning(
+                        "Gaussian decode retry failed with occ_threshold=%s max_voxels=%s: %s",
+                        occ,
+                        max_voxels,
+                        exc,
+                    )
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("No gaussian decode attempt was made.")
 
     def inference(self, idx, object_id=None):
         with torch.no_grad():
@@ -163,10 +236,9 @@ class SceneGraph2UnstructuredLatentPipeline:
             # Stage 2.
             if self.vis:
                 reconstruction_dense = self.model.decode(embedding)
-                reconstruction_sparse = self._sparsify(reconstruction_dense)
-
-                # Stage 1.
-                reconstruction = self.latent_autoencoder.decode(reconstruction_sparse)
+                reconstruction = self._decode_gaussians_with_retry(
+                    reconstruction_dense
+                )
             else:
                 reconstruction = None
 
@@ -250,6 +322,111 @@ class SceneGraph2UnstructuredLatentPipeline:
             )
             parts = [0.0, 0.0, 0.0]
         return torch.tensor(parts, device="cuda")
+
+    def _get_env_float(self, name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            _LOGGER.warning("Invalid %s=%s, using default %s", name, raw, default)
+            return default
+
+    def _get_env_int(self, name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            _LOGGER.warning("Invalid %s=%s, using default %s", name, raw, default)
+            return default
+
+    def _prune_representation(self, representation, label: str):
+        opacity_min = self._get_env_float("OBJECTX_VIS_PRUNE_OPACITY_MIN", 0.0)
+        opacity_quantile = self._get_env_float(
+            "OBJECTX_VIS_PRUNE_OPACITY_QUANTILE", 0.0
+        )
+        scale_max = self._get_env_float("OBJECTX_VIS_PRUNE_SCALE_MAX", 0.0)
+        scale_quantile = self._get_env_float("OBJECTX_VIS_PRUNE_SCALE_QUANTILE", 1.0)
+        max_points = self._get_env_int("OBJECTX_VIS_PRUNE_MAX_POINTS", 0)
+
+        is_gaussian_model = hasattr(representation, "_xyz")
+        xyz = representation._xyz if is_gaussian_model else representation.xyz
+        if xyz.numel() == 0:
+            return representation
+
+        opacity = (
+            representation.get_opacity.reshape(-1)
+            if is_gaussian_model
+            else representation.get_opacity.reshape(-1)
+        )
+        scaling = (
+            representation.get_scaling.max(dim=1).values
+            if is_gaussian_model
+            else representation.get_scaling.max(dim=1).values
+        )
+        mask = torch.ones_like(opacity, dtype=torch.bool)
+
+        if opacity_min > 0.0:
+            mask &= opacity >= opacity_min
+        if 0.0 < opacity_quantile < 1.0 and opacity.numel() > 1:
+            opacity_thr = torch.quantile(opacity, opacity_quantile)
+            mask &= opacity >= opacity_thr
+        if scale_max > 0.0:
+            mask &= scaling <= scale_max
+        if 0.0 < scale_quantile < 1.0 and scaling.numel() > 1:
+            scale_thr = torch.quantile(scaling, scale_quantile)
+            mask &= scaling <= scale_thr
+
+        keep = int(mask.sum().item())
+        total = int(mask.numel())
+        if keep == 0:
+            _LOGGER.warning(
+                "Gaussian prune for %s would remove everything; skipping prune", label
+            )
+            return representation
+
+        if max_points > 0 and keep > max_points:
+            scores = opacity[mask]
+            topk = torch.topk(scores, k=max_points, largest=True, sorted=False).indices
+            full_idx = torch.nonzero(mask, as_tuple=False).reshape(-1)[topk]
+            new_mask = torch.zeros_like(mask)
+            new_mask[full_idx] = True
+            mask = new_mask
+            keep = int(mask.sum().item())
+
+        if keep == total:
+            return representation
+
+        _LOGGER.info(
+            "Pruned gaussians for %s: kept %s/%s (opacity_min=%.3f opacity_quantile=%.3f scale_max=%.4f scale_quantile=%.3f max_points=%s)",
+            label,
+            keep,
+            total,
+            opacity_min,
+            opacity_quantile,
+            scale_max,
+            scale_quantile,
+            max_points,
+        )
+
+        if is_gaussian_model:
+            representation._xyz = representation._xyz[mask]
+            representation._features_dc = representation._features_dc[mask]
+            representation._opacity = representation._opacity[mask]
+            representation._scaling = representation._scaling[mask]
+            representation._rotation = representation._rotation[mask]
+        else:
+            representation.xyz = representation.xyz[mask]
+            representation.features_dc = representation.features_dc[mask]
+            representation.features_rest = representation.features_rest[mask]
+            representation.opacity = representation.opacity[mask]
+            representation.scaling = representation.scaling[mask]
+            representation.rotation = representation.rotation[mask]
+
+        return representation
 
     def _postprocess_render(self, rendered_image: torch.Tensor) -> torch.Tensor:
         exposure = float(os.environ.get("OBJECTX_VIS_EXPOSURE", "1.0"))
@@ -376,6 +553,9 @@ class SceneGraph2UnstructuredLatentPipeline:
         )
         representation._rotation = torch.concatenate(
             [splat._rotation for splat in reconstruction if splat is not None]
+        )
+        representation = self._prune_representation(
+            representation, f"{scan_id[0]}_scene"
         )
         representation.save_ply(f"vis/{scan_id[0]}_joint.ply")
 
@@ -556,6 +736,9 @@ class SceneGraph2UnstructuredLatentPipeline:
         representation._rotation = torch.cat(
             [reconstruction[i]._rotation for i in range(len(reconstruction))]
         )
+        representation = self._prune_representation(
+            representation, f"{scene_id}_render"
+        )
 
         object_positions = representation._xyz.detach().cpu().numpy()
 
@@ -702,6 +885,9 @@ class SceneGraph2UnstructuredLatentPipeline:
             opacity=torch.cat([splat.opacity for splat in reconstruction]),
             scaling=torch.cat([splat.scaling for splat in reconstruction]),
             rotation=torch.cat([splat.rotation for splat in reconstruction]),
+        )
+        representation = self._prune_representation(
+            representation, f"{scene_id}_rendered_gs"
         )
 
         object_positions = representation.xyz.detach().cpu().numpy()
