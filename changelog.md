@@ -1,14 +1,11 @@
 # Changelog / Current Working Notes
 
-This file is a practical handoff note for the recent object-reconstruction work.
-It focuses on:
+Short version:
 
-- what changed for GT-mesh replacement
-- which debug scripts exist
-- which commands are needed for the new "2.5" path
-- how to get features
-- how to run SLAT / U3DGS encode + decode
-- how to generate MP4 + HTML for inspection
+- objects can now come from our own mask + depth + pose path instead of directly from GT-style object geometry
+- we added better debugging for lifting, fusion, decode, and rendering
+- we changed existing Object-X files, especially the 2.5 voxelisation path, so mask source switching and downstream inspection are now much easier
+- this file lists the main code touch points and the commands we currently use
 
 ## 1. Biggest changes for GT-mesh replacement
 
@@ -52,6 +49,163 @@ Main code touch points:
   - MP4 + HTML inspection for final U3DGS joint output
 - `scripts/segmentation/render_joint_depth_background_bundle.sh`
   - wrapper for the above
+
+## 1.1 Original Object-X files we actually changed
+
+This is the important distinction:
+
+- the files below are not newly added helpers
+- they are original Object-X files that already existed and that we changed during this work
+- if someone wants to understand the real Object-X modifications, they should start here and not with the helper scripts
+
+### `preprocessing/voxel_anno/voxelise_features.py`
+
+This is the single most important original file for the GT-mesh replacement work.
+
+Before:
+
+- object voxel features were built around the old object geometry path
+- the file mainly assumed the standard object annotations and mask handling
+
+What we changed:
+
+- added mask-source switching so the preprocessing step can use different mask folders instead of assuming one fixed GT mask source
+- added multiple object-source modes:
+  - `gt_mesh`
+  - `lifted_masks`
+  - `tsdf_masks`
+  - `hybrid_masks`
+- added the actual mask + depth + pose lifting path:
+  - masked depth lifting
+  - raw pinhole coordinate handling
+  - pose handling / pose inversion helpers
+  - point filtering and normalization
+- added object fusion variants:
+  - direct lifted voxel build
+  - TSDF-based object fusion
+  - hybrid fusion
+- added frame-selection logic so we can compare `k` views and choose cleaner subsets instead of blindly taking everything
+- added mask cleaning and visibility checks so only actually observed / consistent geometry is kept
+- added exports for debug artifacts such as lifted point clouds and TSDF meshes
+- changed some saving logic to be more robust for large runs
+
+Why this matters:
+
+- this is where object geometry stopped being tied to the old GT-style object geometry path
+- this file is the real heart of the new "2.5" reconstruction path
+- if the reconstructed object looks wrong, the bug is very often in logic that now lives here
+
+### `utils/scan3r.py`
+
+Before:
+
+- mask loading largely assumed the default GT-style mask directory layout
+
+What we changed:
+
+- added `resolve_mask_source(...)`
+- added `get_mask_dir(...)`
+- updated mask loading helpers so they can explicitly take `mask_source`
+- updated object-to-frame lookup helpers so the selected mask source propagates through the pipeline
+
+Why this matters:
+
+- this is the core utility that made `gt_projection` vs `pred_projection_clean` switching possible
+- without this change, the rest of the pipeline would still silently snap back to the old GT mask folder assumptions
+
+### `scripts/voxel_annotations/voxelise_features.sh`
+
+Before:
+
+- the old wrapper had its own environment bootstrap logic
+
+What we changed:
+
+- switched it to the shared `scripts/activate_objectx_env.sh` activation path
+
+Why this matters:
+
+- this made the preprocessing step much more reproducible across our new roots and debug runs
+- it also reduced stupid environment drift between the original path and the new temp-root / debug workflows
+
+### `src/datasets/scan3r_scene.py`
+
+Before:
+
+- the loader already defined much of the scene-level metadata Object-X consumes
+- single-line split files could behave badly because `np.genfromtxt(...)` can collapse to a scalar
+
+What we changed:
+
+- wrapped the split-file load with `np.atleast_1d(...)` so one-scan custom split files still work
+
+Why this matters:
+
+- this looks small, but it was important for our targeted scene-wise runs
+- many of our custom roots and debug selections only use one scene, so this fix made those targeted experiments stable
+- this file is also still the main pointer to the remaining GT-derived scene metadata that we have not yet removed
+
+### `src/inference/unstructured_latent_inference.py`
+
+This is the most important original downstream file we changed after voxelisation.
+
+Before:
+
+- decode was much more monolithic
+- if the decode was too large, it could OOM or force very blunt fallbacks
+- the decoded gaussians could drift away from the original sparse support and create visually misleading blobs
+
+What we changed:
+
+- added chunked processing for encode / decode so large scenes can be handled object-wise instead of all-at-once
+- added retry logic for sparse decode with fallback occupancy thresholds and voxel caps
+- added support extraction from the original sparse representation
+- added support-constrained cleanup after decode so gaussians are filtered back toward the original support
+- added helpers for masking, slicing sparse batches, empty-gaussian handling, and chunked object decode
+- added a lot of render-side controls through environment variables:
+  - pruning
+  - orbit settings
+  - background color
+  - exposure / gamma
+  - render scale
+  - mesh export toggles
+
+Why this matters:
+
+- this is where we fixed the big downstream failure mode where the object looked okay before SLAT/U3DGS but much worse afterward
+- the later cabinet improvements came largely from changes in this file, especially support-constrained cleanup and safer decode behavior
+
+### `utils/visualisation.py`
+
+Before:
+
+- PCA-based debug coloring was brittle for tiny or degenerate point sets
+
+What we changed:
+
+- hardened PCA colorization for debug exports
+- handled empty / tiny feature sets more safely
+- prevented divide-by-zero and bad PCA channel assumptions during PLY / point export
+
+Why this matters:
+
+- this reduced annoying crashes exactly in the phase where we needed many quick debug exports for tiny partial objects
+- it made the debug artifacts much more reliable when inspecting broken objects
+
+These are the original files I would tell someone to read first if they want to understand the actual modified Object-X internals:
+
+- `preprocessing/voxel_anno/voxelise_features.py`
+- `src/inference/unstructured_latent_inference.py`
+- `utils/scan3r.py`
+- `src/datasets/scan3r_scene.py`
+
+Separate from that, we also added several new helper scripts around these core files, for example:
+
+- `scripts/voxel_annotations/run_scanwise_voxelise_tmp.py`
+- `scripts/inference/run_pipeline_tmp.py`
+- `scripts/segmentation/worldspace_object_debug.py`
+- `scripts/segmentation/diagnose_object_gaps.py`
+- `scripts/segmentation/render_joint_depth_background_bundle.sh`
 
 ## 2. What the main new debug scripts do
 
