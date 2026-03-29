@@ -811,6 +811,33 @@ def _build_tsdf_object_voxel_grid(
         obj_id,
         int(lifted_points.shape[0]),
     )
+    fallback_to_lifted = os.getenv(
+        "OBJECTX_VOXEL_TSDF_FALLBACK_TO_LIFTED", "1"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+    def _fallback_to_lifted(reason: str) -> tuple[np.ndarray, np.ndarray, float]:
+        _LOGGER.warning(
+            "[2.5] object %s/%s TSDF fallback to lifted-point voxelization: %s",
+            scan_id,
+            obj_id,
+            reason,
+        )
+        voxel_grid = _voxelize_normalized_points(normalized_points, dilate_iters=1)
+        voxel_grid = _finalize_object_voxel_grid(
+            voxel_grid,
+            scan_id=scan_id,
+            obj_id=obj_id,
+            variant="fallback_lifted",
+        )
+        if args.visualize or os.getenv("OBJECTX_VOXEL_WRITE_LIFTED_PLY", "0") == "1":
+            _save_point_cloud(
+                lifted_points, f"vis/{scan_id}_{obj_id}_lifted_points_world.ply"
+            )
+            _save_point_cloud(
+                normalized_points,
+                f"vis/{scan_id}_{obj_id}_lifted_points_normalized.ply",
+            )
+        return voxel_grid, mean, scale
 
     tsdf_resolution = int(os.getenv("OBJECTX_VOXEL_TSDF_RESOLUTION", "96"))
     tsdf_sdf_trunc = float(
@@ -875,6 +902,8 @@ def _build_tsdf_object_voxel_grid(
         integrated_frames,
     )
     if integrated_frames == 0:
+        if fallback_to_lifted:
+            return _fallback_to_lifted("No valid RGBD frames could be integrated into TSDF")
         raise ValueError("No valid RGBD frames could be integrated into TSDF")
 
     tsdf_mesh = volume.extract_triangle_mesh()
@@ -885,33 +914,10 @@ def _build_tsdf_object_voxel_grid(
     tsdf_mesh.remove_degenerate_triangles()
     tsdf_mesh.remove_non_manifold_edges()
 
-    fallback_to_lifted = os.getenv(
-        "OBJECTX_VOXEL_TSDF_FALLBACK_TO_LIFTED", "1"
-    ).lower() not in {"0", "false", "no", "off", ""}
     if len(tsdf_mesh.vertices) == 0 or len(tsdf_mesh.triangles) == 0:
         if not fallback_to_lifted:
             raise ValueError("TSDF fusion produced an empty mesh")
-        _LOGGER.warning(
-            "[2.5] object %s/%s TSDF mesh empty, falling back to lifted-point voxelization",
-            scan_id,
-            obj_id,
-        )
-        voxel_grid = _voxelize_normalized_points(normalized_points, dilate_iters=1)
-        voxel_grid = _finalize_object_voxel_grid(
-            voxel_grid,
-            scan_id=scan_id,
-            obj_id=obj_id,
-            variant="fallback_lifted",
-        )
-        if args.visualize or os.getenv("OBJECTX_VOXEL_WRITE_LIFTED_PLY", "0") == "1":
-            _save_point_cloud(
-                lifted_points, f"vis/{scan_id}_{obj_id}_lifted_points_world.ply"
-            )
-            _save_point_cloud(
-                normalized_points,
-                f"vis/{scan_id}_{obj_id}_lifted_points_normalized.ply",
-            )
-        return voxel_grid, mean, scale
+        return _fallback_to_lifted("TSDF fusion produced an empty mesh")
 
     if args.visualize or os.getenv("OBJECTX_VOXEL_WRITE_LIFTED_PLY", "0") == "1":
         _save_point_cloud(lifted_points, f"vis/{scan_id}_{obj_id}_lifted_points_world.ply")
@@ -942,12 +948,17 @@ def _build_tsdf_object_voxel_grid(
             max_bound=(0.5, 0.5, 0.5),
         )
         voxel_grid = _dilate_voxels(tmp_voxel_grid)
-    voxel_grid = _finalize_object_voxel_grid(
-        voxel_grid,
-        scan_id=scan_id,
-        obj_id=obj_id,
-        variant="tsdf",
-    )
+    try:
+        voxel_grid = _finalize_object_voxel_grid(
+            voxel_grid,
+            scan_id=scan_id,
+            obj_id=obj_id,
+            variant="tsdf",
+        )
+    except ValueError as exc:
+        if not fallback_to_lifted:
+            raise
+        return _fallback_to_lifted(str(exc))
 
     return voxel_grid, mean, scale
 

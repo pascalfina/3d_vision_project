@@ -42,7 +42,11 @@ class SceneGraph2StructuredLatentPipeline:
 
     def load_model(self):
         model = LatentAutoencoder(cfg=self.cfg.autoencoder, device=self.device)
-        model.load_state_dict(torch.load(self.cfg.inference.slat_model_path)["model"])
+        model.load_state_dict(
+            torch.load(self.cfg.inference.slat_model_path, map_location=self.device)[
+                "model"
+            ]
+        )
         self.rep_config = model.decoder.rep_config
         return model
 
