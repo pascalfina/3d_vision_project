@@ -57,6 +57,14 @@ class SceneGraph2UnstructuredLatentPipeline:
         self.max_objects_per_chunk = int(
             os.environ.get("OBJECTX_SLAT_MAX_OBJECTS_PER_CHUNK", "16")
         )
+        self._last_gaussian_summary = {}
+
+    def _reset_gaussian_summary(self):
+        self._last_gaussian_summary = {
+            "decode": None,
+            "support": None,
+            "prune": {},
+        }
 
     def load_model(self):
         self.latent_autoencoder = LatentAutoencoder(
@@ -273,6 +281,14 @@ class SceneGraph2UnstructuredLatentPipeline:
             dilate_voxels,
             max_scale_voxels,
         )
+        self._last_gaussian_summary["support"] = {
+            "label": str(label),
+            "before": int(total_before),
+            "after": int(total_after),
+            "removed": int(total_before - total_after),
+            "dilate_voxels": int(dilate_voxels),
+            "max_scale_voxels": float(max_scale_voxels),
+        }
         return constrained
 
     def _decode_sparse_in_object_chunks(self, reconstruction_sparse, objects_per_chunk):
@@ -360,6 +376,12 @@ class SceneGraph2UnstructuredLatentPipeline:
                         reconstruction_sparse.coords.shape[0],
                         decode_objects_per_chunk,
                     )
+                    self._last_gaussian_summary["decode"] = {
+                        "occ_threshold": float(occ),
+                        "max_voxels": int(max_voxels),
+                        "sparse_coords": int(reconstruction_sparse.coords.shape[0]),
+                        "decode_objects_per_chunk": int(decode_objects_per_chunk),
+                    }
                     return self._decode_sparse_in_object_chunks(
                         reconstruction_sparse,
                         decode_objects_per_chunk,
@@ -381,6 +403,7 @@ class SceneGraph2UnstructuredLatentPipeline:
 
     def inference(self, idx, object_id=None):
         with torch.no_grad():
+            self._reset_gaussian_summary()
             _LOGGER.info(f"Getting item: {idx}")
             data_dict = self.dataset.collate_fn([self.dataset[idx]])
             scene_graphs = data_dict["scene_graphs"]
@@ -503,6 +526,7 @@ class SceneGraph2UnstructuredLatentPipeline:
                     )
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+            self._log_final_gaussian_summary(scan_id[0])
 
     def _get_env_bool(self, name, default=False):
         value = os.environ.get(name)
@@ -543,6 +567,64 @@ class SceneGraph2UnstructuredLatentPipeline:
             _LOGGER.warning("Invalid %s=%s, using default %s", name, raw, default)
             return default
 
+    def _safe_quantile(self, values: torch.Tensor, q: float, label: str) -> torch.Tensor:
+        sample_max = self._get_env_int("OBJECTX_VIS_PRUNE_QUANTILE_SAMPLE_MAX", 1000000)
+        if sample_max > 0 and values.numel() > sample_max:
+            sample_idx = torch.linspace(
+                0,
+                values.numel() - 1,
+                steps=sample_max,
+                device=values.device,
+                dtype=torch.float32,
+            ).long()
+            sampled = values[sample_idx]
+            _LOGGER.info(
+                "Approximating %s quantile %.3f from %s/%s samples",
+                label,
+                q,
+                int(sampled.numel()),
+                int(values.numel()),
+            )
+            values = sampled
+        return torch.quantile(values, q)
+
+    def _format_removal_summary(self, before: int, after: int) -> str:
+        removed = int(before - after)
+        pct = (100.0 * removed / before) if before > 0 else 0.0
+        return f"kept {after}/{before}, removed {removed} ({pct:.1f}%)"
+
+    def _log_final_gaussian_summary(self, scene_id: str):
+        summary = self._last_gaussian_summary or {}
+        decode = summary.get("decode")
+        support = summary.get("support")
+        prune = summary.get("prune") or {}
+
+        if decode is not None:
+            _LOGGER.info(
+                "Final decode summary for %s: sparse_coords=%s occ_threshold=%.3f max_voxels=%s decode_objects_per_chunk=%s",
+                scene_id,
+                decode["sparse_coords"],
+                decode["occ_threshold"],
+                decode["max_voxels"],
+                decode["decode_objects_per_chunk"],
+            )
+
+        if support is not None:
+            _LOGGER.info(
+                "Final support-cleanup summary for %s: %s",
+                scene_id,
+                self._format_removal_summary(support["before"], support["after"]),
+            )
+
+        for label in sorted(prune.keys()):
+            stats = prune[label]
+            _LOGGER.info(
+                "Final prune summary for %s [%s]: %s",
+                scene_id,
+                label,
+                self._format_removal_summary(stats["before"], stats["after"]),
+            )
+
     def _prune_representation(self, representation, label: str):
         opacity_min = self._get_env_float("OBJECTX_VIS_PRUNE_OPACITY_MIN", 0.0)
         opacity_quantile = self._get_env_float(
@@ -572,12 +654,16 @@ class SceneGraph2UnstructuredLatentPipeline:
         if opacity_min > 0.0:
             mask &= opacity >= opacity_min
         if 0.0 < opacity_quantile < 1.0 and opacity.numel() > 1:
-            opacity_thr = torch.quantile(opacity, opacity_quantile)
+            opacity_thr = self._safe_quantile(
+                opacity, opacity_quantile, f"{label}/opacity"
+            )
             mask &= opacity >= opacity_thr
         if scale_max > 0.0:
             mask &= scaling <= scale_max
         if 0.0 < scale_quantile < 1.0 and scaling.numel() > 1:
-            scale_thr = torch.quantile(scaling, scale_quantile)
+            scale_thr = self._safe_quantile(
+                scaling, scale_quantile, f"{label}/scale"
+            )
             mask &= scaling <= scale_thr
 
         keep = int(mask.sum().item())
@@ -586,6 +672,13 @@ class SceneGraph2UnstructuredLatentPipeline:
             _LOGGER.warning(
                 "Gaussian prune for %s would remove everything; skipping prune", label
             )
+            self._last_gaussian_summary["prune"][label] = {
+                "before": int(total),
+                "after": int(total),
+                "removed": 0,
+                "applied": False,
+                "reason": "would_remove_everything",
+            }
             return representation
 
         if max_points > 0 and keep > max_points:
@@ -598,6 +691,18 @@ class SceneGraph2UnstructuredLatentPipeline:
             keep = int(mask.sum().item())
 
         if keep == total:
+            self._last_gaussian_summary["prune"][label] = {
+                "before": int(total),
+                "after": int(total),
+                "removed": 0,
+                "applied": False,
+                "reason": "no_change",
+                "opacity_min": float(opacity_min),
+                "opacity_quantile": float(opacity_quantile),
+                "scale_max": float(scale_max),
+                "scale_quantile": float(scale_quantile),
+                "max_points": int(max_points),
+            }
             return representation
 
         _LOGGER.info(
@@ -611,6 +716,17 @@ class SceneGraph2UnstructuredLatentPipeline:
             scale_quantile,
             max_points,
         )
+        self._last_gaussian_summary["prune"][label] = {
+            "before": int(total),
+            "after": int(keep),
+            "removed": int(total - keep),
+            "applied": True,
+            "opacity_min": float(opacity_min),
+            "opacity_quantile": float(opacity_quantile),
+            "scale_max": float(scale_max),
+            "scale_quantile": float(scale_quantile),
+            "max_points": int(max_points),
+        }
 
         if is_gaussian_model:
             representation._xyz = representation._xyz[mask]
