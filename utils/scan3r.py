@@ -697,6 +697,7 @@ def resolve_mask_source(mask_source: str = None) -> str:
         "gt_projection": "gt_projection",
         "pred": "pred_projection",
         "pred_projection": "pred_projection",
+        "sam": "sam3_projection",
     }
     return aliases.get(source, source)
 
