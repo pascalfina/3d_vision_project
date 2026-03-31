@@ -18,7 +18,6 @@ from utils import common
 def get_original_scan(scan: str) -> str:
     return scan.split("_")[0]
 
-
 @lru_cache(maxsize=None)
 def read_objects(data_dir: str) -> dict:
     objects = json.load(open(osp.join(data_dir, "files", "objects.json")))
@@ -697,6 +696,7 @@ def resolve_mask_source(mask_source: str = None) -> str:
         "gt_projection": "gt_projection",
         "pred": "pred_projection",
         "pred_projection": "pred_projection",
+        "sam3": "sam3_projection",
     }
     return aliases.get(source, source)
 

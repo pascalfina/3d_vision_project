@@ -1369,7 +1369,12 @@ def process_data(
         if scan_type == "scan"
         else f"{split}_scans_subscenes.txt"
     )
-    objects_info_file = osp.join(root_dir, "files", "objects.json")
+    objects_file = (
+        getattr(args, "objects_file", None)
+        or os.getenv("OBJECTX_OBJECTS_FILE")
+        or "objects.json"
+    )
+    objects_info_file = osp.join(root_dir, "files", objects_file)
     all_obj_info = common.load_json(objects_info_file)
 
     subscan_ids_generated = np.genfromtxt(
@@ -1444,6 +1449,7 @@ def parse_args() -> Tuple[Namespace, list]:
     parser.add_argument("--override", action="store_true")
     parser.add_argument("--mask-source", type=str, default=None)
     parser.add_argument("--object-source", type=str, default=None)
+    parser.add_argument("--objects-file", type=str, default=None)
     args, unknown = parser.parse_known_args()
     return args, unknown
 

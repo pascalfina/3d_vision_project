@@ -46,6 +46,7 @@ runs/
 training_out/
 config.yaml
 .codex-backups/
+3dv/
 
 # cluster / local debug
 debug.txt
@@ -66,3 +67,6 @@ dependencies/VLSG/**/time_used*.txt
 
 *.log
 *.tar
+
+# models 
+models/
