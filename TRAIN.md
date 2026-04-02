@@ -18,9 +18,9 @@ bash scripts/train_val/train_latent_autoencoder.sh
 Once converged, you can create intermediate results by running:
 
 ```bash
-bash scripts/inference/run_pipeline_slat.sh --split train [--visualize]
-bash scripts/inference/run_pipeline_slat.sh --split val [--visualize]
-bash scripts/inference/run_pipeline_slat.sh --split test [--visualize]
+bash scripts/inference/pipeline/run_pipeline_slat_tmp.sh --split train [--visualize]
+bash scripts/inference/pipeline/run_pipeline_slat_tmp.sh --split val [--visualize]
+bash scripts/inference/pipeline/run_pipeline_slat_tmp.sh --split test [--visualize]
 ```
 
 > **Important:** The next step assumes the final snapshot is saved to `pretrained/slat_pretrained.pth.tar` otherwise set `autoencoder.encoder.voxel.pretrained` to the path of the snapshot for the next step.
@@ -40,9 +40,9 @@ bash scripts/train_val/train.sh \
 Once converged, you can create intermediate results by running:
 
 ```bash
-bash scripts/inference/run_pipeline_u3dgs.sh --split train [--visualize]
-bash scripts/inference/run_pipeline_u3dgs.sh --split val [--visualize]
-bash scripts/inference/run_pipeline_u3dgs.sh --split test [--visualize]
+bash scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh --split train [--visualize]
+bash scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh --split val [--visualize]
+bash scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh --split test [--visualize]
 ```
 
 > **Important:** The next step assumes the final snapshot is saved to `pretrained/u3dgs_pretrained_16.pth.tar` otherwise set `autoencoder.encoder.pretrained` to the path of the snapshot for the next step.

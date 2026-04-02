@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DATA_ROOT="${DATA_ROOT_DIR:-/work/scratch/pafina/objectx-data-predseg-objects5}"
 SPLIT="${SPLIT:-val}"
 
@@ -24,7 +24,7 @@ export OBJECTX_VIS_BLACK_FLOOR="${OBJECTX_VIS_BLACK_FLOOR:-0.0}"
 export RESET_TMP="${RESET_TMP:-1}"
 export SPLIT
 
-bash scripts/inference/run_pipeline_u3dgs_tmp.sh --visualize
+bash scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh --visualize
 
 mapfile -t SCAN_IDS < <(grep -v '^\s*$' "$DATA_ROOT/files/${SPLIT}_resplit_scans.txt" || true)
 for scan_id in "${SCAN_IDS[@]}"; do

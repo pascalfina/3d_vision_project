@@ -1,0 +1,1 @@
+"""Segmentation validation and diagnostics."""

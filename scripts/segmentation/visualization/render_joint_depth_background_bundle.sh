@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 usage() {
     cat <<'EOF'
 Usage:
-  bash scripts/segmentation/render_joint_depth_background_bundle.sh \
+  bash scripts/segmentation/visualization/render_joint_depth_background_bundle.sh \
     --scan-id <scan_id> \
     --replacement-root <replacement_root> \
     --label <label> \
@@ -232,7 +232,7 @@ fi
 source "$REPO_ROOT/scripts/activate_objectx_env.sh"
 
 cmd=(
-    python "$REPO_ROOT/scripts/segmentation/render_joint_depth_background.py"
+    python "$REPO_ROOT/scripts/segmentation/visualization/render_joint_depth_background.py"
     --data-root "$DATA_ROOT"
     --replacement-root "$REPLACEMENT_ROOT"
     --joint-ply "$JOINT_PLY"

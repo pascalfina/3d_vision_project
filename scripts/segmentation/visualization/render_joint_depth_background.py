@@ -14,10 +14,10 @@ import trimesh
 import trimesh.viewer
 from plyfile import PlyData
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.segmentation.render_depth_background import (
+from scripts.segmentation.visualization.render_depth_background import (
     build_background_from_depth,
     compute_bounds,
     render_frame,

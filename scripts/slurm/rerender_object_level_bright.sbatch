@@ -23,4 +23,4 @@ echo "SPLIT=$SPLIT"
 
 python -c "import torch; print('torch', torch.__version__); print('torch_cuda', torch.version.cuda); print('cuda_available', torch.cuda.is_available())"
 
-bash scripts/inference/rerender_object_level_bright.sh
+bash scripts/inference/experiments/rerender_object_level_bright.sh
