@@ -29,6 +29,8 @@
 For the current Scan3R/cluster workflow, prefer the short profile-based entrypoints instead of long ad-hoc commands.
 Each profile defines one scene setup, and each action runs exactly one stage of the pipeline.
 
+Important: this workflow does **not** replace the earlier Object-X dataset preparation. It builds on top of already prepared scene files and preprocessing artifacts such as `files/3RScan.json`, `files/objects.json`, `files/Features3D/`, `files/<mask_source>/obj_id_pkl/<scene>.pkl`, and `scenes/<scene>/sequence/`.
+
 List available profiles:
 
 ```bash
@@ -73,45 +75,158 @@ bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix u3dgs 
 
 - `--dry-run` prints the exact underlying command without executing it
 
-### How To Test Another Scene
+### How To Add A New Scene Profile
 
 Profiles live under:
 
 - [`configs/workflows/scene_profiles`](configs/workflows/scene_profiles)
 
-The current example profile is:
+The two current examples are:
 
 - [`cabinet_predready_v2_floorfix.json`](configs/workflows/scene_profiles/cabinet_predready_v2_floorfix.json)
+- [`oven_predready_v1.json`](configs/workflows/scene_profiles/oven_predready_v1.json)
 
-The safest way to test another scene is to copy that JSON and edit it:
+The safest workflow is:
+
+1. Copy an existing profile that is closest to what you want.
+2. Rename it to the new profile name.
+3. Update the scene-specific paths and labels.
+4. Check the config with `--dry-run` before launching a real run.
+
+For example, to create a new profile from the current `cabinet` setup:
 
 ```bash
 cp configs/workflows/scene_profiles/cabinet_predready_v2_floorfix.json \
    configs/workflows/scene_profiles/<new_profile_name>.json
 ```
 
-The most important fields to update are:
+If you want to understand what needs to change, compare:
 
-- `name`: short profile name used on the command line
-- `scene_id`: the new scene / scan id
-- `split`: usually `val`
-- `roots.reconstruction`: the scene root that contains the reconstructed `gs_annotations`
-- `roots.pred_ready`: the target pred-ready root for that scene
-- `artifacts.manifest`: manifest JSON for the selected objects in that scene
-- `artifacts.joint_ply`: path to the expected joint output PLY
-- `validate_pred_ready.out_dir`: output directory for pred-ready validation
-- `compare_arrangement.out_dir`: output directory for the arrangement comparison
-- `slat.log` and `u3dgs.log`: log file paths for the new scene
-- `render_bundle.label`: label used for the final visualization folder
+- [`configs/workflows/scene_profiles/cabinet_predready_v2_floorfix.json`](configs/workflows/scene_profiles/cabinet_predready_v2_floorfix.json)
+- [`configs/workflows/scene_profiles/oven_predready_v1.json`](configs/workflows/scene_profiles/oven_predready_v1.json)
 
-After editing the JSON, verify it with a dry-run, for example:
+The structure stays the same. You mainly replace scene-specific values.
+
+#### What You Need Before Creating A New Profile
+
+Before filling a new profile, make sure these files or directories exist for the new scene:
+
+- a baseline root, usually `/work/scratch/pafina/objectx-data-baseline`
+- the standard Object-X preprocessing artifacts in that root, especially `files/3RScan.json`, `files/objects.json`, `files/Features3D/`, and `scenes/<scene_id>/sequence/`
+- a reconstruction root that contains `files/gs_annotations/<scene_id>/`
+- a manifest JSON listing the selected objects for that scene, for example `debug/<scene_name>_fullscene_all_objects_manifest.json`
+- a target pred-ready root path where the rebuilt scene metadata will be written
+- a joint output path such as `vis/<scene_id>_joint.ply`
+
+If one of these is missing, the profile may look correct but the run will still fail.
+
+#### Field-By-Field Guide
+
+These are the fields you normally need to update:
+
+- `name`
+  - short command-line name of the profile
+  - example: `cabinet_predready_v2_floorfix` or `oven_predready_v1`
+
+- `scene_id`
+  - the exact Scan3R scene id
+  - example: `e61b0e04-bada-2f31-82d6-72831a602ba7` for cabinet
+  - example: `5341b7e3-8a66-2cdd-8709-66a2159f0017` for oven
+
+- `split`
+  - usually `val`
+  - this controls which split file is written for the temporary staged root
+
+- `mask_source`
+  - which mask directory to read from under `files/<mask_source>/obj_id_pkl/<scene_id>.pkl`
+  - current common choice: `gt_projection`
+  - later this can be changed to a predicted mask source
+
+- `roots.baseline`
+  - baseline dataset root used for compatibility files and background data
+  - this usually stays the same across scenes
+
+- `roots.reconstruction`
+  - root that contains the reconstructed objects for this scene
+  - must contain `files/gs_annotations/<scene_id>/`
+  - this is the root produced by the current 2.5 / voxelise path
+
+- `roots.pred_ready`
+  - output root for the rebuilt downstream scene metadata
+  - this is where `build-pred-ready` writes the new `files/objects.json` and `files/orig/data/<scene_id>.pkl.gz`
+
+- `artifacts.manifest`
+  - manifest JSON for the selected objects of this scene
+  - used mainly by the final render / inspection bundle
+
+- `artifacts.joint_ply`
+  - expected path of the decoded joint output
+  - usually looks like `vis/<scene_id>_joint.ply`
+
+- `voxelise.log`, `slat.log`, `u3dgs.log`
+  - log files for the main stages
+  - use scene-specific names so runs do not overwrite each other
+
+- `validate_pred_ready.out_dir`
+  - folder for validation outputs
+
+- `compare_arrangement.out_dir`
+  - folder for arrangement comparison outputs
+
+- `render_bundle.label`
+  - short label used in the final visualization folder name
+  - this should match the run variant, for example `supportonly`, `hybrid`, or `liftedonly`
+
+#### Recommended Way To Fill It In
+
+Start from a working example and only change the scene-specific parts first:
+
+- `name`
+- `scene_id`
+- `roots.reconstruction`
+- `roots.pred_ready`
+- `artifacts.manifest`
+- `artifacts.joint_ply`
+- the log paths
+- the output directories
+- `render_bundle.label`
+
+Keep the rest unchanged until the first dry-run works.
+
+#### Minimal Example
+
+This is the kind of scene-specific block you usually replace:
+
+```json
+{
+  "name": "my_scene_profile",
+  "scene_id": "NEW_SCENE_ID",
+  "split": "val",
+  "mask_source": "gt_projection",
+  "roots": {
+    "baseline": "/work/scratch/pafina/objectx-data-baseline",
+    "reconstruction": "/work/scratch/pafina/objectx-data-fullscene-my-scene-hybrid-gtmask",
+    "pred_ready": "/work/scratch/pafina/objectx-data-fullscene-my-scene-predready-v1"
+  },
+  "artifacts": {
+    "manifest": "/work/scratch/pafina/object-x/debug/my_scene_fullscene_all_objects_manifest.json",
+    "joint_ply": "/work/scratch/pafina/object-x/vis/NEW_SCENE_ID_joint.ply"
+  }
+}
+```
+
+#### How To Check The New Profile
+
+After editing the JSON, always test it with dry-runs first:
 
 ```bash
 bash scripts/workflows/run_scene_profile.sh <new_profile_name> voxelise --dry-run
+bash scripts/workflows/run_scene_profile.sh <new_profile_name> build-pred-ready --dry-run
 bash scripts/workflows/run_scene_profile.sh <new_profile_name> u3dgs --dry-run
+bash scripts/workflows/run_scene_profile.sh <new_profile_name> render --dry-run
 ```
 
-This lets you verify the new scene config before launching the real run.
+If those look correct, you can launch the real pipeline step by step.
 
 ### How To Disable TSDF
 
@@ -160,6 +275,8 @@ In practice, this means:
 - the `profile` chooses the scene, roots, manifests, logs, and output folders
 - the `action` chooses which pipeline stage to run
 - you can run the whole pipeline step by step without rebuilding unrelated stages
+
+This workflow starts **after** the earlier scene preprocessing is already available. In other words, the pipeline below assumes that the scene already has its standard Object-X input files on disk, and then adds the new reconstruction, pred-ready metadata, SLAT/U3DGS, and rendering stages on top.
 
 For the current `cabinet` setup, the actions are:
 
