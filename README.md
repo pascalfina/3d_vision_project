@@ -113,6 +113,41 @@ bash scripts/workflows/run_scene_profile.sh <new_profile_name> u3dgs --dry-run
 
 This lets you verify the new scene config before launching the real run.
 
+### How To Disable TSDF
+
+The current profiles use the hybrid object reconstruction path in the `voxelise` stage:
+
+```json
+"voxelise": {
+  "env": {
+    "OBJECTX_VOXEL_OBJECT_SOURCE": "hybrid_masks",
+    "OBJECTX_VOXEL_TSDF_FALLBACK_TO_LIFTED": "1"
+  }
+}
+```
+
+If you want to disable TSDF and use only the lifted mask+depth+pose geometry, change the profile to:
+
+```json
+"voxelise": {
+  "env": {
+    "OBJECTX_VOXEL_OBJECT_SOURCE": "lifted_masks"
+  }
+}
+```
+
+This means:
+- `hybrid_masks`: lifted voxel geometry + TSDF fusion
+- `tsdf_masks`: TSDF-only geometry
+- `lifted_masks`: lifted geometry only, with no TSDF step
+- `gt_mesh`: old GT mesh path
+
+After changing the profile, you can run the same command as before:
+
+```bash
+bash scripts/workflows/run_scene_profile.sh <profile> voxelise
+```
+
 ### Step-by-Step Pipeline Overview
 
 The current workflow is easiest to think about as one linear pipeline driven by a profile:
@@ -132,25 +167,25 @@ For the current `cabinet` setup, the actions are:
    - wrapper: [`scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh`](scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh)
    - runner: [`scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py`](scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py)
    - core logic: [`preprocessing/voxel_anno/voxelise_features.py`](preprocessing/voxel_anno/voxelise_features.py)
-   - input: RGB frames, object masks, depth maps, camera poses, intrinsics, and the object inventory from the scene root
+   - input: `files/objects.json`, `files/3RScan.json`, `files/<mask_source>/obj_id_pkl/<scene>.pkl`, `scenes/<scene>/sequence/frame-<id>.color.jpg`, `scenes/<scene>/sequence/frame-<id>.depth.pgm`, `scenes/<scene>/sequence/frame-<id>.pose.txt`, and `scenes/<scene>/sequence/_info.txt`
    - what happens: for each object, the masked depth pixels are lifted into 3D in world space using the camera poses; these lifted points are voxelized and optionally fused with TSDF to form object-level geometry
    - output: reconstructed object geometry under `files/gs_annotations/<scene>/<obj>/`, mainly `voxel_output_dense.npz` and `mean_scale_dense.npz`
 
 2. `build-pred-ready`
    - script: [`scripts/segmentation/pipeline/build_pred_ready_scene_root.py`](scripts/segmentation/pipeline/build_pred_ready_scene_root.py)
-   - input: the reconstructed object voxels from `gs_annotations`, plus the baseline root for compatibility files
+   - input: `files/gs_annotations/<scene>/<obj>/voxel_output_dense.npz`, `files/gs_annotations/<scene>/<obj>/mean_scale_dense.npz`, plus baseline compatibility files such as `files/objects.json`, `files/orig/data/<scene>.pkl.gz`, `files/3RScan.json`, `files/Features3D/`, and `scenes/<scene>/sequence.zip` or `scenes/<scene>/sequence/`
    - what happens: the script turns each reconstructed object back into 3D points, computes object centers and sizes, chooses a root object, and writes a new scene description for the downstream pipeline
-   - output: a separate pred-ready root with rebuilt `files/objects.json` and `files/orig/data.pkl.gz`
+   - output: a separate pred-ready root with rebuilt `files/objects.json`, `files/orig/data/<scene>.pkl.gz`, linked `files/gs_annotations/<scene>/`, and a small manifest in `files/pred_ready_scene_manifest.json`
 
 3. `validate-pred-ready`
    - script: [`scripts/segmentation/validation/validate_pred_ready_scene_root.py`](scripts/segmentation/validation/validate_pred_ready_scene_root.py)
-   - input: the pred-ready root produced in the previous step
+   - input: the generated `files/objects.json`, `files/orig/data/<scene>.pkl.gz`, `files/gs_annotations/<scene>/`, and the staged scene under `scenes/<scene>/sequence/`
    - what happens: the script checks that object ordering is consistent, expected keys exist, point sets have the right shape, and the dataset loader can read the new root without crashing
    - output: a validation report and optional lightweight debug exports in the configured validation directory
 
 4. `compare-arrangement`
    - script: [`scripts/segmentation/validation/compare_scene_arrangement.py`](scripts/segmentation/validation/compare_scene_arrangement.py)
-   - input: the pred-ready root and the baseline GT root for the same scene
+   - input: `files/orig/data/<scene>.pkl.gz` from the pred-ready root and the matching `files/orig/data/<scene>.pkl.gz` from the baseline GT root
    - what happens: the script compares common objects between both roots using their reconstructed centers and pairwise distances, so we can check whether the rebuilt scene layout is still close to the baseline arrangement
    - output: metrics, plots, and an arrangement overlay in the configured comparison directory
 
@@ -158,7 +193,7 @@ For the current `cabinet` setup, the actions are:
    - wrapper: [`scripts/inference/pipeline/run_pipeline_slat_tmp.sh`](scripts/inference/pipeline/run_pipeline_slat_tmp.sh)
    - staging helper: [`scripts/inference/pipeline/run_pipeline_tmp.py`](scripts/inference/pipeline/run_pipeline_tmp.py)
    - model entrypoint: [`src/inference/structured_latent_inference.py`](src/inference/structured_latent_inference.py)
-   - input: the pred-ready root, especially the object-level splats / voxel-derived features and the rebuilt scene metadata
+   - input: the staged pred-ready root, mainly `files/objects.json`, `files/orig/data/<scene>.pkl.gz`, `files/gs_annotations/<scene>/`, `files/Features3D/`, and `scenes/<scene>/sequence/`
    - what happens: the structured Object-X model encodes the scene objects into a compact latent representation that is used by the downstream reconstruction step
    - output: `files/gs_embeddings/<scene>_slat.npz`
 
@@ -166,14 +201,14 @@ For the current `cabinet` setup, the actions are:
    - wrapper: [`scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh`](scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh)
    - staging helper: [`scripts/inference/pipeline/run_pipeline_tmp.py`](scripts/inference/pipeline/run_pipeline_tmp.py)
    - model entrypoint: [`src/inference/unstructured_latent_inference.py`](src/inference/unstructured_latent_inference.py)
-   - input: the SLAT embedding plus the staged scene root
+   - input: `files/gs_embeddings/<scene>_slat.npz` plus the same staged root files used by `slat`, especially `files/orig/data/<scene>.pkl.gz`, `files/gs_annotations/<scene>/`, and `scenes/<scene>/sequence/`
    - what happens: the unstructured model decodes the latent into a joint Gaussian/point-based reconstruction for the whole scene; this step also applies the current support-constrained cleanup so decoded geometry stays close to the original object support
    - output: `files/gs_embeddings/<scene>_ulat.npz`, `vis/<scene>_joint.ply`, and `vis/rendered/<scene>_orbit_rendered.mp4`
 
 7. `render`
    - wrapper: [`scripts/segmentation/visualization/render_joint_depth_background_bundle.sh`](scripts/segmentation/visualization/render_joint_depth_background_bundle.sh)
    - renderer: [`scripts/segmentation/visualization/render_joint_depth_background.py`](scripts/segmentation/visualization/render_joint_depth_background.py)
-   - input: the decoded joint output `vis/<scene>_joint.ply`, the replacement root, and the baseline depth background
+   - input: `vis/<scene>_joint.ply`, the replacement root `files/gs_annotations/<scene>/`, the manifest JSON for the selected objects, and the baseline scene files `scenes/<scene>/sequence/frame-<id>.depth.pgm`, `frame-<id>.pose.txt`, and `_info.txt`
    - what happens: the script combines the decoded joint reconstruction with a depth-based background, then produces an inspection bundle that is easier to browse than the raw model output alone
    - output: MP4, interactive HTML, contact sheet, and `summary.json`
 
