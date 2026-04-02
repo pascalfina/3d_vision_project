@@ -16,7 +16,7 @@ import numpy as np
 import open3d as o3d
 from PIL import Image, ImageDraw
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from utils import scan3r
 
 
@@ -90,7 +90,7 @@ def sanitize_label(label: str) -> str:
 
 
 def repo_root_from_script() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def load_object_labels(data_root: Path, scan_id: str) -> dict[str, str]:

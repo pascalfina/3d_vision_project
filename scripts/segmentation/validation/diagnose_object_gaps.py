@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from preprocessing.voxel_anno import voxelise_features as vf
@@ -45,7 +45,11 @@ def parse_args():
     parser.add_argument(
         "--selection-file",
         default=str(
-            REPO_ROOT / "scripts" / "segmentation" / "object_level_pilot_selection.json"
+            REPO_ROOT
+            / "scripts"
+            / "segmentation"
+            / "archive"
+            / "object_level_pilot_selection.json"
         ),
         help="JSON file listing objects as scan_id/obj_id pairs.",
     )

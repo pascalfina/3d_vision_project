@@ -66,3 +66,4 @@ dependencies/VLSG/**/time_used*.txt
 
 *.log
 *.tar
+vis/rendered

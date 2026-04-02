@@ -110,23 +110,23 @@ case "$ACTION" in
         REQUIRES_DATA_ROOT=1
         ;;
     inference_slat)
-        TARGET_SCRIPT="scripts/inference/run_pipeline_slat.sh"
+        TARGET_SCRIPT="scripts/inference/pipeline/run_pipeline_slat_tmp.sh"
         REQUIRES_DATA_ROOT=1
         ;;
     inference_u3dgs)
-        TARGET_SCRIPT="scripts/inference/run_pipeline_u3dgs.sh"
+        TARGET_SCRIPT="scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh"
         REQUIRES_DATA_ROOT=1
         ;;
     voxelise_features)
-        TARGET_SCRIPT="scripts/voxel_annotations/voxelise_features.sh"
+        TARGET_SCRIPT="scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh"
         REQUIRES_DATA_ROOT=1
         ;;
     voxelise_features_scannet)
-        TARGET_SCRIPT="scripts/voxel_annotations/voxelise_features_scannet.sh"
+        TARGET_SCRIPT="scripts/voxel_annotations/variants/voxelise_features_scannet.sh"
         REQUIRES_DATA_ROOT=1
         ;;
     voxelise_features_scene_alignment)
-        TARGET_SCRIPT="scripts/voxel_annotations/voxelise_features_scene_alignment.sh"
+        TARGET_SCRIPT="scripts/voxel_annotations/variants/voxelise_features_scene_alignment.sh"
         REQUIRES_DATA_ROOT=1
         ;;
     annotate_gaussians)

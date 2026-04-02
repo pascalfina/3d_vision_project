@@ -41,25 +41,25 @@ Important nuance:
 
 Main code touch points:
 
-- `scripts/voxel_annotations/run_scanwise_voxelise_tmp.py`
+- `scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py`
   - new 2.5 path that can use `OBJECTX_MASK_SOURCE`
-- `scripts/segmentation/worldspace_object_debug.py`
+- `scripts/segmentation/validation/worldspace_object_debug.py`
   - world-space object overlay debug
-- `scripts/segmentation/diagnose_object_gaps.py`
+- `scripts/segmentation/validation/diagnose_object_gaps.py`
   - object-level gap diagnosis
-- `scripts/segmentation/build_pred_ready_scene_root.py`
+- `scripts/segmentation/pipeline/build_pred_ready_scene_root.py`
   - builds a new scene root whose `objects.json` and `files/orig/data.pkl.gz` come from reconstructed objects
-- `scripts/segmentation/validate_pred_ready_scene_root.py`
+- `scripts/segmentation/validation/validate_pred_ready_scene_root.py`
   - validates that the pred-ready root is internally consistent and dataset-loadable
-- `scripts/segmentation/compare_scene_arrangement.py`
+- `scripts/segmentation/validation/compare_scene_arrangement.py`
   - compares pred-ready object arrangement against GT arrangement
 - `src/inference/unstructured_latent_inference.py`
   - chunked encode / decode
   - support-constrained cleanup
   - end-of-run gaussian cleanup summaries
-- `scripts/segmentation/render_joint_depth_background.py`
+- `scripts/segmentation/visualization/render_joint_depth_background.py`
   - MP4 + HTML inspection for final U3DGS joint output
-- `scripts/segmentation/render_joint_depth_background_bundle.sh`
+- `scripts/segmentation/visualization/render_joint_depth_background_bundle.sh`
   - wrapper for the above
 
 ## 1.1 Original Object-X files we actually changed
@@ -128,7 +128,7 @@ Why this matters:
 - this is the core utility that made `gt_projection` vs `pred_projection_clean` switching possible
 - without this change, the rest of the pipeline would still silently snap back to the old GT mask folder assumptions
 
-### `scripts/voxel_annotations/voxelise_features.sh`
+### `scripts/voxel_annotations/archive/voxelise_features.sh`
 
 Before:
 
@@ -220,18 +220,18 @@ These are the original files I would tell someone to read first if they want to 
 
 Separate from that, we also added several new helper scripts around these core files, for example:
 
-- `scripts/voxel_annotations/run_scanwise_voxelise_tmp.py`
-- `scripts/inference/run_pipeline_tmp.py`
-- `scripts/segmentation/worldspace_object_debug.py`
-- `scripts/segmentation/diagnose_object_gaps.py`
-- `scripts/segmentation/render_joint_depth_background_bundle.sh`
-- `scripts/segmentation/build_pred_ready_scene_root.py`
-- `scripts/segmentation/validate_pred_ready_scene_root.py`
-- `scripts/segmentation/compare_scene_arrangement.py`
+- `scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py`
+- `scripts/inference/pipeline/run_pipeline_tmp.py`
+- `scripts/segmentation/validation/worldspace_object_debug.py`
+- `scripts/segmentation/validation/diagnose_object_gaps.py`
+- `scripts/segmentation/visualization/render_joint_depth_background_bundle.sh`
+- `scripts/segmentation/pipeline/build_pred_ready_scene_root.py`
+- `scripts/segmentation/validation/validate_pred_ready_scene_root.py`
+- `scripts/segmentation/validation/compare_scene_arrangement.py`
 
 ## 2. What the main new debug scripts do
 
-### `scripts/segmentation/worldspace_object_debug.py`
+### `scripts/segmentation/validation/worldspace_object_debug.py`
 
 Purpose:
 
@@ -261,7 +261,7 @@ Typical command template:
 cd /work/scratch/pafina/object-x
 source scripts/activate_objectx_env.sh
 
-python scripts/segmentation/worldspace_object_debug.py \
+python scripts/segmentation/validation/worldspace_object_debug.py \
   --data-root <pred_or_hybrid_root> \
   --baseline-root /work/scratch/pafina/objectx-data-baseline \
   --scan-id <scan_id> \
@@ -275,7 +275,7 @@ python scripts/segmentation/worldspace_object_debug.py \
   --object-source hybrid_masks
 ```
 
-### `scripts/segmentation/diagnose_object_gaps.py`
+### `scripts/segmentation/validation/diagnose_object_gaps.py`
 
 Purpose:
 
@@ -303,7 +303,7 @@ Typical command template:
 cd /work/scratch/pafina/object-x
 source scripts/activate_objectx_env.sh
 
-python scripts/segmentation/diagnose_object_gaps.py \
+python scripts/segmentation/validation/diagnose_object_gaps.py \
   --data-root <pred_or_hybrid_root> \
   --baseline-root /work/scratch/pafina/objectx-data-baseline \
   --selection-file <selection_json> \
@@ -315,14 +315,14 @@ python scripts/segmentation/diagnose_object_gaps.py \
   --out-dir <out_dir>
 ```
 
-### `scripts/segmentation/render_predseg_debug.py`
+### `scripts/segmentation/visualization/render_predseg_debug.py`
 
 Purpose:
 
 - visualize 2D masks on frames
 - good for quick sanity checks on mask quality before going into 3D
 
-### `scripts/segmentation/clean_projection_masks.py`
+### `scripts/segmentation/pipeline/clean_projection_masks.py`
 
 Purpose:
 
@@ -335,13 +335,13 @@ Typical command template:
 cd /work/scratch/pafina/object-x
 source scripts/activate_objectx_env.sh
 
-python scripts/segmentation/clean_projection_masks.py \
+python scripts/segmentation/pipeline/clean_projection_masks.py \
   --data-root <root> \
   --source pred_projection \
   --target pred_projection_clean
 ```
 
-### `scripts/segmentation/render_depth_background.py`
+### `scripts/segmentation/visualization/render_depth_background.py`
 
 Purpose:
 
@@ -349,14 +349,14 @@ Purpose:
 - no GT scene mesh background
 - replacement objects come from `gs_annotations`
 
-### `scripts/segmentation/render_joint_depth_background.py`
+### `scripts/segmentation/visualization/render_joint_depth_background.py`
 
 Purpose:
 
 - render the final U3DGS joint PLY together with the depth-based background
 - outputs both MP4 and HTML
 
-### `scripts/segmentation/render_joint_depth_background_bundle.sh`
+### `scripts/segmentation/visualization/render_joint_depth_background_bundle.sh`
 
 Purpose:
 
@@ -365,7 +365,7 @@ Purpose:
 - auto-resolves joint PLY and manifest when possible
 - good final inspection command for a scene
 
-### `scripts/segmentation/build_pred_ready_scene_root.py`
+### `scripts/segmentation/pipeline/build_pred_ready_scene_root.py`
 
 Purpose:
 
@@ -387,7 +387,7 @@ What it actually does:
   - KNN edges / pairs / triples
 - keeps some semantic fields from baseline only for compatibility
 
-### `scripts/segmentation/validate_pred_ready_scene_root.py`
+### `scripts/segmentation/validation/validate_pred_ready_scene_root.py`
 
 Purpose:
 
@@ -398,7 +398,7 @@ Purpose:
   - point-level shapes
   - dataset loader compatibility
 
-### `scripts/segmentation/compare_scene_arrangement.py`
+### `scripts/segmentation/validation/compare_scene_arrangement.py`
 
 Purpose:
 
@@ -415,8 +415,8 @@ This is the step that generates featured voxel annotations from our chosen mask 
 
 Main implementation:
 
-- `scripts/voxel_annotations/run_scanwise_voxelise_tmp.py`
-- wrapper: `scripts/voxel_annotations/voxelise_features_tmp.sh`
+- `scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py`
+- wrapper: `scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh`
 
 What it produces:
 
@@ -440,7 +440,7 @@ export SPLIT=val
 export RESET_TMP=1
 export MAX_SCANS=0
 
-bash scripts/voxel_annotations/voxelise_features_tmp.sh
+bash scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh
 ```
 
 Current cabinet-style example:
@@ -453,7 +453,7 @@ export OBJECTX_MASK_SOURCE=gt_projection
 export SPLIT=val
 export RESET_TMP=1
 
-bash scripts/voxel_annotations/voxelise_features_tmp.sh
+bash scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh
 ```
 
 Current cabinet full-scene floor-fix example:
@@ -469,7 +469,7 @@ export OBJECTX_VOXEL_OBJECT_SOURCE=hybrid_masks
 export OBJECTX_VOXEL_TSDF_FALLBACK_TO_LIFTED=1
 export RESET_TMP=1
 
-bash scripts/voxel_annotations/voxelise_features_tmp.sh 2>&1 | tee /work/scratch/pafina/object-x/debug/debug_fullscene_cabinet_2_5_floorfix_rerun.log
+bash scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh 2>&1 | tee /work/scratch/pafina/object-x/debug/debug_fullscene_cabinet_2_5_floorfix_rerun.log
 ```
 
 ## 4. How to get the object image features
@@ -518,7 +518,7 @@ Current cabinet pred-ready build:
 cd /work/scratch/pafina/object-x
 source scripts/activate_objectx_env.sh
 
-python scripts/segmentation/build_pred_ready_scene_root.py \
+python scripts/segmentation/pipeline/build_pred_ready_scene_root.py \
   --baseline-root /work/scratch/pafina/objectx-data-baseline \
   --reconstruction-root /work/scratch/pafina/objectx-data-fullscene-cabinet-hybrid-gtmask \
   --target-root /work/scratch/pafina/objectx-data-fullscene-cabinet-predready-v2-floorfix \
@@ -536,7 +536,7 @@ Validate the pred-ready root:
 cd /work/scratch/pafina/object-x
 source scripts/activate_objectx_env.sh
 
-python scripts/segmentation/validate_pred_ready_scene_root.py \
+python scripts/segmentation/validation/validate_pred_ready_scene_root.py \
   --root /work/scratch/pafina/objectx-data-fullscene-cabinet-predready-v2-floorfix \
   --scene-id e61b0e04-bada-2f31-82d6-72831a602ba7 \
   --split val \
@@ -549,18 +549,70 @@ Compare arrangement against GT:
 cd /work/scratch/pafina/object-x
 source scripts/activate_objectx_env.sh
 
-python scripts/segmentation/compare_scene_arrangement.py \
+python scripts/segmentation/validation/compare_scene_arrangement.py \
   --pred-root /work/scratch/pafina/objectx-data-fullscene-cabinet-predready-v2-floorfix \
   --gt-root /work/scratch/pafina/objectx-data-baseline \
   --scene-id e61b0e04-bada-2f31-82d6-72831a602ba7 \
   --out-dir /work/scratch/pafina/object-x/vis/arrangement_compare/cabinet_predready_v2_floorfix_vs_gt
 ```
 
+## 5.1 Short workflow profiles for the current pipeline
+
+Why this exists:
+
+- many of our commands became too long and too easy to mess up
+- the new workflow layer keeps the real pipeline steps unchanged but moves the long flags / env vars into a profile config
+- this is meant to be the safer default way to rerun important steps
+
+Main files:
+
+- `scripts/workflows/run_scene_profile.sh`
+- `scripts/workflows/run_scene_profile.py`
+- `configs/workflows/scene_profiles/cabinet_predready_v2_floorfix.json`
+
+List available profiles:
+
+```bash
+cd /work/scratch/pafina/object-x
+bash scripts/workflows/run_scene_profile.sh --list-profiles
+```
+
+See the exact command without running it:
+
+```bash
+cd /work/scratch/pafina/object-x
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix u3dgs --dry-run
+```
+
+Current short commands for the cabinet profile:
+
+```bash
+cd /work/scratch/pafina/object-x
+
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix voxelise
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix build-pred-ready
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix validate-pred-ready
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix compare-arrangement
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix slat
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix u3dgs
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix render
+```
+
+Important note:
+
+- the profile currently encodes the exact support-only cabinet setup we converged to:
+  - pred-ready root `v2-floorfix`
+  - no hard voxel cutoff
+  - chunked decode
+  - support-constrained cleanup
+  - no extra quantile prune
+- if we want the same cleanup for `oven` or another scene, the intended next step is to add another JSON profile instead of inventing another huge one-off command
+
 ## 6. How to run SLAT encode
 
 Wrapper:
 
-- `scripts/inference/run_pipeline_slat_tmp.sh`
+- `scripts/inference/pipeline/run_pipeline_slat_tmp.sh`
 
 What it produces:
 
@@ -576,14 +628,14 @@ export SPLIT=val
 export SCENE_ID=<scan_id>
 export RESET_TMP=1
 
-bash scripts/inference/run_pipeline_slat_tmp.sh
+bash scripts/inference/pipeline/run_pipeline_slat_tmp.sh
 ```
 
 ## 7. How to run U3DGS encode + decode
 
 Wrapper:
 
-- `scripts/inference/run_pipeline_u3dgs_tmp.sh`
+- `scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh`
 
 What it produces:
 
@@ -650,7 +702,7 @@ unset OBJECTX_VIS_PRUNE_MAX_POINTS
 unset OBJECTX_VIS_PRUNE_QUANTILE_SAMPLE_MAX
 
 rm -rf /tmp/$USER-objectx-infer
-bash scripts/inference/run_pipeline_u3dgs_tmp.sh --visualize 2>&1 | tee /work/scratch/pafina/object-x/debug/debug_cabinet_predready_v2_floorfix_u3dgs_supportonly.log
+bash scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh --visualize 2>&1 | tee /work/scratch/pafina/object-x/debug/debug_cabinet_predready_v2_floorfix_u3dgs_supportonly.log
 ```
 
 More generic version:
@@ -676,7 +728,7 @@ export OBJECTX_VIS_SUPPORT_DILATE_VOXELS=0
 export OBJECTX_VIS_SUPPORT_MAX_SCALE_VOXELS=1.0
 export OBJECTX_VIS_SUPPORT_MIN_KEEP=4
 
-bash scripts/inference/run_pipeline_u3dgs_tmp.sh --visualize
+bash scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh --visualize
 ```
 
 What to look for in the log:
@@ -703,11 +755,11 @@ Current cabinet support-only numbers:
 
 Best current wrapper:
 
-- `scripts/segmentation/render_joint_depth_background_bundle.sh`
+- `scripts/segmentation/visualization/render_joint_depth_background_bundle.sh`
 
 This wraps:
 
-- `scripts/segmentation/render_joint_depth_background.py`
+- `scripts/segmentation/visualization/render_joint_depth_background.py`
 
 What it produces:
 
@@ -721,7 +773,7 @@ Generic command:
 ```bash
 cd /work/scratch/pafina/object-x
 
-bash scripts/segmentation/render_joint_depth_background_bundle.sh \
+bash scripts/segmentation/visualization/render_joint_depth_background_bundle.sh \
   --scan-id <scan_id> \
   --replacement-root <your_scene_root> \
   --label <label>
@@ -732,7 +784,7 @@ Current cabinet example for the new pred-ready support-only run:
 ```bash
 cd /work/scratch/pafina/object-x
 
-bash scripts/segmentation/render_joint_depth_background_bundle.sh \
+bash scripts/segmentation/visualization/render_joint_depth_background_bundle.sh \
   --scan-id e61b0e04-bada-2f31-82d6-72831a602ba7 \
   --replacement-root /work/scratch/pafina/objectx-data-fullscene-cabinet-predready-v2-floorfix \
   --joint-ply /work/scratch/pafina/object-x/vis/e61b0e04-bada-2f31-82d6-72831a602ba7_joint.ply \
@@ -791,3 +843,103 @@ What is still not final:
 
 - the final object inventory / IDs should come from segmentation + tracking, not from the old dataset setup
 - some experiments still intentionally use GT masks as an intermediate step
+
+## 11. Suggested cleanup order
+
+If we want to make the repo easier to understand without breaking the pipeline, this is the safest order.
+
+### Core files
+
+These are the files that now contain the real logic changes and should stay clearly documented and close to production:
+
+- `preprocessing/voxel_anno/voxelise_features.py`
+- `src/inference/unstructured_latent_inference.py`
+- `src/inference/structured_latent_inference.py`
+- `utils/scan3r.py`
+- `src/datasets/scan3r_scene.py`
+- `utils/visualisation.py`
+
+What to do:
+
+- keep these files
+- improve comments / function boundaries
+- avoid adding more one-off debug code here unless it is broadly useful
+
+### Workflow entrypoints
+
+These are the files that should become the normal user-facing way to run the pipeline:
+
+- `scripts/workflows/run_scene_profile.sh`
+- `scripts/workflows/run_scene_profile.py`
+- `configs/workflows/scene_profiles/*.json`
+- `scripts/activate_objectx_env.sh`
+
+What to do:
+
+- keep these files
+- add one profile per important scene / setup instead of writing new giant commands
+- move repeated env settings here rather than copying commands into notes
+
+### Stable helper scripts
+
+These are useful and worth keeping, but they are support tools around the main pipeline:
+
+- `scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py`
+- `scripts/inference/pipeline/run_pipeline_tmp.py`
+- `scripts/inference/pipeline/run_pipeline_slat_tmp.sh`
+- `scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh`
+- `scripts/segmentation/pipeline/build_pred_ready_scene_root.py`
+- `scripts/segmentation/validation/validate_pred_ready_scene_root.py`
+- `scripts/segmentation/validation/compare_scene_arrangement.py`
+- `scripts/segmentation/visualization/render_joint_depth_background.py`
+- `scripts/segmentation/visualization/render_joint_depth_background_bundle.sh`
+
+What to do:
+
+- keep them
+- maybe rename `tmp` files later once we are confident they are the real path
+- group them under a clearer “pipeline” vs “debug” split if we do a second cleanup pass
+
+### Debug scripts
+
+These are very useful during development, but they are not the main pipeline:
+
+- `scripts/segmentation/validation/worldspace_object_debug.py`
+- `scripts/segmentation/validation/diagnose_object_gaps.py`
+- `scripts/segmentation/visualization/export_depth_background_interactive.py`
+- `scripts/segmentation/visualization/export_scene_mesh_background_interactive.py`
+- `scripts/segmentation/visualization/export_slat_depth_background_interactive.py`
+- `scripts/segmentation/visualization/render_depth_background.py`
+- `scripts/segmentation/visualization/render_scene_mesh_background.py`
+- `scripts/segmentation/visualization/render_predseg_debug.py`
+
+What to do:
+
+- keep them, but treat them as debug-only
+- move them under a clearer debug folder later if wanted
+- avoid mixing their logic back into the core files unless necessary
+
+### Experiment builders / legacy one-offs
+
+These are the first files I would review for archiving, renaming, or moving into an experiments area:
+
+- `scripts/segmentation/archive/build_mixed_scene_root.py`
+- `scripts/segmentation/archive/build_object_level_pilot_root.py`
+- `scripts/segmentation/archive/build_partial_context_mixed_root.py`
+- `scripts/segmentation/archive/bootstrap_pred_projection_from_gt.py`
+- selection JSON files under `scripts/segmentation/archive/*.json`
+- old rerender helpers such as `scripts/inference/experiments/rerender_object_level_bright.sh`
+
+What to do:
+
+- keep them for now if they still reproduce older results
+- otherwise move them to an `experiments/` or `archive/` area instead of leaving them in the main path
+
+### Practical cleanup priority
+
+If we only do a small cleanup pass, the best order is:
+
+1. keep `core files` as the main source of truth
+2. adopt `workflow entrypoints` as the default way to run things
+3. clearly separate `stable helper scripts` from `debug scripts`
+4. move old experiment builders into an archive area once we know they are no longer needed

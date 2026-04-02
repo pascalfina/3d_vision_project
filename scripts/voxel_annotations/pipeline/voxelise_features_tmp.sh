@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRATCH_ROOT="${DATA_ROOT_DIR:-/work/scratch/pafina/objectx-data-baseline}"
 TMP_VOX_ROOT="${TMP_VOX_ROOT:-/tmp/${USER}-objectx-voxelise}"
 RESET_TMP="${RESET_TMP:-0}"
@@ -31,7 +31,7 @@ export MPLCONFIGDIR="$CACHE_ROOT/matplotlib"
 export OBJECTX_DINOV2_HUB_DIR="$TORCH_HOME/hub/facebookresearch_dinov2_main"
 
 cd "$REPO_ROOT"
-python -u scripts/voxel_annotations/run_scanwise_voxelise_tmp.py \
+python -u scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py \
   --repo-root "$REPO_ROOT" \
   --scratch-root "$SCRATCH_ROOT" \
   --tmp-root "$TMP_VOX_ROOT" \

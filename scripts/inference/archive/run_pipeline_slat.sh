@@ -3,7 +3,7 @@
 args=("$@")
 
 # Set environment variables
-source "$(dirname "${BASH_SOURCE[0]}")/../activate_objectx_env.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../activate_objectx_env.sh"
 export RESUME_DIR="$VLSG_TRAINING_OUT_DIR"
 
 # get output directory argument if it exists

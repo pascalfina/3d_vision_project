@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRATCH_ROOT="${DATA_ROOT_DIR:-/work/scratch/pafina/objectx-data-baseline}"
 TMP_INFER_ROOT="${TMP_INFER_ROOT:-/tmp/${USER}-objectx-infer}"
 RESET_TMP="${RESET_TMP:-1}"
@@ -27,7 +27,7 @@ if [[ -n "$SCENE_ID" ]]; then
   scene_args+=(--scene-id "$SCENE_ID")
 fi
 
-python -u "$REPO_ROOT/scripts/inference/run_pipeline_tmp.py" \
+python -u "$REPO_ROOT/scripts/inference/pipeline/run_pipeline_tmp.py" \
   --repo-root "$REPO_ROOT" \
   --scratch-root "$SCRATCH_ROOT" \
   --tmp-root "$TMP_INFER_ROOT" \

@@ -24,6 +24,156 @@
   </a>
 </p>
 
+## Current Workflow Quick Start
+
+For the current Scan3R/cluster workflow, prefer the short profile-based entrypoints instead of long ad-hoc commands.
+Each profile defines one scene setup, and each action runs exactly one stage of the pipeline.
+
+List available profiles:
+
+```bash
+cd /work/scratch/$USER/object-x
+bash scripts/workflows/run_scene_profile.sh --list-profiles
+```
+
+The current main profile is:
+
+- `cabinet_predready_v2_floorfix`
+- `oven_predready_v1`
+
+Run the full current `cabinet` pipeline:
+
+```bash
+cd /work/scratch/$USER/object-x
+
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix voxelise
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix build-pred-ready
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix validate-pred-ready
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix compare-arrangement
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix slat
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix u3dgs
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix render
+```
+
+What each command does:
+
+- `voxelise`: runs the current "2.5" reconstruction path, i.e. builds object geometry from masks + depth + poses and writes `gs_annotations`
+- `build-pred-ready`: rebuilds `objects.json` and `files/orig/data.pkl.gz` from the reconstructed objects
+- `validate-pred-ready`: checks that the new scene root is internally consistent and dataset-loadable
+- `compare-arrangement`: compares the rebuilt scene arrangement against the baseline GT arrangement
+- `slat`: runs the structured latent encoding step
+- `u3dgs`: runs the unstructured latent encode/decode and writes the joint output / render
+- `render`: creates the final MP4 + interactive HTML inspection bundle
+
+Useful extras:
+
+```bash
+bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix u3dgs --dry-run
+```
+
+- `--dry-run` prints the exact underlying command without executing it
+
+### How To Test Another Scene
+
+Profiles live under:
+
+- [`configs/workflows/scene_profiles`](configs/workflows/scene_profiles)
+
+The current example profile is:
+
+- [`cabinet_predready_v2_floorfix.json`](configs/workflows/scene_profiles/cabinet_predready_v2_floorfix.json)
+
+The safest way to test another scene is to copy that JSON and edit it:
+
+```bash
+cp configs/workflows/scene_profiles/cabinet_predready_v2_floorfix.json \
+   configs/workflows/scene_profiles/<new_profile_name>.json
+```
+
+The most important fields to update are:
+
+- `name`: short profile name used on the command line
+- `scene_id`: the new scene / scan id
+- `split`: usually `val`
+- `roots.reconstruction`: the scene root that contains the reconstructed `gs_annotations`
+- `roots.pred_ready`: the target pred-ready root for that scene
+- `artifacts.manifest`: manifest JSON for the selected objects in that scene
+- `artifacts.joint_ply`: path to the expected joint output PLY
+- `validate_pred_ready.out_dir`: output directory for pred-ready validation
+- `compare_arrangement.out_dir`: output directory for the arrangement comparison
+- `slat.log` and `u3dgs.log`: log file paths for the new scene
+- `render_bundle.label`: label used for the final visualization folder
+
+After editing the JSON, verify it with a dry-run, for example:
+
+```bash
+bash scripts/workflows/run_scene_profile.sh <new_profile_name> voxelise --dry-run
+bash scripts/workflows/run_scene_profile.sh <new_profile_name> u3dgs --dry-run
+```
+
+This lets you verify the new scene config before launching the real run.
+
+### Step-by-Step Pipeline Overview
+
+The current workflow is easiest to think about as one linear pipeline driven by a profile:
+
+```bash
+bash scripts/workflows/run_scene_profile.sh <profile> <action>
+```
+
+In practice, this means:
+- the `profile` chooses the scene, roots, manifests, logs, and output folders
+- the `action` chooses which pipeline stage to run
+- you can run the whole pipeline step by step without rebuilding unrelated stages
+
+For the current `cabinet` setup, the actions are:
+
+1. `voxelise`
+   - wrapper: [`scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh`](scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh)
+   - runner: [`scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py`](scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py)
+   - core logic: [`preprocessing/voxel_anno/voxelise_features.py`](preprocessing/voxel_anno/voxelise_features.py)
+   - purpose: build object geometry from masks + depth + camera poses
+   - main outputs: `files/gs_annotations/<scene>/<obj>/voxel_output_dense.npz` and `mean_scale_dense.npz`
+
+2. `build-pred-ready`
+   - script: [`scripts/segmentation/pipeline/build_pred_ready_scene_root.py`](scripts/segmentation/pipeline/build_pred_ready_scene_root.py)
+   - purpose: rebuild downstream scene metadata from the reconstructed objects
+   - main outputs: `files/objects.json` and `files/orig/data.pkl.gz`
+
+3. `validate-pred-ready`
+   - script: [`scripts/segmentation/validation/validate_pred_ready_scene_root.py`](scripts/segmentation/validation/validate_pred_ready_scene_root.py)
+   - purpose: check that the new scene root is internally consistent and dataset-loadable
+
+4. `compare-arrangement`
+   - script: [`scripts/segmentation/validation/compare_scene_arrangement.py`](scripts/segmentation/validation/compare_scene_arrangement.py)
+   - purpose: compare the rebuilt scene layout against the baseline GT layout
+
+5. `slat`
+   - wrapper: [`scripts/inference/pipeline/run_pipeline_slat_tmp.sh`](scripts/inference/pipeline/run_pipeline_slat_tmp.sh)
+   - staging helper: [`scripts/inference/pipeline/run_pipeline_tmp.py`](scripts/inference/pipeline/run_pipeline_tmp.py)
+   - model entrypoint: [`src/inference/structured_latent_inference.py`](src/inference/structured_latent_inference.py)
+   - purpose: encode the structured latent representation
+   - main output: `files/gs_embeddings/<scene>_slat.npz`
+
+6. `u3dgs`
+   - wrapper: [`scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh`](scripts/inference/pipeline/run_pipeline_u3dgs_tmp.sh)
+   - staging helper: [`scripts/inference/pipeline/run_pipeline_tmp.py`](scripts/inference/pipeline/run_pipeline_tmp.py)
+   - model entrypoint: [`src/inference/unstructured_latent_inference.py`](src/inference/unstructured_latent_inference.py)
+   - purpose: decode the final joint reconstruction
+   - main outputs: `files/gs_embeddings/<scene>_ulat.npz`, `vis/<scene>_joint.ply`, and `vis/rendered/<scene>_orbit_rendered.mp4`
+
+7. `render`
+   - wrapper: [`scripts/segmentation/visualization/render_joint_depth_background_bundle.sh`](scripts/segmentation/visualization/render_joint_depth_background_bundle.sh)
+   - renderer: [`scripts/segmentation/visualization/render_joint_depth_background.py`](scripts/segmentation/visualization/render_joint_depth_background.py)
+   - purpose: create the final inspection bundle from the decoded joint output plus depth background
+   - main outputs: MP4, interactive HTML, contact sheet, and `summary.json`
+
+In short, the current pipeline is:
+
+```text
+profile -> voxelise -> build-pred-ready -> validate/compare -> slat -> u3dgs -> render
+```
+
 ## 📃 Abstract
 
 Learning effective multi-modal 3D representations of objects is essential for numerous applications, such as augmented reality and robotics. Existing methods often rely on task-specific embeddings that are tailored either for semantic understanding or geometric reconstruction. As a result, these embeddings typically cannot be decoded into explicit geometry and simultaneously reused across tasks. In this paper, we propose Object-X, a versatile multi-modal object representation framework capable of encoding rich object embeddings (e.g., images, point cloud, text) and decoding them back into detailed geometric and visual reconstructions. Object-X operates by geometrically grounding the captured modalities in a 3D voxel grid and learning an unstructured embedding fusing the information from the voxels with the object attributes. The learned embedding enables 3D Gaussian Splatting-based object reconstruction, while also supporting a range of downstream tasks, including scene alignment, single-image 3D object reconstruction, and localization. Evaluations on two challenging real-world datasets demonstrate that Object-X produces high-fidelity novel-view synthesis comparable to standard 3D Gaussian Splatting, while significantly improving geometric accuracy.Moreover, Object-X achieves competitive performance with specialized methods in scene alignment and localization Critically, our object-centric descriptors require 3-4 orders of magnitude less storage compared to traditional image- or point cloud-based approaches, establishing Object-X as a scalable and highly practical solution for multi-modal 3D scene representation.
@@ -646,11 +796,11 @@ cd dependencies/VLSG && bash scripts/features2D/scan3r_dinov2.sh
 #### **2.5 Generating Featured Voxel Annotations**
 Run the following command to generate featured voxel annotations:
 ```bash
-bash scripts/voxel_annotations/voxelise_features.sh --split {split}
+bash scripts/voxel_annotations/pipeline/voxelise_features_tmp.sh --split {split}
 # 2.5.1 Generating Subscenes Annotations (Optional)
 # Follow the instructions from SGAligner at dependencies/sgaligner to create subscenes annotations
 # Then run the following command:
-# bash scripts/voxel_annotations/voxelise_features_scene_alignment.sh --split {split}
+# bash scripts/voxel_annotations/variants/voxelise_features_scene_alignment.sh --split {split}
 ```
 
 #### **2.6 Generating Gaussian Splat Annotations (Optional: Baseline Computation)**
@@ -686,7 +836,7 @@ python preprocessing/gt_anno/scannet_obj_projector.py
 #### **3.4 Generating Featured Voxel Annotations**
 Run the following script to generate featured voxel annotations:
 ```bash
-bash scripts/voxel_annotations/voxelise_features_scannet.sh
+bash scripts/voxel_annotations/variants/voxelise_features_scannet.sh
 ```
 
 #### **3.5 Generating Gaussian Splat Annotations (Optional: Baseline Computation)**
