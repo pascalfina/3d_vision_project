@@ -1,25 +1,24 @@
 {
-  "name": "oven_predready_v1",
-  "scene_id": "5341b7e3-8a66-2cdd-8709-66a2159f0017",
+  "name": "cabinet_predready_v2_liftedonly",
+  "scene_id": "e61b0e04-bada-2f31-82d6-72831a602ba7",
   "split": "val",
   "mask_source": "gt_projection",
   "roots": {
     "baseline": "/work/scratch/pafina/objectx-data-baseline",
-    "reconstruction": "/work/scratch/pafina/objectx-data-fullscene-oven-hybrid-gtmask",
-    "pred_ready": "/work/scratch/pafina/objectx-data-fullscene-oven-predready-v1"
+    "reconstruction": "/work/scratch/pafina/objectx-data-fullscene-cabinet-lifted-gtmask",
+    "pred_ready": "/work/scratch/pafina/objectx-data-fullscene-cabinet-predready-v2-liftedonly"
   },
   "artifacts": {
-    "manifest": "/work/scratch/pafina/object-x/debug/oven_fullscene_all_objects_manifest.json",
-    "joint_ply": "/work/scratch/pafina/object-x/vis/5341b7e3-8a66-2cdd-8709-66a2159f0017_joint.ply"
+    "manifest": "/work/scratch/pafina/object-x/debug/cabinet_fullscene_all_objects_manifest.json",
+    "joint_ply": "/work/scratch/pafina/object-x/vis/e61b0e04-bada-2f31-82d6-72831a602ba7_joint.ply"
   },
   "voxelise": {
     "env": {
-      "OBJECTX_VOXEL_OBJECT_SOURCE": "hybrid_masks",
-      "OBJECTX_VOXEL_TSDF_FALLBACK_TO_LIFTED": "1"
+      "OBJECTX_VOXEL_OBJECT_SOURCE": "lifted_masks"
     },
     "reset_tmp": 1,
     "max_scans": 0,
-    "log": "/work/scratch/pafina/object-x/debug/debug_fullscene_oven_2_5.log"
+    "log": "/work/scratch/pafina/object-x/debug/debug_fullscene_cabinet_2_5_liftedonly.log"
   },
   "build_pred_ready": {
     "knn": 4,
@@ -28,10 +27,10 @@
     "overwrite": true
   },
   "validate_pred_ready": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/pred_ready_validation/oven_predready_v1"
+    "out_dir": "/work/scratch/pafina/object-x/vis/pred_ready_validation/cabinet_predready_v2_liftedonly"
   },
   "compare_arrangement": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/arrangement_compare/oven_predready_v1_vs_gt"
+    "out_dir": "/work/scratch/pafina/object-x/vis/arrangement_compare/cabinet_predready_v2_liftedonly_vs_gt"
   },
   "slat": {
     "env": {
@@ -40,7 +39,7 @@
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
       "RESET_TMP": "1"
     },
-    "log": "/work/scratch/pafina/object-x/debug/debug_oven_predready_v1_slat.log"
+    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_predready_v2_liftedonly_slat.log"
   },
   "u3dgs": {
     "visualize": true,
@@ -57,7 +56,6 @@
       "OBJECTX_INFER_MAX_VOXELS": "0",
       "OBJECTX_INFER_MAX_VOXELS_FALLBACKS": "",
       "OBJECTX_INFER_DECODE_OBJECTS_PER_CHUNK": "1",
-      "OBJECTX_INFER_CPU_DENSE_DECODE_FALLBACK": "1",
       "OBJECTX_VIS_SUPPORT_CONSTRAIN": "1",
       "OBJECTX_VIS_SUPPORT_DILATE_VOXELS": "0",
       "OBJECTX_VIS_SUPPORT_MAX_SCALE_VOXELS": "1.0",
@@ -72,10 +70,10 @@
       "OBJECTX_VIS_PRUNE_MAX_POINTS",
       "OBJECTX_VIS_PRUNE_QUANTILE_SAMPLE_MAX"
     ],
-    "log": "/work/scratch/pafina/object-x/debug/debug_oven_predready_v1_u3dgs_supportonly.log"
+    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_predready_v2_liftedonly_u3dgs_supportonly.log"
   },
   "render_bundle": {
-    "label": "oven_predready_v1_supportonly",
+    "label": "cabinet_predready_v2_liftedonly_supportonly",
     "data_root": "/work/scratch/pafina/objectx-data-baseline",
     "mask_source": "gt_projection",
     "background_remove_mode": "loaded",
