@@ -102,7 +102,7 @@ def print_run_header(profile_path: Path, action: str, cmd, env_updates: dict, lo
     if env_updates:
         print("[env]")
         for key in sorted(env_updates):
-            value = env_updates[key]
+            value = os.environ.get(key, env_updates[key])
             if value is None:
                 print(f"  unset {key}")
             else:
@@ -125,6 +125,8 @@ def stream_command(cmd, cwd: Path, env_updates: dict, log_path: Path, dry_run: b
 
     env = os.environ.copy()
     for key, value in env_updates.items():
+        if key in os.environ:
+            continue
         if value is None:
             env.pop(key, None)
         else:
@@ -200,6 +202,8 @@ def build_voxelise_action(repo_root: Path, profile: dict):
     sec = section(profile, "voxelise")
     env_updates = {
         "DATA_ROOT_DIR": sec.get("data_root", roots(profile).get("reconstruction")),
+        "OBJECTX_BASELINE_ROOT": sec.get("baseline_root", roots(profile).get("baseline")),
+        "OBJECTX_SCENE_ID": sec.get("scene_id", shared_value(profile, "scene_id")),
         "SPLIT": sec.get("split", shared_value(profile, "split", "val")),
         "OBJECTX_MASK_SOURCE": sec.get(
             "mask_source", shared_value(profile, "mask_source", "gt_projection")
@@ -296,6 +300,9 @@ def build_u3dgs_action(repo_root: Path, profile: dict):
         "DATA_ROOT_DIR": sec.get("data_root", roots(profile).get("pred_ready")),
         "SPLIT": sec.get("split", shared_value(profile, "split", "val")),
         "SCENE_ID": sec.get("scene_id", shared_value(profile, "scene_id")),
+        "OBJECTX_INFER_CPU_DENSE_DECODE_FALLBACK": str(
+            sec.get("cpu_dense_decode_fallback", 1)
+        ),
     }
     for key, value in sec.get("env", {}).items():
         env_updates[key] = str(value)

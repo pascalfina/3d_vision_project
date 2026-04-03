@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
 from torchvision import transforms
@@ -119,6 +120,57 @@ def cleanup_scan(tmp_scan_dir: Path):
         shutil.rmtree(tmp_scan_dir)
 
 
+def safe_unlink(path: Path):
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def ensure_symlink(src: Path, dst: Path):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() or dst.is_symlink():
+        safe_unlink(dst)
+    os.symlink(src, dst)
+
+
+def bootstrap_scratch_root(
+    scratch_root: Path, baseline_root: Optional[Path], mask_dirname: str
+) -> None:
+    if baseline_root is None:
+        return
+    if not baseline_root.exists():
+        return
+
+    files_dir = scratch_root / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+
+    for name in [
+        "3RScan.json",
+        "objects.json",
+        "train_resplit_scans.txt",
+        "val_resplit_scans.txt",
+        "test_resplit_scans.txt",
+        "train_scans.txt",
+        "val_scans.txt",
+        "test_scans.txt",
+        "scannet40_classes.txt",
+        "Features3D",
+        "orig",
+        mask_dirname,
+    ]:
+        dst = files_dir / name
+        if dst.exists() or dst.is_symlink():
+            continue
+        src = baseline_root / "files" / name
+        if src.exists():
+            ensure_symlink(src, dst)
+
+    scenes_dst = scratch_root / "scenes"
+    if not scenes_dst.exists() and (baseline_root / "scenes").exists():
+        ensure_symlink(baseline_root / "scenes", scenes_dst)
+
+
 def main():
     args = parse_args()
     repo_root = Path(args.repo_root)
@@ -139,6 +191,15 @@ def main():
     (tmp_root / "scenes").mkdir(parents=True, exist_ok=True)
     (tmp_root / "files").mkdir(parents=True, exist_ok=True)
 
+    mask_dirname = resolve_mask_source()
+    baseline_root_env = os.environ.get("OBJECTX_BASELINE_ROOT", "").strip()
+    baseline_root = Path(baseline_root_env) if baseline_root_env else None
+    bootstrap_scratch_root(
+        scratch_root=scratch_root,
+        baseline_root=baseline_root,
+        mask_dirname=mask_dirname,
+    )
+
     for name in [
         "3RScan.json",
         "objects.json",
@@ -156,7 +217,6 @@ def main():
                 dst.unlink()
             os.symlink(src, dst)
 
-    mask_dirname = resolve_mask_source()
     src = scratch_root / "files" / mask_dirname
     if not src.exists():
         raise FileNotFoundError(
@@ -222,6 +282,19 @@ def main():
     all_obj_info = json.load(open(scratch_root / "files" / "objects.json"))["scans"]
     obj_lookup = {entry["scan"]: entry for entry in all_obj_info}
     scan_ids = load_scan_ids(scratch_root, args.split)
+    target_scene_id = (os.environ.get("OBJECTX_SCENE_ID") or "").strip()
+    if target_scene_id:
+        if target_scene_id not in obj_lookup:
+            raise ValueError(
+                f"OBJECTX_SCENE_ID={target_scene_id} not found in files/objects.json"
+            )
+        if target_scene_id not in scan_ids:
+            print(
+                f"[2.5] warning: OBJECTX_SCENE_ID={target_scene_id} is not present in "
+                f"split={args.split}; running this single scene anyway",
+                flush=True,
+            )
+        scan_ids = [target_scene_id]
     if args.max_scans > 0:
         scan_ids = scan_ids[: args.max_scans]
 

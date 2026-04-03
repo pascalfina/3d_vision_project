@@ -64,7 +64,7 @@ What each command does:
 - `validate-pred-ready`: checks that the new scene root is internally consistent and dataset-loadable
 - `compare-arrangement`: compares the rebuilt scene arrangement against the baseline GT arrangement
 - `slat`: runs the structured latent encoding step
-- `u3dgs`: runs the unstructured latent encode/decode and writes the joint output / render
+- `u3dgs`: runs the unstructured latent encode/decode and writes the joint output / render; workflow profiles enable the dense CPU decode fallback by default so large hybrid/TSDF scenes do not fail immediately on smaller GPUs
 - `render`: creates the final MP4 + interactive HTML inspection bundle
 
 Useful extras:
@@ -319,7 +319,7 @@ For the current `cabinet` setup, the actions are:
    - staging helper: [`scripts/inference/pipeline/run_pipeline_tmp.py`](scripts/inference/pipeline/run_pipeline_tmp.py)
    - model entrypoint: [`src/inference/unstructured_latent_inference.py`](src/inference/unstructured_latent_inference.py)
    - input: `files/gs_embeddings/<scene>_slat.npz` plus the same staged root files used by `slat`, especially `files/orig/data/<scene>.pkl.gz`, `files/gs_annotations/<scene>/`, and `scenes/<scene>/sequence/`
-   - what happens: the unstructured model decodes the latent into a joint Gaussian/point-based reconstruction for the whole scene; this step also applies the current support-constrained cleanup so decoded geometry stays close to the original object support
+   - what happens: the unstructured model decodes the latent into a joint Gaussian/point-based reconstruction for the whole scene; workflow profiles enable a default CPU fallback for the dense voxel decode stage so the run can continue without hard voxel cuts when GPU memory is too small
    - output: `files/gs_embeddings/<scene>_ulat.npz`, `vis/<scene>_joint.ply`, and `vis/rendered/<scene>_orbit_rendered.mp4`
 
 7. `render`

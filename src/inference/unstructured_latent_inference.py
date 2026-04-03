@@ -294,7 +294,9 @@ class SceneGraph2UnstructuredLatentPipeline:
     def _decode_sparse_in_object_chunks(self, reconstruction_sparse, objects_per_chunk):
         total_objects = int(reconstruction_sparse.shape[0])
         if objects_per_chunk <= 0 or total_objects <= objects_per_chunk:
-            return self.latent_autoencoder.decode(reconstruction_sparse)
+            return self.latent_autoencoder.decode(
+                self._move_sparse_tensor_to_decoder_device(reconstruction_sparse)
+            )
 
         decoded = []
         for start in range(0, total_objects, objects_per_chunk):
@@ -318,7 +320,9 @@ class SceneGraph2UnstructuredLatentPipeline:
                 total_objects,
                 sparse_chunk.coords.shape[0],
             )
-            chunk_decoded = self.latent_autoencoder.decode(sparse_chunk)
+            chunk_decoded = self.latent_autoencoder.decode(
+                self._move_sparse_tensor_to_decoder_device(sparse_chunk)
+            )
             if len(chunk_decoded) != chunk_size:
                 _LOGGER.warning(
                     "Decode chunk %s:%s/%s returned %s objects, expected %s; padding/truncating to preserve alignment",
@@ -401,6 +405,38 @@ class SceneGraph2UnstructuredLatentPipeline:
             raise last_exc
         raise RuntimeError("No gaussian decode attempt was made.")
 
+    def _move_sparse_tensor_to_decoder_device(self, sparse_tensor):
+        decoder_device = next(self.latent_autoencoder.decoder.parameters()).device
+        if (
+            sparse_tensor.feats.device == decoder_device
+            and sparse_tensor.coords.device == decoder_device
+        ):
+            return sparse_tensor
+        return SparseTensor(
+            feats=sparse_tensor.feats.to(decoder_device),
+            coords=sparse_tensor.coords.to(decoder_device),
+            shape=sparse_tensor.shape,
+            layout=sparse_tensor.layout,
+        )
+
+    def _decode_dense_latent_with_offload(self, embedding):
+        try:
+            return self.model.decode(embedding)
+        except torch.OutOfMemoryError as exc:
+            allow_cpu_fallback = self._get_env_bool(
+                "OBJECTX_INFER_CPU_DENSE_DECODE_FALLBACK", True
+            )
+            if not torch.cuda.is_available() or not allow_cpu_fallback:
+                raise
+            _LOGGER.warning(
+                "Dense voxel decode hit CUDA OOM; retrying on CPU without voxel reduction: %s",
+                exc,
+            )
+            embedding_cpu = embedding.detach().to("cpu")
+            self.model = self.model.to("cpu")
+            torch.cuda.empty_cache()
+            return self.model.decode(embedding_cpu)
+
     def inference(self, idx, object_id=None):
         with torch.no_grad():
             self._reset_gaussian_summary()
@@ -451,9 +487,16 @@ class SceneGraph2UnstructuredLatentPipeline:
                 "tot_obj_dense_splat": self._densify(sparse_splat),
             }
             embedding = self.model.encode({"scene_graphs": stage2_scene_graphs})
+            del stage2_scene_graphs
+            del sparse_splat
+            del tot_obj_splat
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             # Stage 2.
             if self.vis:
-                reconstruction_dense = self.model.decode(embedding)
+                reconstruction_dense = self._decode_dense_latent_with_offload(
+                    embedding
+                )
                 reconstruction = self._decode_gaussians_with_retry(
                     reconstruction_dense
                 )
@@ -489,20 +532,26 @@ class SceneGraph2UnstructuredLatentPipeline:
             else:
                 _LOGGER.info(f"Saving all objects in the scene.")
                 idx = torch.arange(len(reconstruction))
-            self.save_scene(
-                [copy.deepcopy(reconstruction[i]) for i in idx],
-                scan_id,
-                means[idx],
-                scales[idx],
+            selected_indices = (
+                idx.detach().cpu().tolist() if isinstance(idx, torch.Tensor) else list(idx)
             )
+            selected_reconstruction = [reconstruction[i] for i in selected_indices]
+            selected_means = means[idx]
+            selected_scales = scales[idx]
+            scene_representation = self._build_scene_representation(
+                selected_reconstruction,
+                selected_means,
+                selected_scales,
+                prune_label=f"{scan_id[0]}_scene",
+            )
+            self.save_scene(scene_representation, scan_id)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             try:
                 self.save_render_orbit(
-                    [copy.deepcopy(reconstruction[i]) for i in idx],
                     scan_id,
-                    means[idx],
-                    scales[idx],
+                    scene_representation,
+                    num_objects=len(selected_reconstruction),
                 )
             except (torch.OutOfMemoryError, RuntimeError) as exc:
                 _LOGGER.warning(
@@ -816,64 +865,79 @@ class SceneGraph2UnstructuredLatentPipeline:
             obj_id=obj_ids,
         )
 
-    def save_scene(self, reconstruction, scan_id, means, scales):
-        os.makedirs("vis", exist_ok=True)
-        def _scale(x):
-            i, splat = x
-            if splat._xyz.numel() <= 0:
-                return None
-            device = reconstruction[i].get_xyz.device
-            dtype = reconstruction[i].get_xyz.dtype
-            scale = torch.as_tensor(scales[i], device=device, dtype=dtype)
-            mean = torch.as_tensor(means[i], device=device, dtype=dtype)
-            assert (
-                splat._xyz.min() >= -1e-2 and splat._xyz.max() <= 1 + 1e-2
-            ), f"{splat._xyz.min()} {splat._xyz.max()}"
-            splat.rescale(
-                torch.tensor([2, 2, 2], device=device, dtype=dtype)
-            )
-            assert (
-                splat._xyz.min() >= -1e-2 and splat._xyz.max() <= 2.0 + 1e-2
-            ), f"{splat._xyz.min()} {splat._xyz.max()}"
-            splat.translate(
-                -torch.tensor([1, 1, 1], device=device, dtype=dtype)
-            )
-            assert (
-                splat._xyz.min() >= -1.0 - 1e-2 and splat._xyz.max() <= 1.0 + 1e-2
-            ), f"{splat._xyz.min()} {splat._xyz.max()}"
-            splat.rescale(scale)
-            splat.translate(mean)
-            return splat
-
-        reconstruction = list(map(lambda x: _scale(x), enumerate(reconstruction)))
-        representation = Gaussian(
+    def _make_gaussian_representation(self, device=None):
+        if device is None:
+            device = self.device
+        return Gaussian(
             sh_degree=0,
             aabb=[-0.0, -0.0, -0.0, 1.0, 1.0, 1.0],
             mininum_kernel_size=self.rep_config["3d_filter_kernel_size"],
             scaling_bias=self.rep_config["scaling_bias"],
             opacity_bias=self.rep_config["opacity_bias"],
             scaling_activation=self.rep_config["scaling_activation"],
+            device=device,
         )
 
-        representation._xyz = torch.concatenate(
-            [splat._xyz for splat in reconstruction if splat is not None]
+    def _build_scene_representation(
+        self, reconstruction, means, scales, prune_label=None
+    ):
+        xyz_chunks = []
+        feature_chunks = []
+        opacity_chunks = []
+        scaling_chunks = []
+        rotation_chunks = []
+
+        for i, splat in enumerate(reconstruction):
+            if splat is None or splat._xyz is None or splat._xyz.numel() <= 0:
+                continue
+
+            device = splat.get_xyz.device
+            dtype = splat.get_xyz.dtype
+            obj_scale = torch.as_tensor(scales[i], device=device, dtype=dtype)
+            if obj_scale.numel() == 1:
+                obj_scale = obj_scale.repeat(3)
+            obj_scale = obj_scale.view(1, 3)
+            obj_mean = torch.as_tensor(means[i], device=device, dtype=dtype).view(1, 3)
+            unit_scale = torch.full((1, 3), 2.0, device=device, dtype=dtype)
+            scaling_offset = splat.inverse_scaling_activation(
+                unit_scale
+            ) + splat.inverse_scaling_activation(obj_scale)
+
+            xyz_chunks.append(((splat._xyz * 2.0) - 1.0) * obj_scale + obj_mean)
+            feature_chunks.append(splat._features_dc)
+            opacity_chunks.append(splat._opacity)
+            scaling_chunks.append(splat._scaling + scaling_offset)
+            rotation_chunks.append(splat._rotation)
+
+        device = reconstruction[0].get_xyz.device if reconstruction else self.device
+        representation = self._make_gaussian_representation(device=device)
+
+        if not xyz_chunks:
+            representation._xyz = torch.empty((0, 3), device=device)
+            representation._features_dc = torch.empty((0, 1, 3), device=device)
+            representation._opacity = torch.empty((0, 1), device=device)
+            representation._scaling = torch.empty((0, 3), device=device)
+            representation._rotation = torch.empty((0, 4), device=device)
+            return representation
+
+        representation._xyz = torch.cat(xyz_chunks, dim=0)
+        representation._features_dc = torch.cat(feature_chunks, dim=0)
+        representation._opacity = torch.cat(opacity_chunks, dim=0)
+        representation._scaling = torch.cat(scaling_chunks, dim=0)
+        representation._rotation = torch.cat(rotation_chunks, dim=0)
+
+        if prune_label is not None:
+            representation = self._prune_representation(representation, prune_label)
+        return representation
+
+    def save_scene(self, representation, scan_id):
+        os.makedirs("vis", exist_ok=True)
+        _LOGGER.info(
+            "Saving scene gaussian ply for %s with %s gaussians",
+            scan_id[0],
+            int(representation._xyz.shape[0]),
         )
-        representation._features_dc = torch.concatenate(
-            [splat._features_dc for splat in reconstruction if splat is not None]
-        )
-        representation._opacity = torch.concatenate(
-            [splat._opacity for splat in reconstruction if splat is not None]
-        )
-        representation._scaling = torch.concatenate(
-            [splat._scaling for splat in reconstruction if splat is not None]
-        )
-        representation._rotation = torch.concatenate(
-            [splat._rotation for splat in reconstruction if splat is not None]
-        )
-        representation = self._prune_representation(
-            representation, f"{scan_id[0]}_scene"
-        )
-        representation.save_ply(f"vis/{scan_id[0]}_joint.ply")
+        representation.save_ply_streaming(f"vis/{scan_id[0]}_joint.ply")
 
     def save_render(self, reconstruction, scene_ids, means, scales):
         if not osp.exists("vis/rendered"):
@@ -1000,63 +1064,10 @@ class SceneGraph2UnstructuredLatentPipeline:
         imageio.mimsave(video_path, rendered_frames, fps=30)
 
     def save_render_orbit(
-        self, reconstruction, scene_ids, means, scales, output_dir="vis/rendered"
+        self, scene_ids, representation, num_objects, output_dir="vis/rendered"
     ):
         os.makedirs(output_dir, exist_ok=True)
         scene_id = scene_ids[0]
-
-        def _scale(x):
-            i, splat = x
-            if splat._xyz.numel() <= 0:
-                print(f"Splat {i} is empty.")
-                return splat
-            device = reconstruction[i].get_xyz.device
-            dtype = reconstruction[i].get_xyz.dtype
-            scale = torch.as_tensor(scales[i], device=device, dtype=dtype)
-            mean = torch.as_tensor(means[i], device=device, dtype=dtype)
-            splat.rescale(
-                torch.tensor([2, 2, 2], device=device, dtype=dtype)
-            )
-            splat.translate(
-                -torch.tensor([1, 1, 1], device=device, dtype=dtype)
-            )
-            splat.rescale(scale)
-            splat.translate(mean)
-            return splat
-
-        # Apply transformation to all objects
-        reconstruction = list(map(lambda x: _scale(x), enumerate(reconstruction)))
-
-        # Create the representation
-        representation = Gaussian(
-            sh_degree=0,
-            aabb=[-0.0, -0.0, -0.0, 1.0, 1.0, 1.0],
-            mininum_kernel_size=self.rep_config["3d_filter_kernel_size"],
-            scaling_bias=self.rep_config["scaling_bias"],
-            opacity_bias=self.rep_config["opacity_bias"],
-            scaling_activation=self.rep_config["scaling_activation"],
-        )
-
-        representation._xyz = torch.cat(
-            [reconstruction[i]._xyz for i in range(len(reconstruction))]
-        )
-        representation._features_dc = torch.cat(
-            [reconstruction[i]._features_dc for i in range(len(reconstruction))]
-        )
-        representation._opacity = torch.cat(
-            [reconstruction[i]._opacity for i in range(len(reconstruction))]
-        )
-        representation._scaling = torch.cat(
-            [reconstruction[i]._scaling for i in range(len(reconstruction))]
-        )
-        representation._rotation = torch.cat(
-            [reconstruction[i]._rotation for i in range(len(reconstruction))]
-        )
-        representation = self._prune_representation(
-            representation, f"{scene_id}_render"
-        )
-
-        object_positions = representation._xyz.detach().cpu().numpy()
 
         num_frames = int(os.environ.get("OBJECTX_VIS_NUM_FRAMES", "120"))
         angle_step = 2 * np.pi / num_frames  # Step size for rotation
@@ -1072,16 +1083,32 @@ class SceneGraph2UnstructuredLatentPipeline:
         render_height = max(64, int(round(intrinsics["height"] * render_scale)))
         fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
         fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
-        scene_center, radius, height = self._compute_orbit_camera_params(
-            object_positions,
-            num_objects=len(reconstruction),
-            fovx=fovx,
-            fovy=fovy,
-        )
+        bbox_min = representation._xyz.amin(dim=0).detach().cpu().numpy()
+        bbox_max = representation._xyz.amax(dim=0).detach().cpu().numpy()
+        bbox_extent = np.maximum(bbox_max - bbox_min, 1e-3)
+        bbox_diag = float(np.linalg.norm(bbox_extent))
+        scene_center = (bbox_min + bbox_max) / 2.0
+        mode = self._get_orbit_mode(num_objects)
+        if mode == "legacy":
+            radius = float(os.environ.get("OBJECTX_VIS_RADIUS", "2.0"))
+            height = float(os.environ.get("OBJECTX_VIS_HEIGHT", "1.0"))
+        else:
+            fit_margin = float(os.environ.get("OBJECTX_VIS_FIT_MARGIN", "1.8"))
+            min_radius = float(os.environ.get("OBJECTX_VIS_MIN_RADIUS", "0.35"))
+            min_height = float(os.environ.get("OBJECTX_VIS_MIN_HEIGHT", "0.1"))
+            vertical_lift = float(os.environ.get("OBJECTX_VIS_VERTICAL_LIFT", "0.15"))
+            safe_half_fov = max(0.15, min(float(fovx), float(fovy)) / 2.0)
+            max_half_extent = float(np.max(bbox_extent)) / 2.0
+            radius = max(
+                min_radius,
+                fit_margin * max_half_extent / np.tan(safe_half_fov),
+                0.6 * bbox_diag,
+            )
+            height = max(min_height, vertical_lift * bbox_extent[1] + 0.1 * bbox_diag)
 
-        if self._get_env_bool("OBJECTX_VIS_EXPORT_MESH", True):
+        if self._get_env_bool("OBJECTX_VIS_EXPORT_MESH", False):
             gs_mesh = mesh.splat_to_mesh(
-                splat=copy.deepcopy(representation).to_pt(),
+                splat=representation.to_pt(),
                 Ks=intrinsics["intrinsic_mat"],
                 world_to_cams=poses,
                 width=render_width,

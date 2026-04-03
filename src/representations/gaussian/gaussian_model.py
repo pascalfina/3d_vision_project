@@ -63,14 +63,15 @@ class Gaussian:
 
         self.rotation_activation = torch.nn.functional.normalize
 
+        device = torch.device(self.device)
         self.scale_bias = self.inverse_scaling_activation(
-            torch.tensor(self.scaling_bias)
-        ).cuda()
-        self.rots_bias = torch.zeros((4)).cuda()
+            torch.tensor(self.scaling_bias, device=device)
+        )
+        self.rots_bias = torch.zeros((4), device=device)
         self.rots_bias[0] = 1
         self.opacity_bias = self.inverse_opacity_activation(
-            torch.tensor(self.opacity_bias)
-        ).cuda()
+            torch.tensor(self.opacity_bias, device=device)
+        )
 
     @property
     def get_scaling(self):
@@ -158,6 +159,89 @@ class Gaussian:
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
         PlyData([el]).write(path)
+
+    def save_ply_streaming(self, path, chunk_size=250000):
+        count = int(self.get_xyz.shape[0])
+        dtype_full = np.dtype(
+            [(attribute, "<f4") for attribute in self.construct_list_of_attributes()]
+        )
+
+        header = [
+            "ply",
+            "format binary_little_endian 1.0",
+            f"element vertex {count}",
+            "property float x",
+            "property float y",
+            "property float z",
+            "property float nx",
+            "property float ny",
+            "property float nz",
+            "property float f_dc_0",
+            "property float f_dc_1",
+            "property float f_dc_2",
+            "property float opacity",
+            "property float scale_0",
+            "property float scale_1",
+            "property float scale_2",
+            "property float rot_0",
+            "property float rot_1",
+            "property float rot_2",
+            "property float rot_3",
+            "end_header",
+        ]
+
+        with open(path, "wb") as handle:
+            handle.write(("\n".join(header) + "\n").encode("ascii"))
+
+            for start in range(0, count, chunk_size):
+                end = min(start + chunk_size, count)
+                xyz = (
+                    self.get_xyz[start:end]
+                    .detach()
+                    .to(dtype=torch.float32)
+                    .cpu()
+                    .numpy()
+                )
+                normals = np.zeros_like(xyz, dtype=np.float32)
+                f_dc = (
+                    self._features_dc[start:end]
+                    .detach()
+                    .transpose(1, 2)
+                    .flatten(start_dim=1)
+                    .contiguous()
+                    .to(dtype=torch.float32)
+                    .cpu()
+                    .numpy()
+                )
+                opacities = (
+                    inverse_sigmoid(self.get_opacity[start:end])
+                    .detach()
+                    .to(dtype=torch.float32)
+                    .cpu()
+                    .numpy()
+                )
+                scale = (
+                    torch.log(self.get_scaling[start:end])
+                    .detach()
+                    .to(dtype=torch.float32)
+                    .cpu()
+                    .numpy()
+                )
+                rotation = (
+                    (self._rotation[start:end] + self.rots_bias[None, :])
+                    .detach()
+                    .to(dtype=torch.float32)
+                    .cpu()
+                    .numpy()
+                )
+
+                attributes = np.concatenate(
+                    (xyz, normals, f_dc, opacities, scale, rotation), axis=1
+                )
+                elements = np.empty(end - start, dtype=dtype_full)
+                for col_idx, attribute in enumerate(dtype_full.names):
+                    elements[attribute] = attributes[:, col_idx]
+                elements.tofile(handle)
 
     def load_ply(self, path):
         plydata = PlyData.read(path)
