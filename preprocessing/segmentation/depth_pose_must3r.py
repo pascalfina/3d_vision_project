@@ -1,6 +1,6 @@
 """
-MUSt3R: predice poses (N,4,4) y depth maps (H,W) desde solo RGB.
-El depth se extrae del canal Z de los pointmaps (pts3d[...,2]).
+MUSt3R: predicts poses (N,4,4) and depth maps (H,W) from RGB only.
+Depth is extracted from the Z channel of the pointmaps (pts3d[...,2]).
 """
 import os, sys, numpy as np, torch, cv2
 from typing import List, Optional, Tuple
@@ -13,10 +13,10 @@ def run_must3r_on_scene(
     resolution=512, min_conf_thr=1.5, device="cuda"
 ):
     """
-    Ejecuta MUSt3R en modo multi-view sobre toda la escena.
-    Retorna: poses (N,4,4), depths lista de (H,W).
+    Runs MUSt3R in multi-view mode over the entire scene.
+    Returns: poses (N,4,4), depths list of (H,W).
     """
-    print(f"\n[MUSt3R] Prediciendo poses+depth para {len(frame_paths)} frames")
+    print(f"\n[MUSt3R] Predicting poses+depth for {len(frame_paths)} frames")
     must3r_path = os.environ.get("MUST3R_PATH", "must3r")
     if must3r_path not in sys.path:
         sys.path.insert(0, must3r_path)
@@ -25,7 +25,7 @@ def run_must3r_on_scene(
     from must3r.demo.gradio import get_reconstructed_scene
     from dust3r.utils.image import load_images
     
-    # Cargar checkpoint y crear modelo con args
+    # Load checkpoint and create model with args
     model = load_model(
         checkpoint,
         device=device,
@@ -67,14 +67,19 @@ def run_must3r_on_scene(
             overlap_percentile=85,
         ) # dict_keys(['x_out', 'imgs', 'true_shape', 'focals', 'cams2world', 'image_list'])
     
-    # Extraer poses, pts3d, conf_masks del scene object
-    pts3d = [o["pts3d"] for o in scene.x_out] # pointmap 3D del frame en coordenades globals
+    # Extract poses, pts3d, conf_masks from the scene object
+    pts3d = [o["pts3d"] for o in scene.x_out] # 3D pointmap of each frame in global coords
     conf_masks = [o["conf"] > min_conf_thr for o in scene.x_out]
     poses_c2w = torch.stack([o["c2w"] for o in scene.x_out], dim=0) # Shape: (N, 4, 4)
     poses_w2c = torch.linalg.inv(poses_c2w)
-    # o["pts3d"]: pointmap 3D del frame en coordenades globals o["pts3d_local"]: pointmap en coordenades locals de càmera o["conf"]: confiança per píxel/punt o["focal"]: focal estimada o["c2w"]: pose camera-to-world
+    
+    # o["pts3d"]       : 3D pointmap of the frame in global coordinates
+    # o["pts3d_local"] : pointmap in local camera coordinates
+    # o["conf"]        : per-pixel/point confidence
+    # o["focal"]       : estimated focal length
+    # o["c2w"]         : camera-to-world pose
 
-    # Depth → canal Z de cada pointmap
+    # Depth → Z channel of each local pointmap
     depths = []
     pts3d_local = [o["pts3d_local"] for o in scene.x_out]
 
@@ -96,11 +101,14 @@ def run_must3r_on_scene(
 
 
 def depth_per_instance(depth_map, masks, p_low=5.0, p_high=95.0):
-    """Depth robusto por instancia, filtrando outliers en los bordes."""
+    """
+    Robust per-instance depth, filtering border outliers
+    via percentile clipping before computing statistics.
+    """
     results = []
     for i, mask in enumerate(masks):
         vals = depth_map[mask]
-        vals = vals[vals > 0]
+        vals = vals[vals > 0] # discard zero/invalid depth
         if len(vals) < 10:
             results.append({"obj_id": i, "median_depth": 0.0}); continue
         lo, hi = np.percentile(vals, [p_low, p_high])

@@ -1,6 +1,6 @@
 dataset:
-  root: "/cluster/project/cvg/data/3RScan"               # ← CAMBIAR
-  scene_id: "20c993b7-698f-29c5-847d-c8cb8a685f5a"       # o "all" para todas
+  root: "/cluster/project/cvg/data/3RScan"               # Change
+  scene_id: "20c993b7-698f-29c5-847d-c8cb8a685f5a"       # or "all" fir everything
   image_subdir: "sequence"
   image_ext: ".color.jpg"
   resize: [960, 540]
