@@ -1,11 +1,11 @@
 """
-Pipeline completo: SAM2 (masks) + MUSt3R (poses + depth)
-Uso: python run_pipeline.py --config configs/pipeline.yaml
+Full pipeline: SAM2 (masks) + MUSt3R (poses + depth).
+Usage: python run_pipeline.py --config configs/pipeline.yaml
 """
 import argparse, os, time, torch, yaml
 from pathlib import Path
 from utils.io_utils import load_frames_from_scene, select_keyframes
-from segment_sam2 import segment_keyframes, propagate_masks, visualize_results
+from segment_sam2 import segment_keyframes, propagate_masks
 from depth_pose_must3r import run_must3r_on_scene
 from utils.object_registry import build_objects_predicted, save_objects_predicted
 
@@ -62,7 +62,7 @@ def run_scene(scene_id, scene_dir, cfg):
         frame_paths, kf_cfg.get("strategy","stride"),
         kf_cfg.get("stride",10), kf_cfg.get("n_keyframes",20))
 
-    # PASO A: MUSt3R → poses + depth (primero para liberar VRAM)
+    # STEP 1: MUSt3R → poses + depth (run first to free VRAM before SAM2)
     mc = cfg["must3r"]
     _, depths = run_must3r_on_scene(
         frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
@@ -75,17 +75,17 @@ def run_scene(scene_id, scene_dir, cfg):
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    # PASO B: SAM2 grid → masks en keyframes
+    # STEP 2: SAM2 grid → masks on keyframes
     sc = cfg["sam2"]
     keyframe_masks = segment_keyframes(frames, keyframe_idxs, sc, device)
 
-    # PASO C: SAM2 VideoPredictor → propagación a todos los frames
+    # STEP 3: SAM2 VideoPredictor → propagate to all frames
     _, merged_tracks = propagate_masks(frame_paths=frame_paths, keyframe_masks=keyframe_masks, cfg=sc, output_dir=dirs["masks"], scan_id=scene_id, device=device)
 
-    # PASO D: Propagación
+    # STEP 4: Build and save object registry
     registry = build_objects_predicted(merged_tracks, scene_id)
     save_objects_predicted(registry, str(Path(dirs["objects"]) / "objects_predicted.json"))
-    # → data_root/3RScan/files/objects_predicted.json
+    # data_root/3RScan/files/objects_predicted.json
 
     print(f"\n✓ {scene_id} completada en {time.time()-t0:.1f}s")
 
