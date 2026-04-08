@@ -3,8 +3,13 @@
 args=("$@")
 
 # Environment setup
-source .venv/bin/activate
+export VLSG_SPACE=$(pwd)
+export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-splatting"
+export DATA_ROOT_DIR="/cluster/project/cvg/data/3RScan"
 
-python preprocessing/segmentation/preprocess_sam3_projection.py \
-    --model_dir "$DATA_ROOT_DIR" \
-    ${args[@]}
+# Environment setup
+source 3dv/bin/activate
+
+# Run experiments
+cd preprocessing/segmentation
+python run_pipeline.py --config pipeline.yaml
