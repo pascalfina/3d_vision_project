@@ -7,6 +7,7 @@ test/
 
 # checkpoint
 checkpoint/*
+models/*
 
 # implementation
 implementation/*
@@ -23,16 +24,6 @@ __pycache__/
 **/vis/
 !vis/
 vis/*
-!vis/rendered/
-!vis/rendered_gs/
-vis/rendered/*
-vis/rendered_gs/*
-!vis/rendered/*.mp4
-!vis/rendered/*.mov
-!vis/rendered/*.gif
-!vis/rendered_gs/*.mp4
-!vis/rendered_gs/*.mov
-!vis/rendered_gs/*.gif
 
 # temporary files
 logs/
@@ -45,12 +36,16 @@ runs/
 .venv_objx/
 training_out/
 config.yaml
-.codex-backups/
+.codex*
+3dv/
+
 
 # cluster / local debug
 debug.txt
 slurm-*.out
 slurm-*.err
+*.log
+*.tar
 
 # caches
 .pytest_cache/
@@ -58,12 +53,5 @@ slurm-*.err
 .ruff_cache/
 
 # vendored dependency build artifacts
-dependencies/**/build/
-dependencies/**/__pycache__/
-dependencies/VLSG/**/log_file_*.txt
-dependencies/VLSG/**/time_used*.txt
-
-
-*.log
-*.tar
+dependencies/**
 vis/rendered
