@@ -3,11 +3,11 @@
 import json
 import numpy as np
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
 
 def build_objects_predicted(
-    merged_tracks: Dict[int, Dict[int, np.ndarray]],
+    object_source,
     scene_id: str,
 ) -> dict:
     """
@@ -15,10 +15,10 @@ def build_objects_predicted(
     but with objects predicted by SAM2.
 
     Args:
-        obj_id_imgs: {scan_fidx → (H, W) int32}  — one ID map per frame
-        scene_id:    scan identifier string
-        depths:      optional list of (H, W) float32 depth maps, indexed by
-                     position in frame_paths (not scan_fidx)
+        object_source:
+            either {obj_id -> {"n_frames", "first_frame", ...}}
+            or the older {obj_id -> {frame_idx -> binary mask}} format.
+        scene_id: scan identifier string
 
     Schema:
     {
@@ -36,19 +36,31 @@ def build_objects_predicted(
       }]
     }
     """
-    objects = [] # merged_tracks: {..., obj_id: # (540, 960), ...}
-    for obj_id, frame_dict in merged_tracks.items():
-        frame_idxs = sorted(frame_dict.keys())
-        areas = [frame_dict[f].sum() for f in frame_idxs]
+    objects = []
 
-        obj_entry = {
-            "id": str(obj_id),
-            "n_frames": len(frame_idxs),
-            "first_frame": int(frame_idxs[0]),
-            "last_frame": int(frame_idxs[-1]),
-            "area_mean": float(np.mean(areas)),
-            "area_max": float(np.max(areas)),
-        }
+    for obj_id, value in object_source.items():
+        if isinstance(value, dict) and "n_frames" in value:
+            obj_entry = {
+                "id": str(value.get("id", obj_id)),
+                "n_frames": int(value["n_frames"]),
+                "first_frame": int(value["first_frame"]),
+                "last_frame": int(value["last_frame"]),
+                "area_mean": float(value["area_mean"]),
+                "area_max": float(value["area_max"]),
+            }
+        else:
+            frame_dict = value
+            frame_idxs = sorted(frame_dict.keys())
+            areas = [frame_dict[f].sum() for f in frame_idxs]
+
+            obj_entry = {
+                "id": str(obj_id),
+                "n_frames": len(frame_idxs),
+                "first_frame": int(frame_idxs[0]),
+                "last_frame": int(frame_idxs[-1]),
+                "area_mean": float(np.mean(areas)),
+                "area_max": float(np.max(areas)),
+            }
 
         objects.append(obj_entry)
 

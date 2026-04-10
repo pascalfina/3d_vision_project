@@ -56,6 +56,19 @@ case ":${PYTHONPATH:-}:" in
     *) export PYTHONPATH="$VLSG_SPACE/dependencies/gaussian-splatting${PYTHONPATH:+:$PYTHONPATH}" ;;
 esac
 
+for _objectx_dep in \
+    "$VLSG_SPACE/dependencies/sam2" \
+    "$VLSG_SPACE/dependencies/must3r" \
+    "$VLSG_SPACE/dependencies/must3r/dust3r"
+do
+    if [[ -d "$_objectx_dep" ]]; then
+        case ":${PYTHONPATH:-}:" in
+            *":$_objectx_dep:"*) ;;
+            *) export PYTHONPATH="$_objectx_dep${PYTHONPATH:+:$PYTHONPATH}" ;;
+        esac
+    fi
+done
+
 export OBJECTX_ENV_ACTIVATED=1
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
