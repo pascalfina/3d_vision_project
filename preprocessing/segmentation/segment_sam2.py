@@ -28,6 +28,18 @@ def _parse_bool(value, default):
     return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def _parse_int(value, default):
+    if value is None:
+        return int(default)
+    return int(value)
+
+
+def _parse_float(value, default):
+    if value is None:
+        return float(default)
+    return float(value)
+
+
 def segment_keyframes(frames, keyframe_idxs, cfg, device="cuda"):
     """Run grid 32x32 on each keyframe → list of SAM2 masks."""
     print("\n[SAM2] Step 1: Segmenting keyframes with grid")
@@ -153,9 +165,23 @@ def _run_chunk_propagation(
     return seen_flags
 
 
-def _merge_packed_tracks(track_masks, track_seen, track_areas, iou_threshold):
+def _merge_packed_tracks(
+    track_masks,
+    track_seen,
+    track_areas,
+    track_key_positions,
+    iou_threshold,
+    max_keyframe_hops,
+    min_shared_frames,
+    area_ratio_cap,
+):
     num_tracks = int(track_seen.shape[0])
     parent = list(range(num_tracks))
+    peak_areas = track_areas.max(axis=1).astype(np.float32, copy=False)
+    compared_pairs = 0
+    skipped_same_keyframe = 0
+    skipped_far_keyframe = 0
+    skipped_area_ratio = 0
 
     def find(x):
         root = x
@@ -170,14 +196,35 @@ def _merge_packed_tracks(track_masks, track_seen, track_areas, iou_threshold):
         if px != py:
             parent[px] = py
 
-    print(f"[SAM2] merging {num_tracks} tracks with IoU threshold {iou_threshold}", flush=True)
+    print(
+        "[SAM2] merging "
+        f"{num_tracks} tracks with IoU threshold {iou_threshold} "
+        f"(max_keyframe_hops={max_keyframe_hops}, "
+        f"min_shared_frames={min_shared_frames}, "
+        f"area_ratio_cap={area_ratio_cap})",
+        flush=True,
+    )
     for i in range(num_tracks):
         if i == 0 or (i + 1) % 8 == 0 or (i + 1) == num_tracks:
             print(f"[SAM2] merge progress {i + 1}/{num_tracks}", flush=True)
+        key_pos_i = int(track_key_positions[i])
+        area_i = max(float(peak_areas[i]), 1.0)
         for j in range(i + 1, num_tracks):
-            shared = np.flatnonzero(track_seen[i] & track_seen[j])
-            if shared.size == 0:
+            key_pos_j = int(track_key_positions[j])
+            if key_pos_i == key_pos_j:
+                skipped_same_keyframe += 1
                 continue
+            if max_keyframe_hops >= 0 and abs(key_pos_i - key_pos_j) > max_keyframe_hops:
+                skipped_far_keyframe += 1
+                continue
+            area_j = max(float(peak_areas[j]), 1.0)
+            if area_ratio_cap > 0.0 and (max(area_i, area_j) / min(area_i, area_j)) > area_ratio_cap:
+                skipped_area_ratio += 1
+                continue
+            shared = np.flatnonzero(track_seen[i] & track_seen[j])
+            if shared.size < min_shared_frames:
+                continue
+            compared_pairs += 1
 
             packed_i = track_masks[i, shared]
             packed_j = track_masks[j, shared]
@@ -210,6 +257,14 @@ def _merge_packed_tracks(track_masks, track_seen, track_areas, iou_threshold):
         for orig_id in orig_ids:
             orig_to_new[orig_id] = new_id
 
+    print(
+        "[SAM2] merge candidate summary: "
+        f"compared={compared_pairs}, "
+        f"same_keyframe_skipped={skipped_same_keyframe}, "
+        f"far_keyframe_skipped={skipped_far_keyframe}, "
+        f"area_ratio_skipped={skipped_area_ratio}",
+        flush=True,
+    )
     print(f"[SAM2] {num_tracks} tracks -> {len(id_mapping)} merged objects")
     return id_mapping, orig_to_new
 
@@ -310,6 +365,18 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
     max_obj = cfg.get("max_obj_ids", 50)
     prob_thr = cfg.get("mask_prob_threshold", 0.5)
     iou_threshold = float(cfg.get("merge_iou_threshold", 0.5))
+    max_keyframe_hops = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MERGE_KEYFRAME_HOPS"),
+        cfg.get("merge_keyframe_hops", 1),
+    )
+    min_shared_frames = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MERGE_MIN_SHARED_FRAMES"),
+        cfg.get("merge_min_shared_frames", 3),
+    )
+    area_ratio_cap = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MERGE_AREA_RATIO_CAP"),
+        cfg.get("merge_area_ratio_cap", 8.0),
+    )
     prob_cache_dtype = _parse_dtype(
         os.environ.get("OBJECTX_SAM2_PROB_CACHE_DTYPE"),
         cfg.get("prob_cache_dtype", "float16"),
@@ -346,12 +413,29 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
 
         num_frames = len(frame_paths)
         scan_fidxs_in_order = [_frame_key(tmp_to_scan_fidx[i]) for i in range(num_frames)]
-        num_tracks = _count_tracks(keyframe_masks, max_obj)
+        ordered_keyframe_items = sorted(keyframe_masks.items())
+        num_tracks = _count_tracks(dict(ordered_keyframe_items), max_obj)
         packed_len = (H * W + 7) // 8
+        track_id_dtype = np.uint16 if num_tracks < np.iinfo(np.uint16).max else np.int32
 
         track_mask_path = cache_dir / "track_masks.dat"
         track_seen = np.zeros((num_tracks, num_frames), dtype=np.bool_)
         track_areas = np.zeros((num_tracks, num_frames), dtype=np.int32)
+        track_key_positions = np.full(num_tracks, -1, dtype=np.int16)
+        obj_id_mm = np.memmap(
+            cache_dir / "obj_id_maps.dat",
+            mode="w+",
+            dtype=track_id_dtype,
+            shape=(num_frames, H, W),
+        )
+        score_mm = np.memmap(
+            cache_dir / "score_maps.dat",
+            mode="w+",
+            dtype=prob_cache_dtype,
+            shape=(num_frames, H, W),
+        )
+        obj_id_mm[:] = 0
+        score_mm[:] = 0
         if num_tracks == 0:
             object_stats = {}
             orig_to_new = np.zeros(1, dtype=np.int32)
@@ -365,7 +449,7 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
             global_track_id = 1
 
             # Pass 1: store original binary tracks exactly as before, but on disk.
-            for kf_idx, masks in keyframe_masks.items():
+            for key_pos, (kf_idx, masks) in enumerate(ordered_keyframe_items):
                 n_objs = min(len(masks), max_obj)
                 limited_masks = masks[:n_objs]
                 print(f"  Keyframe {kf_idx}: {n_objs} objectes")
@@ -383,6 +467,8 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
                         device=device,
                     )
                     chunk_gid_start = global_track_id
+                    chunk_gid_stop = chunk_gid_start + len(chunk_masks)
+                    track_key_positions[chunk_gid_start - 1 : chunk_gid_stop - 1] = key_pos
 
                     def on_prob_pass1(local_oid, fidx, prob_map):
                         orig_id = chunk_gid_start + local_oid
@@ -393,6 +479,11 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
                         track_masks[orig_id - 1, fidx] = _pack_mask(mask_bin)
                         track_seen[orig_id - 1, fidx] = True
                         track_areas[orig_id - 1, fidx] = mask_area
+                        update = mask_bin & (prob_map > score_mm[fidx])
+                        if not np.any(update):
+                            return
+                        score_mm[fidx][update] = prob_map[update].astype(prob_cache_dtype, copy=False)
+                        obj_id_mm[fidx][update] = int(orig_id)
 
                     _run_chunk_propagation(
                         predictor=predictor,
@@ -418,7 +509,11 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
                 track_masks=track_masks,
                 track_seen=track_seen,
                 track_areas=track_areas,
+                track_key_positions=track_key_positions,
                 iou_threshold=iou_threshold,
+                max_keyframe_hops=max_keyframe_hops,
+                min_shared_frames=min_shared_frames,
+                area_ratio_cap=area_ratio_cap,
             )
             object_stats = _summarize_merged_groups(
                 id_mapping=id_mapping,
@@ -430,75 +525,13 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
             del track_masks
             gc.collect()
             track_mask_path.unlink(missing_ok=True)
-
-        obj_id_dtype = np.uint16 if max_obj < np.iinfo(np.uint16).max else np.int32
-        obj_id_mm = np.memmap(
-            cache_dir / "obj_id_maps.dat",
-            mode="w+",
-            dtype=obj_id_dtype,
-            shape=(num_frames, H, W),
-        )
-        score_mm = np.memmap(
-            cache_dir / "score_maps.dat",
-            mode="w+",
-            dtype=prob_cache_dtype,
-            shape=(num_frames, H, W),
-        )
-        obj_id_mm[:] = 0
-        score_mm[:] = 0
-
-        # Pass 2: rebuild final winner-takes-all maps using the old merged IDs.
-        global_track_id = 1
-        for kf_idx, masks in keyframe_masks.items():
-            n_objs = min(len(masks), max_obj)
-            limited_masks = masks[:n_objs]
-            for chunk_start in range(0, n_objs, obj_chunk_size):
-                chunk_masks = limited_masks[chunk_start : chunk_start + obj_chunk_size]
-                chunk_end = chunk_start + len(chunk_masks) - 1
-                print(
-                    f"    pass2 chunk {chunk_start}-{chunk_end} "
-                    f"of keyframe {kf_idx} (size={len(chunk_masks)})"
-                )
-
-                predictor = build_sam2_video_predictor(
-                    cfg["model_cfg"],
-                    cfg["checkpoint"],
-                    device=device,
-                )
-                chunk_gid_start = global_track_id
-
-                def on_prob_pass2(local_oid, fidx, prob_map):
-                    orig_id = chunk_gid_start + local_oid
-                    new_id = int(orig_to_new[orig_id]) if orig_id < len(orig_to_new) else 0
-                    if new_id <= 0:
-                        return
-                    mask_bin = prob_map >= prob_thr
-                    if not np.any(mask_bin):
-                        return
-                    update = mask_bin & (prob_map > score_mm[fidx])
-                    if not np.any(update):
-                        return
-                    score_mm[fidx][update] = prob_map[update].astype(prob_cache_dtype, copy=False)
-                    obj_id_mm[fidx][update] = int(new_id)
-
-                _run_chunk_propagation(
-                    predictor=predictor,
-                    tmp_dir=tmp_dir,
-                    chunk_masks=chunk_masks,
-                    kf_idx=kf_idx,
-                    num_frames=num_frames,
-                    device=device,
-                    offload_video_to_cpu=offload_video_to_cpu,
-                    offload_state_to_cpu=offload_state_to_cpu,
-                    async_loading_frames=async_loading_frames,
-                    on_prob=on_prob_pass2,
-                )
-
-                global_track_id += len(chunk_masks)
-                del predictor
-                predictor = None
-                gc.collect()
-                torch.cuda.empty_cache()
+            print("[SAM2] remapping per-pixel winners to merged ids", flush=True)
+            for tmp_fidx in range(num_frames):
+                if tmp_fidx == 0 or (tmp_fidx + 1) % 64 == 0 or (tmp_fidx + 1) == num_frames:
+                    print(f"[SAM2] remap progress {tmp_fidx + 1}/{num_frames}", flush=True)
+                obj_id_mm[tmp_fidx] = orig_to_new[
+                    np.asarray(obj_id_mm[tmp_fidx], dtype=np.int32)
+                ].astype(track_id_dtype, copy=False)
 
         if not object_stats:
             print("[SAM2] Avís: cap objecte detectat en aquesta escena")
