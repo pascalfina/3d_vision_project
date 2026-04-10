@@ -2,6 +2,7 @@
   "name": "cabinet_predready_v2_floorfix",
   "scene_id": "e61b0e04-bada-2f31-82d6-72831a602ba7",
   "split": "val",
+  "input_variant": "legacy",
   "mask_source": "gt_projection",
   "roots": {
     "baseline": "/work/scratch/pafina/objectx-data-baseline",

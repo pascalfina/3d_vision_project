@@ -2,7 +2,7 @@
 Full pipeline: SAM2 (masks) + MUSt3R (poses + depth).
 Usage: python run_pipeline.py --config configs/pipeline.yaml
 """
-import argparse, os, time, torch, yaml
+import argparse, os, time, zipfile, torch, yaml
 from pathlib import Path
 from utils.io_utils import load_frames_from_scene, select_keyframes
 from segment_sam2 import segment_keyframes, propagate_masks
@@ -20,8 +20,35 @@ def load_config(path):
     with open(path) as f:
         return yaml.safe_load(f)
 
+def parse_bool(value, default):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+def source_root_from_cfg(cfg):
+    env_root = os.environ.get("OBJECTX_SEG_INPUT_ROOT")
+    return Path(env_root) if env_root else Path(cfg["dataset"]["root"])
+
+def output_root_from_cfg(cfg):
+    output_cfg = cfg.get("output", {})
+    env_root = os.environ.get("OBJECTX_SEG_OUTPUT_ROOT")
+    if env_root:
+        return Path(env_root)
+    output_root = output_cfg.get("root")
+    if output_root:
+        return Path(output_root)
+    return Path(cfg["dataset"]["root"])
+
+def output_name(cfg, env_key, cfg_key, default):
+    return os.environ.get(env_key) or cfg.get("output", {}).get(cfg_key, default)
+
+def step_enabled(cfg, env_key, cfg_key, default):
+    return parse_bool(os.environ.get(env_key), cfg.get("steps", {}).get(cfg_key, default))
+
 def get_scene_dirs(cfg):
-    root = Path(cfg["dataset"]["root"])
+    root = source_root_from_cfg(cfg)
     scene_id = cfg["dataset"]["scene_id"]
     subdir = cfg["dataset"].get("image_subdir", "sequence")
     scene_root = root / "scenes"
@@ -34,23 +61,52 @@ def get_scene_dirs(cfg):
     return [(scene_id, str(scene_root / scene_id / subdir))]
 
 def make_output_dirs(cfg, scene_id):
-    data_root = Path(cfg["dataset"]["root"])
+    data_root = output_root_from_cfg(cfg)
+    scenes_dirname = output_name(cfg, "OBJECTX_SEG_SCENES_DIRNAME", "scenes_dirname", "scenes_predicted")
+    mask_dirname = output_name(cfg, "OBJECTX_SEG_MASK_DIRNAME", "mask_dirname", "gt_projection_predicted")
+    vis_dirname = output_name(cfg, "OBJECTX_SEG_VIS_DIRNAME", "vis_dirname", "vis")
     dirs = {
-        "depth": str(data_root / "scenes_predicted" / scene_id / "sequence"),
-        "poses": str(data_root / "scenes_predicted" / scene_id / "sequence"),
-        "pointmaps": str(data_root / "scenes_predicted" / scene_id / "sequence" / "pointmaps"),
-        "masks": str(data_root / "files" / "gt_projection_predicted"),
+        "depth": str(data_root / scenes_dirname / scene_id / "sequence"),
+        "poses": str(data_root / scenes_dirname / scene_id / "sequence"),
+        "pointmaps": str(data_root / scenes_dirname / scene_id / "sequence" / "pointmaps"),
+        "masks": str(data_root / "files" / mask_dirname),
         "objects": str(data_root / "files"),
-        "vis": str(data_root / "scenes_predicted" / scene_id / "sequence" / "vis")
+        "vis": str(data_root / scenes_dirname / scene_id / "sequence" / vis_dirname)
     }
     for d in dirs.values(): os.makedirs(d, exist_ok=True)
     return dirs
+
+
+def ensure_sequence_input(cfg, scene_id, dirs):
+    source_root = source_root_from_cfg(cfg)
+    image_subdir = cfg["dataset"].get("image_subdir", "sequence")
+    image_ext = cfg["dataset"].get("image_ext", ".color.jpg")
+
+    scene_root = source_root / "scenes" / scene_id
+    src_seq = scene_root / image_subdir
+    if src_seq.exists():
+        return str(src_seq)
+
+    src_zip = scene_root / f"{image_subdir}.zip"
+    dst_seq = Path(dirs["depth"])
+    if list(dst_seq.glob(f"*{image_ext}")):
+        return str(dst_seq)
+
+    if src_zip.exists():
+        with zipfile.ZipFile(src_zip, "r") as zf:
+            zf.extractall(dst_seq)
+        return str(dst_seq)
+
+    raise FileNotFoundError(
+        f"Could not find {src_seq} or {src_zip} for scene {scene_id}"
+    )
 
 def run_scene(scene_id, scene_dir, cfg):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\n{'='*60}\n Escena: {scene_id}  |  device: {device}\n{'='*60}")
     t0 = time.time()
     dirs = make_output_dirs(cfg, scene_id)
+    scene_dir = ensure_sequence_input(cfg, scene_id, dirs)
 
     resize = cfg["dataset"].get("resize")
     if isinstance(resize, list): resize = tuple(resize)
@@ -62,30 +118,47 @@ def run_scene(scene_id, scene_dir, cfg):
         frame_paths, kf_cfg.get("strategy","stride"),
         kf_cfg.get("stride",10), kf_cfg.get("n_keyframes",20))
 
-    # STEP 1: MUSt3R → poses + depth (run first to free VRAM before SAM2)
-    mc = cfg["must3r"]
-    _, depths = run_must3r_on_scene(
-        frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
-        dirs["pointmaps"] if mc.get("output_pointmaps") else None,
-        scene_id, mc.get("resolution", 512), mc.get("min_conf_thr",1.5), device)
-    
-    print(frames[0].shape[:2])
-    print(depths[0].shape)
+    run_must3r = step_enabled(cfg, "OBJECTX_SEG_RUN_MUST3R", "run_must3r", True)
+    run_sam2 = step_enabled(cfg, "OBJECTX_SEG_RUN_SAM2", "run_sam2", True)
+    run_registry = step_enabled(cfg, "OBJECTX_SEG_RUN_REGISTRY", "run_registry", True)
+
+    if run_must3r:
+        # STEP 1: MUSt3R → poses + depth (run first to free VRAM before SAM2)
+        mc = cfg["must3r"]
+        _, depths = run_must3r_on_scene(
+            frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
+            dirs["pointmaps"] if mc.get("output_pointmaps") else None,
+            scene_id, mc.get("resolution", 512), mc.get("min_conf_thr",1.5), device)
+        print(frames[0].shape[:2])
+        print(depths[0].shape)
+    else:
+        print("[MUSt3R] skipped by configuration")
 
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    # STEP 2: SAM2 grid → masks on keyframes
-    sc = cfg["sam2"]
-    keyframe_masks = segment_keyframes(frames, keyframe_idxs, sc, device)
+    object_stats = {}
+    if run_sam2:
+        # STEP 2: SAM2 grid → masks on keyframes
+        sc = cfg["sam2"]
+        keyframe_masks = segment_keyframes(frames, keyframe_idxs, sc, device)
 
-    # STEP 3: SAM2 VideoPredictor → propagate to all frames
-    _, merged_tracks = propagate_masks(frame_paths=frame_paths, keyframe_masks=keyframe_masks, cfg=sc, output_dir=dirs["masks"], scan_id=scene_id, device=device)
+        # STEP 3: SAM2 VideoPredictor → propagate to all frames
+        _, object_stats = propagate_masks(frame_paths=frame_paths, keyframe_masks=keyframe_masks, cfg=sc, output_dir=dirs["masks"], scan_id=scene_id, device=device)
+    else:
+        print("[SAM2] skipped by configuration")
 
     # STEP 4: Build and save object registry
-    registry = build_objects_predicted(merged_tracks, scene_id)
-    save_objects_predicted(registry, str(Path(dirs["objects"]) / "objects_predicted.json"))
-    # data_root/3RScan/files/objects_predicted.json
+    if run_registry and object_stats:
+        objects_filename = output_name(
+            cfg, "OBJECTX_SEG_OBJECTS_FILENAME", "objects_filename", "objects_predicted.json"
+        )
+        registry = build_objects_predicted(object_stats, scene_id)
+        save_objects_predicted(registry, str(Path(dirs["objects"]) / objects_filename))
+    elif run_registry:
+        print("[Registry] skipped because no SAM2 tracks were produced")
+    else:
+        print("[Registry] skipped by configuration")
 
     print(f"\n✓ {scene_id} completada en {time.time()-t0:.1f}s")
 
@@ -100,7 +173,7 @@ def main():
     
     # Resolve model paths relative to repo root if needed
     cfg["sam2"]["checkpoint"] = str(resolve_model_path(cfg["sam2"]["checkpoint"]))
-    cfg["sam2"]["model_cfg"] = str(resolve_model_path(cfg["sam2"]["model_cfg"]))
+    # Keep the SAM2 Hydra config key unchanged; build_sam2 resolves it inside the sam2 package.
     cfg["must3r"]["checkpoint"] = str(resolve_model_path(cfg["must3r"]["checkpoint"]))
 
     for scene_id, scene_dir in get_scene_dirs(cfg):

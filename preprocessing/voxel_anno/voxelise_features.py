@@ -25,6 +25,35 @@ from utils import visualisation as vis
 _LOGGER = logging.getLogger(__name__)
 
 
+def _lookup_mask_frame(mask: Dict, frame_id):
+    if not isinstance(mask, dict):
+        return None
+
+    candidates = []
+    if isinstance(frame_id, str):
+        candidates.append(frame_id)
+        if frame_id.isdigit():
+            frame_idx = int(frame_id)
+            candidates.extend([frame_idx, f"{frame_idx:06d}", str(frame_idx)])
+    else:
+        candidates.append(frame_id)
+        try:
+            frame_idx = int(frame_id)
+        except (TypeError, ValueError):
+            frame_idx = None
+        if frame_idx is not None:
+            candidates.extend([f"{frame_idx:06d}", str(frame_idx)])
+
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate in mask:
+            return mask[candidate]
+    return None
+
+
 def _load_dino_model(model_name: str):
     local_hub_dir = os.getenv("OBJECTX_DINOV2_HUB_DIR")
     if not local_hub_dir:
@@ -1108,7 +1137,10 @@ def voxelise_features(
             selected_frame_ids = []
             selected_masks = []
             for frame_id in frame_idxs:
-                obj_mask = np.where(mask[frame_id] == int(obj_id), 1, 0)
+                frame_mask = _lookup_mask_frame(mask, frame_id)
+                if frame_mask is None:
+                    continue
+                obj_mask = np.where(np.asarray(frame_mask) == int(obj_id), 1, 0)
                 if obj_mask.sum() > 0:
                     selected_frame_ids.append(frame_id)
                     selected_masks.append(obj_mask)
