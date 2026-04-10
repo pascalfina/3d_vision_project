@@ -3,6 +3,7 @@
 #SBATCH --qos=3dv-team35
 #SBATCH -p jobs
 #SBATCH -t 24:00:00
+#SBATCH --gpus=1
 #SBATCH --mem=64G
 #SBATCH -J cabinet-sam2-seg
 #SBATCH -o /work/scratch/pafina/object-x/debug/slurm-cabinet-sam2-seg-%j.out

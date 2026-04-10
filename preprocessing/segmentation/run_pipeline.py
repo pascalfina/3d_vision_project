@@ -4,8 +4,8 @@ Usage: python run_pipeline.py --config configs/pipeline.yaml
 """
 import argparse, os, time, zipfile, torch, yaml
 from pathlib import Path
-from utils.io_utils import load_frames_from_scene, select_keyframes
-from segment_sam2 import segment_keyframes, propagate_masks
+from utils.io_utils import load_frames_from_scene, select_keyframes, select_keyframe_candidate_groups
+from segment_sam2 import segment_keyframes, propagate_masks, refine_keyframes_with_mask_preview
 from depth_pose_must3r import run_must3r_on_scene
 from utils.object_registry import build_objects_predicted, save_objects_predicted
 
@@ -139,8 +139,17 @@ def run_scene(scene_id, scene_dir, cfg):
     keyframe_count = env_or_default(
         "OBJECTX_SEG_N_KEYFRAMES", kf_cfg.get("n_keyframes", 20), int
     )
+    refine_keyframes = parse_bool(
+        os.environ.get("OBJECTX_SEG_REFINE_KEYFRAMES"),
+        kf_cfg.get("refine_keyframes", keyframe_strategy.startswith("quality_")),
+    )
+    preview_candidates = env_or_default(
+        "OBJECTX_SEG_KEYFRAME_PREVIEW_CANDIDATES",
+        kf_cfg.get("preview_candidates", 4),
+        int,
+    )
     keyframe_idxs = select_keyframes(
-        frame_paths, keyframe_strategy, keyframe_stride, keyframe_count)
+        frame_paths, keyframe_strategy, keyframe_stride, keyframe_count, frames=frames)
     print(
         "[Keyframes] "
         f"strategy={keyframe_strategy} stride={keyframe_stride} "
@@ -171,6 +180,26 @@ def run_scene(scene_id, scene_dir, cfg):
     if run_sam2:
         # STEP 2: SAM2 grid → masks on keyframes
         sc = cfg["sam2"]
+        if refine_keyframes and keyframe_strategy.startswith("quality_"):
+            candidate_groups = select_keyframe_candidate_groups(
+                frame_paths,
+                keyframe_strategy,
+                keyframe_stride,
+                keyframe_count,
+                frames=frames,
+                top_k=preview_candidates,
+            )
+            print(
+                "[Keyframes] preview candidates="
+                f"{[group[:preview_candidates] for group in candidate_groups]}"
+            )
+            keyframe_idxs = refine_keyframes_with_mask_preview(
+                frames, candidate_groups, sc, device
+            )
+            print(
+                "[Keyframes] refined "
+                f"indices={summarize_keyframes(keyframe_idxs)}"
+            )
         keyframe_masks = segment_keyframes(frames, keyframe_idxs, sc, device)
 
         # STEP 3: SAM2 VideoPredictor → propagate to all frames
