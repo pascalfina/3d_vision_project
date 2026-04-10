@@ -47,6 +47,22 @@ def output_name(cfg, env_key, cfg_key, default):
 def step_enabled(cfg, env_key, cfg_key, default):
     return parse_bool(os.environ.get(env_key), cfg.get("steps", {}).get(cfg_key, default))
 
+
+def env_or_default(name, default, cast=str):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return cast(value)
+
+
+def summarize_keyframes(indices, max_show=12):
+    if len(indices) <= max_show:
+        return str(indices)
+    half = max_show // 2
+    head = ", ".join(str(x) for x in indices[:half])
+    tail = ", ".join(str(x) for x in indices[-half:])
+    return f"[{head}, ..., {tail}]"
+
 def get_scene_dirs(cfg):
     root = source_root_from_cfg(cfg)
     scene_id = cfg["dataset"]["scene_id"]
@@ -114,9 +130,23 @@ def run_scene(scene_id, scene_dir, cfg):
         scene_dir, cfg["dataset"].get("image_ext", ".color.jpg"), resize)
 
     kf_cfg = cfg["keyframes"]
+    keyframe_strategy = env_or_default(
+        "OBJECTX_SEG_KEYFRAME_STRATEGY", kf_cfg.get("strategy", "stride"), str
+    )
+    keyframe_stride = env_or_default(
+        "OBJECTX_SEG_KEYFRAME_STRIDE", kf_cfg.get("stride", 10), int
+    )
+    keyframe_count = env_or_default(
+        "OBJECTX_SEG_N_KEYFRAMES", kf_cfg.get("n_keyframes", 20), int
+    )
     keyframe_idxs = select_keyframes(
-        frame_paths, kf_cfg.get("strategy","stride"),
-        kf_cfg.get("stride",10), kf_cfg.get("n_keyframes",20))
+        frame_paths, keyframe_strategy, keyframe_stride, keyframe_count)
+    print(
+        "[Keyframes] "
+        f"strategy={keyframe_strategy} stride={keyframe_stride} "
+        f"n_keyframes={keyframe_count} selected={len(keyframe_idxs)} "
+        f"indices={summarize_keyframes(keyframe_idxs)}"
+    )
 
     run_must3r = step_enabled(cfg, "OBJECTX_SEG_RUN_MUST3R", "run_must3r", True)
     run_sam2 = step_enabled(cfg, "OBJECTX_SEG_RUN_SAM2", "run_sam2", True)

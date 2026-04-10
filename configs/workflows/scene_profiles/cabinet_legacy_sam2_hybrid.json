@@ -25,7 +25,12 @@
       "OBJECTX_SAM2_OFFLOAD_VIDEO_TO_CPU": "1",
       "OBJECTX_SAM2_OFFLOAD_STATE_TO_CPU": "1",
       "OBJECTX_SAM2_ASYNC_LOADING_FRAMES": "0",
-      "OBJECTX_SAM2_PROPAGATE_OBJECTS_PER_CHUNK": "4"
+      "OBJECTX_SAM2_PROPAGATE_OBJECTS_PER_CHUNK": "4",
+      "OBJECTX_SEG_KEYFRAME_STRATEGY": "uniform",
+      "OBJECTX_SEG_N_KEYFRAMES": "3",
+      "OBJECTX_SAM2_MERGE_KEYFRAME_HOPS": "2",
+      "OBJECTX_SAM2_MERGE_MIN_SHARED_FRAMES": "3",
+      "OBJECTX_SAM2_MERGE_AREA_RATIO_CAP": "8.0"
     },
     "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_segment_inputs_sam2.log"
   },
