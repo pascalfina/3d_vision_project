@@ -44,16 +44,24 @@ def segment_keyframes(frames, keyframe_idxs, cfg, device="cuda"):
     """Run grid 32x32 on each keyframe → list of SAM2 masks."""
     print("\n[SAM2] Step 1: Segmenting keyframes with grid")
     sam2 = build_sam2(cfg["model_cfg"], cfg["checkpoint"], device=device)
+    points_per_side = _parse_int(
+        os.environ.get("OBJECTX_SAM2_POINTS_PER_SIDE"),
+        cfg.get("points_per_side", 32),
+    )
+    min_mask_region_area = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MIN_MASK_REGION_AREA"),
+        cfg.get("min_mask_region_area", 200),
+    )
     gen = SAM2AutomaticMaskGenerator(
         model=sam2,
-        points_per_side=cfg.get("points_per_side", 32),
+        points_per_side=points_per_side,
         pred_iou_thresh=cfg.get("pred_iou_thresh", 0.86),
         stability_score_thresh=cfg.get("stability_score_thresh", 0.92),
         stability_score_offset=cfg.get("stability_score_offset", 1.0),
         box_nms_thresh=cfg.get("box_nms_thresh", 0.7),
         crop_n_layers=cfg.get("crop_n_layers", 1),
         crop_n_points_downscale_factor=cfg.get("crop_n_points_downscale_factor", 2),
-        min_mask_region_area=cfg.get("min_mask_region_area", 200),
+        min_mask_region_area=min_mask_region_area,
         output_mode=cfg.get("output_mode", "binary_mask"),
         points_per_batch=cfg.get("points_per_batch", 64),
     )
@@ -67,6 +75,114 @@ def segment_keyframes(frames, keyframe_idxs, cfg, device="cuda"):
     del gen, sam2
     torch.cuda.empty_cache()
     return keyframe_masks
+
+
+def refine_keyframes_with_mask_preview(frames, candidate_groups, cfg, device="cuda"):
+    if not candidate_groups:
+        return []
+
+    preview_points_per_side = _parse_int(
+        os.environ.get("OBJECTX_SAM2_KEYFRAME_PREVIEW_POINTS_PER_SIDE"),
+        max(8, int(cfg.get("points_per_side", 32)) // 2),
+    )
+    preview_top_k = _parse_int(
+        os.environ.get("OBJECTX_SAM2_KEYFRAME_PREVIEW_TOP_K_MASKS"),
+        cfg.get("max_obj_ids", 50),
+    )
+    min_mask_region_area = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MIN_MASK_REGION_AREA"),
+        cfg.get("min_mask_region_area", 200),
+    )
+
+    print(
+        "[SAM2] Refining keyframes with preview "
+        f"(points_per_side={preview_points_per_side}, top_k_masks={preview_top_k})"
+    )
+    sam2 = build_sam2(cfg["model_cfg"], cfg["checkpoint"], device=device)
+    gen = SAM2AutomaticMaskGenerator(
+        model=sam2,
+        points_per_side=preview_points_per_side,
+        pred_iou_thresh=cfg.get("pred_iou_thresh", 0.86),
+        stability_score_thresh=cfg.get("stability_score_thresh", 0.92),
+        stability_score_offset=cfg.get("stability_score_offset", 1.0),
+        box_nms_thresh=cfg.get("box_nms_thresh", 0.7),
+        crop_n_layers=cfg.get("crop_n_layers", 1),
+        crop_n_points_downscale_factor=cfg.get("crop_n_points_downscale_factor", 2),
+        min_mask_region_area=min_mask_region_area,
+        output_mode=cfg.get("output_mode", "binary_mask"),
+        points_per_batch=cfg.get("points_per_batch", 64),
+    )
+
+    def score_preview_masks(masks):
+        usable = masks[:preview_top_k]
+        mask_count = len(usable)
+        total_area = float(sum(m["area"] for m in usable))
+        useful_masks = 0
+        weighted_utility = 0.0
+
+        for mask in usable:
+            seg = mask.get("segmentation")
+            area = float(mask.get("area", 0.0))
+            if seg is None or area <= 0.0:
+                continue
+            seg = seg.astype(bool, copy=False)
+            row_sums = seg.sum(axis=1, dtype=np.int64)
+            if row_sums.sum() <= 0:
+                continue
+            h = int(seg.shape[0])
+            split = max(1, h // 2)
+            upper_area = float(row_sums[:split].sum())
+            upper_ratio = upper_area / max(area, 1.0)
+            row_idx = np.arange(h, dtype=np.float32)
+            center_y = float((row_sums.astype(np.float32) * row_idx).sum() / area)
+            center_y /= max(float(h - 1), 1.0)
+            position_weight = max(0.35, 1.20 - 0.80 * center_y)
+            weighted_utility += np.sqrt(area) * position_weight * (0.70 + upper_ratio)
+            if upper_ratio >= 0.18 or center_y <= 0.62:
+                useful_masks += 1
+
+        return {
+            "mask_count": mask_count,
+            "useful_masks": useful_masks,
+            "weighted_utility": float(weighted_utility),
+            "total_area": total_area,
+        }
+
+    selected = []
+    try:
+        for group_idx, group in enumerate(candidate_groups, start=1):
+            best_idx = None
+            best_score = None
+            scored = []
+            for idx in group:
+                with torch.inference_mode(), torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    masks = gen.generate(frames[idx])
+                masks = sorted(masks, key=lambda x: x["area"], reverse=True)
+                preview_stats = score_preview_masks(masks)
+                score = (
+                    preview_stats["useful_masks"],
+                    preview_stats["weighted_utility"],
+                    preview_stats["mask_count"],
+                    preview_stats["total_area"],
+                )
+                scored.append((idx, preview_stats))
+                if best_score is None or score > best_score:
+                    best_idx = idx
+                    best_score = score
+            scored_txt = ", ".join(
+                f"{idx}:{stats['mask_count']}m/{stats['useful_masks']}u/{int(stats['weighted_utility'])}w"
+                for idx, stats in scored
+            )
+            print(
+                f"[SAM2] preview group {group_idx}: {scored_txt} -> select {best_idx}",
+                flush=True,
+            )
+            selected.append(int(best_idx))
+    finally:
+        del gen, sam2
+        torch.cuda.empty_cache()
+
+    return selected
 
 
 def _parse_scan_frame_idx(frame_path):
@@ -362,9 +478,18 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
         f"offload_state_to_cpu={int(offload_state_to_cpu)} "
         f"async_loading_frames={int(async_loading_frames)}"
     )
-    max_obj = cfg.get("max_obj_ids", 50)
-    prob_thr = cfg.get("mask_prob_threshold", 0.5)
-    iou_threshold = float(cfg.get("merge_iou_threshold", 0.5))
+    max_obj = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MAX_OBJ_IDS"),
+        cfg.get("max_obj_ids", 50),
+    )
+    prob_thr = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MASK_PROB_THRESHOLD"),
+        cfg.get("mask_prob_threshold", 0.5),
+    )
+    iou_threshold = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MERGE_IOU_THRESHOLD"),
+        cfg.get("merge_iou_threshold", 0.5),
+    )
     max_keyframe_hops = _parse_int(
         os.environ.get("OBJECTX_SAM2_MERGE_KEYFRAME_HOPS"),
         cfg.get("merge_keyframe_hops", 1),
