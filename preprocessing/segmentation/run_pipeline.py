@@ -5,7 +5,8 @@ Usage: python run_pipeline.py --config configs/pipeline.yaml
 import argparse, os, time, zipfile, torch, yaml
 from pathlib import Path
 from utils.io_utils import load_frames_from_scene, select_keyframes, select_keyframe_candidate_groups
-from segment_sam2 import segment_keyframes, propagate_masks, refine_keyframes_with_mask_preview
+from segment_sam2 import segment_keyframes, propagate_masks
+from keyframe_selection import refine_keyframes_with_mask_preview
 from depth_pose_must3r import run_must3r_on_scene
 from utils.object_registry import build_objects_predicted, save_objects_predicted
 
@@ -145,11 +146,26 @@ def run_scene(scene_id, scene_dir, cfg):
     )
     preview_candidates = env_or_default(
         "OBJECTX_SEG_KEYFRAME_PREVIEW_CANDIDATES",
-        kf_cfg.get("preview_candidates", 4),
+        kf_cfg.get("preview_candidates", 8),
         int,
     )
-    keyframe_idxs = select_keyframes(
-        frame_paths, keyframe_strategy, keyframe_stride, keyframe_count, frames=frames)
+    candidate_groups = None
+    if refine_keyframes and keyframe_strategy.startswith("quality_"):
+        candidate_groups = select_keyframe_candidate_groups(
+            frame_paths,
+            keyframe_strategy,
+            keyframe_stride,
+            keyframe_count,
+            frames=frames,
+            top_k=preview_candidates,
+        )
+        if keyframe_strategy == "quality_global" and candidate_groups:
+            keyframe_idxs = sorted(int(idx) for idx in candidate_groups[0][:keyframe_count])
+        else:
+            keyframe_idxs = [int(group[0]) for group in candidate_groups if group]
+    else:
+        keyframe_idxs = select_keyframes(
+            frame_paths, keyframe_strategy, keyframe_stride, keyframe_count, frames=frames)
     print(
         "[Keyframes] "
         f"strategy={keyframe_strategy} stride={keyframe_stride} "
@@ -181,20 +197,26 @@ def run_scene(scene_id, scene_dir, cfg):
         # STEP 2: SAM2 grid → masks on keyframes
         sc = cfg["sam2"]
         if refine_keyframes and keyframe_strategy.startswith("quality_"):
-            candidate_groups = select_keyframe_candidate_groups(
-                frame_paths,
-                keyframe_strategy,
-                keyframe_stride,
-                keyframe_count,
-                frames=frames,
-                top_k=preview_candidates,
-            )
             print(
                 "[Keyframes] preview candidates="
-                f"{[group[:preview_candidates] for group in candidate_groups]}"
+                + (
+                    f"pool_size={len(candidate_groups[0])} "
+                    f"head={candidate_groups[0][:max(16, preview_candidates * 4)]}"
+                    if keyframe_strategy == "quality_global" and len(candidate_groups) == 1
+                    else f"{[group[:preview_candidates] for group in candidate_groups]}"
+                )
             )
             keyframe_idxs = refine_keyframes_with_mask_preview(
-                frames, candidate_groups, sc, device
+                frames,
+                candidate_groups,
+                sc,
+                device,
+                target_count=keyframe_count,
+                scene_id=scene_id,
+                diagnostics_root=os.environ.get(
+                    "OBJECTX_SEG_KEYFRAME_DIAG_ROOT",
+                    str(Path(__file__).resolve().parents[2] / "debug" / "keyframe_selection"),
+                ),
             )
             print(
                 "[Keyframes] refined "
