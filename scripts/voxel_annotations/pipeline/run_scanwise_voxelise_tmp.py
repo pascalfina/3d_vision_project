@@ -139,7 +139,10 @@ def ensure_symlink(src: Path, dst: Path):
 
 
 def bootstrap_scratch_root(
-    scratch_root: Path, baseline_root: Optional[Path], mask_dirname: str
+    scratch_root: Path,
+    baseline_root: Optional[Path],
+    mask_dirname: str,
+    scene_source_dirname: str,
 ) -> None:
     if baseline_root is None:
         return
@@ -171,7 +174,11 @@ def bootstrap_scratch_root(
             ensure_symlink(src, dst)
 
     scenes_dst = scratch_root / "scenes"
-    if not scenes_dst.exists() and (baseline_root / "scenes").exists():
+    if (
+        scene_source_dirname == "scenes"
+        and not scenes_dst.exists()
+        and (baseline_root / "scenes").exists()
+    ):
         ensure_symlink(baseline_root / "scenes", scenes_dst)
 
 
@@ -196,12 +203,16 @@ def main():
     (tmp_root / "files").mkdir(parents=True, exist_ok=True)
 
     mask_dirname = resolve_mask_source()
+    scene_source_dirname = (
+        os.environ.get("OBJECTX_SCENE_SOURCE_DIRNAME", "scenes").strip() or "scenes"
+    )
     baseline_root_env = os.environ.get("OBJECTX_BASELINE_ROOT", "").strip()
     baseline_root = Path(baseline_root_env) if baseline_root_env else None
     bootstrap_scratch_root(
         scratch_root=scratch_root,
         baseline_root=baseline_root,
         mask_dirname=mask_dirname,
+        scene_source_dirname=scene_source_dirname,
     )
 
     for name in [
@@ -245,6 +256,7 @@ def main():
                 alias_dst.unlink()
         os.symlink(src, alias_dst)
     print(f"[2.5] using mask source {mask_dirname}", flush=True)
+    print(f"[2.5] using scene source {scene_source_dirname}", flush=True)
     print(
         f"[2.5] using cache root {os.environ['OBJECTX_CACHE_ROOT']} "
         f"(hub={os.environ['OBJECTX_DINOV2_HUB_DIR']})",
@@ -303,6 +315,12 @@ def main():
         scan_ids = scan_ids[: args.max_scans]
 
     total = len(scan_ids)
+    scene_source_root = scratch_root / scene_source_dirname
+    if not scene_source_root.exists():
+        raise FileNotFoundError(
+            f"Scene source directory does not exist: {scene_source_root} "
+            f"(OBJECTX_SCENE_SOURCE_DIRNAME={scene_source_dirname})"
+        )
     for idx, scan_id in enumerate(scan_ids, start=1):
         obj_data = obj_lookup[scan_id]
         if all_outputs_exist(scratch_root, obj_data) and not args.override:
@@ -310,8 +328,13 @@ def main():
                 print(f"[2.5] {idx}/{total} (skip existing) {scan_id}", flush=True)
             continue
 
-        src_scan_dir = scratch_root / "scenes" / scan_id
+        src_scan_dir = scene_source_root / scan_id
         tmp_scan_dir = tmp_root / "scenes" / scan_id
+
+        if not src_scan_dir.exists():
+            raise FileNotFoundError(
+                f"Scene directory for {scan_id} not found in {scene_source_root}"
+            )
 
         print(f"[2.5] {idx}/{total} {args.split} {scan_id}", flush=True)
         stage_scan(src_scan_dir, tmp_scan_dir)

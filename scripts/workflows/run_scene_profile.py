@@ -253,6 +253,9 @@ def build_voxelise_action(repo_root: Path, profile: dict):
         "RESET_TMP": str(sec.get("reset_tmp", 1)),
         "MAX_SCANS": str(sec.get("max_scans", 0)),
     }
+    scene_source_dirname = sec.get("scene_source_dirname")
+    if scene_source_dirname:
+        env_updates["OBJECTX_SCENE_SOURCE_DIRNAME"] = str(scene_source_dirname)
     for key, value in sec.get("env", {}).items():
         env_updates[key] = str(value)
     cmd = [
@@ -322,6 +325,11 @@ def build_pred_ready_action(repo_root: Path, profile: dict):
         cmd,
         "--reconstruction-root",
         sec.get("reconstruction_root", roots(profile).get("reconstruction")),
+    )
+    add_cli_arg(
+        cmd,
+        "--reconstruction-scenes-dirname",
+        sec.get("reconstruction_scenes_dirname"),
     )
     add_cli_arg(cmd, "--target-root", sec.get("target_root", roots(profile).get("pred_ready")))
     add_cli_arg(cmd, "--scene-id", sec.get("scene_id", shared_value(profile, "scene_id")))

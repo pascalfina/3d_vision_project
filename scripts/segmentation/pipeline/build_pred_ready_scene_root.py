@@ -23,6 +23,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-root", required=True)
     parser.add_argument("--reconstruction-root", required=True)
+    parser.add_argument("--reconstruction-scenes-dirname", default="scenes")
     parser.add_argument("--target-root", required=True)
     parser.add_argument("--scene-id", required=True)
     parser.add_argument("--split", default="val", choices=["train", "val", "test"])
@@ -173,13 +174,21 @@ def link_compatibility_inputs(
     target_root: Path,
     scene_id: str,
     split: str,
+    reconstruction_scenes_dirname: str = "scenes",
 ) -> None:
     files_dir = target_root / "files"
     scenes_dir = target_root / "scenes"
     files_dir.mkdir(parents=True, exist_ok=True)
     scenes_dir.mkdir(parents=True, exist_ok=True)
 
-    scene_src = reconstruction_root / "scenes" / scene_id
+    scene_src = reconstruction_root / reconstruction_scenes_dirname / scene_id
+    if (
+        reconstruction_scenes_dirname != "scenes"
+        and not scene_src.exists()
+    ):
+        raise FileNotFoundError(
+            f"Missing reconstruction scene directory for {scene_id}: {scene_src}"
+        )
     if not scene_src.exists():
         scene_src = baseline_root / "scenes" / scene_id
     if not scene_src.exists():
@@ -523,6 +532,7 @@ def main():
         target_root=target_root,
         scene_id=scene_id,
         split=args.split,
+        reconstruction_scenes_dirname=args.reconstruction_scenes_dirname,
     )
 
     ordered_objects = discover_reconstructed_objects(
