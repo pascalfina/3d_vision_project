@@ -12,6 +12,7 @@ Usage:
     --label <label> \
     [--manifest <manifest.json>] \
     [--data-root <data_root>] \
+    [--mask-root <mask_root>] \
     [--joint-ply <joint_ply>] \
     [--mask-source <mask_source>] \
     [--background-remove-mode <loaded|all>] \
@@ -45,6 +46,7 @@ REPLACEMENT_ROOT=""
 LABEL=""
 MANIFEST=""
 DATA_ROOT="/work/scratch/${USER}/objectx-data-baseline"
+MASK_ROOT=""
 JOINT_PLY=""
 MASK_SOURCE="gt_projection"
 BACKGROUND_REMOVE_MODE="loaded"
@@ -87,6 +89,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --data-root)
             DATA_ROOT="$2"
+            shift 2
+            ;;
+        --mask-root)
+            MASK_ROOT="$2"
             shift 2
             ;;
         --joint-ply)
@@ -259,6 +265,10 @@ cmd=(
     --joint-point-size "$JOINT_POINT_SIZE"
     --label "$LABEL"
 )
+
+if [[ -n "$MASK_ROOT" ]]; then
+    cmd=( "${cmd[@]:0:2}" --mask-root "$MASK_ROOT" "${cmd[@]:2}" )
+fi
 
 if [[ -n "$OUT_DIR" ]]; then
     cmd+=(--out-dir "$OUT_DIR")

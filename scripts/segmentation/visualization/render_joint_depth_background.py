@@ -37,6 +37,11 @@ def parse_args():
         )
     )
     parser.add_argument("--data-root", required=True)
+    parser.add_argument(
+        "--mask-root",
+        default=None,
+        help="Optional root to load object masks from. Defaults to --data-root.",
+    )
     parser.add_argument("--replacement-root", required=True)
     parser.add_argument("--joint-ply", required=True)
     parser.add_argument("--scan-id", required=True)
@@ -132,6 +137,7 @@ def load_joint_points(
 def main():
     args = parse_args()
     data_root = Path(args.data_root)
+    mask_root = Path(args.mask_root) if args.mask_root else data_root
     replacement_root = Path(args.replacement_root)
     joint_ply = Path(args.joint_ply)
     obj_ids = resolve_obj_ids(args)
@@ -150,6 +156,7 @@ def main():
 
     bg_points, bg_colors, selected_frame_ids = build_background_from_depth(
         data_root=data_root,
+        mask_root=mask_root,
         scan_id=args.scan_id,
         remove_obj_ids=remove_obj_ids,
         mask_source=args.mask_source,
@@ -227,6 +234,7 @@ def main():
 
     summary = {
         "data_root": str(data_root),
+        "mask_root": str(mask_root),
         "replacement_root": str(replacement_root),
         "joint_ply": str(joint_ply),
         "scan_id": args.scan_id,

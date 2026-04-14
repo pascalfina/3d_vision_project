@@ -8,6 +8,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Optional
 
 import imageio.v2 as imageio
 import matplotlib
@@ -32,6 +33,11 @@ def parse_args():
         )
     )
     parser.add_argument("--data-root", required=True)
+    parser.add_argument(
+        "--mask-root",
+        default=None,
+        help="Optional root to load object masks from. Defaults to --data-root.",
+    )
     parser.add_argument("--replacement-root", required=True)
     parser.add_argument("--scan-id", required=True)
     parser.add_argument("--obj-id", dest="obj_ids", action="append", type=int, default=[])
@@ -224,6 +230,7 @@ def filter_points_with_colors(points: np.ndarray, colors: np.ndarray):
 
 def build_background_from_depth(
     data_root: Path,
+    mask_root: Optional[Path],
     scan_id: str,
     remove_obj_ids: list[int],
     mask_source: str,
@@ -237,6 +244,7 @@ def build_background_from_depth(
         stage_root = Path(tmpdir)
         scene_root = resolve_scene_root(data_root, scan_id, stage_root)
         scenes_dir = scene_root / "scenes"
+        mask_data_root = mask_root if mask_root is not None else data_root
 
         frame_ids = scan3r.load_frame_idxs(data_dir=str(scenes_dir), scan_id=scan_id)
         extrinsics = scan3r.load_frame_poses(
@@ -244,7 +252,7 @@ def build_background_from_depth(
         )
         depth_intrinsics = scan3r.load_intrinsics(data_dir=str(scenes_dir), scan_id=scan_id, type="depth")
         depth_shift = vf._load_depth_shift(str(scenes_dir), scan_id)
-        masks = scan3r.load_masks(str(data_root), scan_id, mask_source=mask_source)
+        masks = scan3r.load_masks(str(mask_data_root), scan_id, mask_source=mask_source)
 
         vis_frame_ids = []
         vis_masks = []
@@ -414,6 +422,7 @@ def save_contact_sheet(frames, out_file: Path):
 def main():
     args = parse_args()
     data_root = Path(args.data_root)
+    mask_root = Path(args.mask_root) if args.mask_root else data_root
     replacement_root = Path(args.replacement_root)
     obj_ids = resolve_obj_ids(args)
     obj_slug = "-".join(str(x) for x in obj_ids[:6])
@@ -432,6 +441,7 @@ def main():
     remove_obj_ids = obj_ids if args.background_remove_mode == "all" else loaded_ids
     bg_points, bg_colors, selected_frame_ids = build_background_from_depth(
         data_root=data_root,
+        mask_root=mask_root,
         scan_id=args.scan_id,
         remove_obj_ids=remove_obj_ids,
         mask_source=args.mask_source,
@@ -473,6 +483,7 @@ def main():
 
     summary = {
         "data_root": str(data_root),
+        "mask_root": str(mask_root),
         "replacement_root": str(replacement_root),
         "scan_id": args.scan_id,
         "obj_ids": obj_ids,

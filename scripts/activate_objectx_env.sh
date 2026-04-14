@@ -35,11 +35,20 @@ if command -v nvcc >/dev/null 2>&1; then
     export PATH="$CUDA_HOME/bin:$PATH"
 fi
 
+_objectx_python_ver="$("$VLSG_VENV_PATH/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+_objectx_torch_lib="$VLSG_VENV_PATH/lib/python${_objectx_python_ver}/site-packages/torch/lib"
+if [[ -d "$_objectx_torch_lib" ]]; then
+    export LD_LIBRARY_PATH="$_objectx_torch_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+if [[ -n "${CUDA_HOME:-}" && -d "$CUDA_HOME/lib64" ]]; then
+    export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 export PIP_NO_CACHE_DIR=1
 export PIP_CONFIG_FILE=/dev/null
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONNOUSERSITE=1
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;8.9;9.0;12.0}"
 export FORCE_CUDA="${FORCE_CUDA:-1}"
 export MAX_JOBS="${MAX_JOBS:-2}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"

@@ -20,6 +20,40 @@ POPCOUNT_LUT = np.unpackbits(
 ).sum(axis=1).astype(np.uint8)
 
 
+def ensure_sam2_postprocess_ready(device="cuda"):
+    """Fail fast if the optional SAM2 post-processing extension is unavailable."""
+    from sam2.utils.misc import get_connected_components
+
+    requested_device = str(device).split(":", 1)[0]
+    if requested_device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "SAM2 post-processing requires CUDA, but torch.cuda.is_available() is False."
+            )
+        test_mask = torch.zeros((1, 1, 8, 8), dtype=torch.bool, device="cuda")
+        test_mask[:, :, 2:4, 2:4] = True
+        try:
+            labels, areas = get_connected_components(test_mask)
+        except Exception as e:
+            raise RuntimeError(
+                "SAM2 CUDA post-processing extension is not operational. "
+                "Please rebuild sam2._C before running the pipeline."
+            ) from e
+        if labels.shape != test_mask.shape or areas.shape != test_mask.shape:
+            raise RuntimeError(
+                "SAM2 CUDA post-processing extension returned unexpected output shapes."
+            )
+        print("[SAM2] post-processing extension check: CUDA OK", flush=True)
+    else:
+        try:
+            import sam2._C  # noqa: F401
+        except Exception as e:
+            raise RuntimeError(
+                "SAM2 post-processing extension import failed even for non-CUDA mode."
+            ) from e
+        print("[SAM2] post-processing extension check: import OK", flush=True)
+
+
 def _parse_bool(value, default):
     if value is None:
         return default
@@ -886,6 +920,263 @@ def _count_tracks(keyframe_masks, max_obj):
     return sum(min(len(masks), max_obj) for masks in keyframe_masks.values())
 
 
+def _mask_bbox_stats(mask_entry):
+    bbox = mask_entry.get("bbox")
+    if bbox is not None and len(bbox) == 4:
+        x, y, w, h = [float(v) for v in bbox]
+        return x, y, w, h
+    seg = mask_entry["segmentation"].astype(bool, copy=False)
+    ys, xs = np.nonzero(seg)
+    if ys.size == 0 or xs.size == 0:
+        return 0.0, 0.0, 0.0, 0.0
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    return float(x0), float(y0), float(x1 - x0 + 1), float(y1 - y0 + 1)
+
+
+def _score_propagation_mask(mask_entry, frame_shape):
+    h, w = frame_shape
+    frame_area = max(float(h * w), 1.0)
+    area = float(mask_entry.get("area", 0.0))
+    pred_iou = float(mask_entry.get("predicted_iou", 0.0))
+    stability = float(mask_entry.get("stability_score", pred_iou))
+    x, y, bw, bh = _mask_bbox_stats(mask_entry)
+    bbox_area = max(float(bw * bh), 1.0)
+    bbox_fill = area / bbox_area
+    area_frac = area / frame_area
+    shape_ratio = min(float(bw), float(bh)) / max(max(float(bw), float(bh)), 1.0) if bw > 0 and bh > 0 else 0.0
+    center_x = (x + 0.5 * bw) / max(float(w), 1.0)
+    center_y = (y + 0.5 * bh) / max(float(h), 1.0)
+    margin = 8.0
+    touches = int(x <= margin) + int(y <= margin) + int((x + bw) >= (w - margin)) + int((y + bh) >= (h - margin))
+
+    if area_frac < 0.0010:
+        size_score = 0.08
+    elif area_frac < 0.0025:
+        size_score = 0.35
+    elif area_frac < 0.015:
+        size_score = 1.00
+    elif area_frac < 0.08:
+        size_score = 0.88
+    elif area_frac < 0.25:
+        size_score = 0.55
+    else:
+        size_score = 0.22
+
+    quality = 0.52 * pred_iou + 0.48 * stability
+    touch_penalty = 0.18 * max(0, touches - 1)
+    bottom_penalty = 0.18 if center_y >= 0.82 and area_frac < 0.02 else 0.0
+    dominant_penalty = 0.16 if area_frac > 0.22 and bbox_fill < 0.30 and touches >= 2 else 0.0
+    score = (
+        1.10 * quality
+        + 0.42 * bbox_fill
+        + 0.34 * size_score
+        + 0.18 * max(0.0, shape_ratio)
+        - touch_penalty
+        - bottom_penalty
+        - dominant_penalty
+    )
+
+    return {
+        "area": area,
+        "area_frac": area_frac,
+        "pred_iou": pred_iou,
+        "stability": stability,
+        "bbox_fill": bbox_fill,
+        "shape_ratio": shape_ratio,
+        "center_x": center_x,
+        "center_y": center_y,
+        "touches": touches,
+        "score": float(score),
+    }
+
+
+def _prepare_keyframe_masks_for_propagation(kf_idx, masks, max_obj, frame_shape):
+    candidate_multiplier = _parse_int(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_CANDIDATE_MULTIPLIER"),
+        2,
+    )
+    hard_filter_enabled = _parse_bool(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_HARD_FILTER_ENABLED"),
+        False,
+    )
+    min_keep = _parse_int(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_MIN_KEEP"),
+        max(12, min(24, max_obj // 2 if max_obj > 0 else 12)),
+    )
+    min_score = _parse_float(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_MIN_SCORE"),
+        0.90,
+    )
+    min_pred_iou = _parse_float(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_MIN_PRED_IOU"),
+        0.72,
+    )
+    min_stability = _parse_float(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_MIN_STABILITY"),
+        0.82,
+    )
+    tiny_area_frac = _parse_float(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_TINY_AREA_FRAC"),
+        0.0012,
+    )
+    dedupe_enabled = _parse_bool(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_DEDUPE_ENABLED"),
+        False,
+    )
+    dedupe_iou = _parse_float(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_DEDUPE_IOU"),
+        0.82,
+    )
+    dedupe_containment = _parse_float(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_DEDUPE_CONTAINMENT"),
+        0.94,
+    )
+    replace_margin = _parse_float(
+        os.environ.get("OBJECTX_SAM2_PROP_MASK_REPLACE_MARGIN"),
+        0.08,
+    )
+
+    candidate_limit = min(len(masks), max(max_obj, max_obj * candidate_multiplier))
+    candidate_masks = masks[:candidate_limit]
+    scored = []
+    hard_filtered = 0
+    hard_filter_reasons = {
+        "tiny_weak": 0,
+        "border_dominant": 0,
+        "bottom_sliver": 0,
+        "low_score": 0,
+    }
+
+    for mask_entry in candidate_masks:
+        stats = _score_propagation_mask(mask_entry, frame_shape)
+        reject_reason = None
+        if hard_filter_enabled and (
+            stats["area_frac"] < tiny_area_frac
+            and (
+                stats["touches"] >= 1
+                or stats["pred_iou"] < min_pred_iou
+                or stats["stability"] < min_stability
+            )
+        ):
+            reject_reason = "tiny_weak"
+        elif hard_filter_enabled and (
+            stats["area_frac"] > 0.18
+            and stats["touches"] >= 2
+            and stats["bbox_fill"] < 0.28
+            and stats["pred_iou"] < 0.84
+        ):
+            reject_reason = "border_dominant"
+        elif hard_filter_enabled and (
+            stats["center_y"] >= 0.86
+            and stats["area_frac"] < 0.015
+            and stats["touches"] >= 1
+            and stats["pred_iou"] < 0.84
+        ):
+            reject_reason = "bottom_sliver"
+        elif hard_filter_enabled and (
+            stats["score"] < min_score
+            and stats["area_frac"] < 0.02
+            and stats["pred_iou"] < 0.88
+        ):
+            reject_reason = "low_score"
+
+        if reject_reason is not None:
+            hard_filtered += 1
+            hard_filter_reasons[reject_reason] += 1
+            continue
+        scored.append((mask_entry, stats))
+
+    scored.sort(
+        key=lambda item: (
+            item[1]["score"],
+            item[1]["pred_iou"],
+            item[1]["stability"],
+            item[1]["bbox_fill"],
+            item[1]["area"],
+        ),
+        reverse=True,
+    )
+
+    kept = []
+    deduped = 0
+    if dedupe_enabled:
+        for mask_entry, stats in scored:
+            seg = mask_entry["segmentation"].astype(bool, copy=False)
+            duplicate_idx = None
+            replace_existing = False
+            for idx, kept_entry in enumerate(kept):
+                kept_seg = kept_entry["segmentation"]
+                intersection = int(np.count_nonzero(seg & kept_seg))
+                if intersection == 0:
+                    continue
+                union = stats["area"] + kept_entry["stats"]["area"] - intersection
+                if union <= 0:
+                    continue
+                iou = float(intersection / union)
+                containment = float(intersection / max(1.0, min(stats["area"], kept_entry["stats"]["area"])))
+                if iou >= dedupe_iou or containment >= dedupe_containment:
+                    duplicate_idx = idx
+                    replace_existing = (
+                        stats["score"] > kept_entry["stats"]["score"] + replace_margin
+                        and stats["pred_iou"] >= kept_entry["stats"]["pred_iou"] - 0.02
+                    )
+                    break
+            if duplicate_idx is None:
+                kept.append(
+                    {
+                        "mask": mask_entry,
+                        "stats": stats,
+                        "segmentation": seg,
+                    }
+                )
+            elif replace_existing:
+                kept[duplicate_idx] = {
+                    "mask": mask_entry,
+                    "stats": stats,
+                    "segmentation": seg,
+                }
+                deduped += 1
+            else:
+                deduped += 1
+    else:
+        kept = [
+            {
+                "mask": mask_entry,
+                "stats": stats,
+                "segmentation": mask_entry["segmentation"].astype(bool, copy=False),
+            }
+            for mask_entry, stats in scored
+        ]
+
+    kept.sort(
+        key=lambda item: (
+            item["stats"]["score"],
+            item["stats"]["pred_iou"],
+            item["stats"]["stability"],
+            item["stats"]["area"],
+        ),
+        reverse=True,
+    )
+
+    selected = kept[:max_obj]
+
+    prepared_masks = [item["mask"] for item in selected]
+    print(
+        "[SAM2] keyframe prefilter "
+        f"{int(kf_idx)}: raw={len(masks)} "
+        f"candidate_pool={candidate_limit} "
+        f"hard_filter_enabled={int(hard_filter_enabled)} "
+        f"hard_filtered={hard_filtered} "
+        f"dedupe_enabled={int(dedupe_enabled)} "
+        f"deduped={deduped} "
+        f"selected={len(prepared_masks)} "
+        f"reasons={hard_filter_reasons}",
+        flush=True,
+    )
+    return prepared_masks
+
+
 def _run_chunk_propagation(
     predictor,
     tmp_dir,
@@ -1237,7 +1528,7 @@ def _compute_temporal_boundary_similarity(
     return best
 
 
-def _collect_group_metadata(id_mapping, track_masks, track_seen, track_areas):
+def _collect_group_metadata(id_mapping, track_masks, track_seen, track_areas, track_key_positions=None):
     metadata = {}
     for group_id, orig_ids in id_mapping.items():
         orig_indices = [orig_id - 1 for orig_id in orig_ids]
@@ -1251,14 +1542,26 @@ def _collect_group_metadata(id_mapping, track_masks, track_seen, track_areas):
             orig_indices=orig_indices,
             frames=frames,
         )
+        if track_key_positions is not None:
+            key_positions = [
+                int(track_key_positions[idx])
+                for idx in orig_indices
+                if int(track_key_positions[idx]) >= 0
+            ]
+        else:
+            key_positions = []
         metadata[int(group_id)] = {
             "group_id": int(group_id),
             "orig_ids": list(orig_ids),
             "orig_indices": orig_indices,
             "frames": frames,
             "n_frames": int(frames.size),
+            "frame_span": int(frames[-1] - frames[0] + 1),
             "area_mean": float(np.mean(areas)),
             "area_max": float(np.max(areas)),
+            "orig_track_count": int(len(orig_indices)),
+            "key_positions": sorted(set(key_positions)),
+            "keyframe_support_count": int(len(set(key_positions))),
         }
     return metadata
 
@@ -1729,6 +2032,236 @@ def _prune_redundant_fragment_groups(
     return new_id_mapping, orig_to_new
 
 
+def _prune_low_support_groups(
+    id_mapping,
+    track_masks,
+    track_seen,
+    track_areas,
+    track_key_positions,
+    prune_enabled,
+    prune_max_frames,
+    prune_max_frame_span,
+    prune_area_mean_cap,
+    prune_area_max_cap,
+    prune_max_orig_tracks,
+    prune_max_keyframe_support,
+    prune_min_shared_frames,
+    prune_overlap_fraction,
+    prune_containment_threshold,
+    prune_peak_containment_threshold,
+    prune_target_length_ratio,
+    prune_target_area_ratio,
+):
+    num_tracks = int(track_seen.shape[0])
+    if not prune_enabled or len(id_mapping) <= 1:
+        orig_to_new = np.zeros(num_tracks + 1, dtype=np.int32)
+        for new_id, orig_ids in id_mapping.items():
+            for orig_id in orig_ids:
+                orig_to_new[int(orig_id)] = int(new_id)
+        return id_mapping, orig_to_new
+
+    metadata = _collect_group_metadata(
+        id_mapping=id_mapping,
+        track_masks=track_masks,
+        track_seen=track_seen,
+        track_areas=track_areas,
+        track_key_positions=track_key_positions,
+    )
+    if not metadata:
+        orig_to_new = np.zeros(num_tracks + 1, dtype=np.int32)
+        return {}, orig_to_new
+
+    prune_candidates = []
+    too_many_frames = 0
+    too_large = 0
+    too_many_tracks = 0
+    too_many_keyframes = 0
+    for group_id, meta in metadata.items():
+        if meta["n_frames"] > prune_max_frames or meta["frame_span"] > prune_max_frame_span:
+            too_many_frames += 1
+            continue
+        if meta["area_mean"] > prune_area_mean_cap or meta["area_max"] > prune_area_max_cap:
+            too_large += 1
+            continue
+        if meta["orig_track_count"] > prune_max_orig_tracks:
+            too_many_tracks += 1
+            continue
+        if meta["keyframe_support_count"] > prune_max_keyframe_support:
+            too_many_keyframes += 1
+            continue
+        prune_candidates.append(int(group_id))
+
+    prune_candidates.sort(
+        key=lambda group_id: (
+            metadata[group_id]["n_frames"],
+            metadata[group_id]["frame_span"],
+            metadata[group_id]["area_mean"],
+            metadata[group_id]["area_max"],
+        )
+    )
+
+    mask_cache = {}
+    pruned_groups = set()
+    compared = 0
+    shared_frames_skipped = 0
+    overlap_skipped = 0
+    strength_skipped = 0
+    containment_skipped = 0
+    pruned_count = 0
+
+    for cand_group_id in prune_candidates:
+        if cand_group_id in pruned_groups:
+            continue
+        cand_meta = metadata[cand_group_id]
+        cand_frames = cand_meta["frames"]
+        cand_n_frames = cand_meta["n_frames"]
+        cand_area_mean = cand_meta["area_mean"]
+        cand_area_max = cand_meta["area_max"]
+
+        cand_cache = mask_cache.get(cand_group_id)
+        if cand_cache is None:
+            cand_cache = _compute_group_masks_for_frames(
+                track_masks=track_masks,
+                track_areas=track_areas,
+                orig_indices=cand_meta["orig_indices"],
+                frames=cand_frames,
+            )
+            mask_cache[cand_group_id] = cand_cache
+        cand_packed_all, cand_areas_all = cand_cache
+
+        best_target = None
+        best_score = -1e9
+        for target_group_id, target_meta in metadata.items():
+            if target_group_id == cand_group_id or target_group_id in pruned_groups:
+                continue
+            strong_length = target_meta["n_frames"] >= max(
+                cand_n_frames + 1,
+                int(np.ceil(cand_n_frames * prune_target_length_ratio)),
+            )
+            strong_area = (
+                target_meta["area_mean"] >= cand_area_mean * prune_target_area_ratio
+                or target_meta["area_max"] >= cand_area_max * max(1.35, prune_target_area_ratio)
+            )
+            strong_support = (
+                target_meta["orig_track_count"] > cand_meta["orig_track_count"]
+                or target_meta["keyframe_support_count"] > cand_meta["keyframe_support_count"]
+                or target_meta["n_frames"] > cand_n_frames
+            )
+            if not ((strong_length or strong_area) and strong_support):
+                strength_skipped += 1
+                continue
+
+            shared_frames, cand_idx, target_idx = np.intersect1d(
+                cand_frames,
+                target_meta["frames"],
+                assume_unique=True,
+                return_indices=True,
+            )
+            if shared_frames.size < prune_min_shared_frames:
+                shared_frames_skipped += 1
+                continue
+            overlap_fraction = float(shared_frames.size / max(cand_n_frames, 1))
+            if overlap_fraction < prune_overlap_fraction:
+                overlap_skipped += 1
+                continue
+
+            compared += 1
+            cand_packed = cand_packed_all[cand_idx]
+            cand_areas = cand_areas_all[cand_idx]
+            target_cache = mask_cache.get(target_group_id)
+            if target_cache is None:
+                target_cache = _compute_group_masks_for_frames(
+                    track_masks=track_masks,
+                    track_areas=track_areas,
+                    orig_indices=target_meta["orig_indices"],
+                    frames=target_meta["frames"],
+                )
+                mask_cache[target_group_id] = target_cache
+            target_packed_all, _ = target_cache
+            target_packed = target_packed_all[target_idx]
+
+            intersections = POPCOUNT_LUT[np.bitwise_and(cand_packed, target_packed)].sum(
+                axis=1, dtype=np.int64
+            )
+            valid = cand_areas > 0
+            if not np.any(valid):
+                continue
+            containment_vals = intersections[valid] / np.maximum(cand_areas[valid], 1)
+            weighted_containment = float(
+                intersections[valid].sum() / np.maximum(cand_areas[valid].sum(), 1)
+            )
+            peak_containment = float(np.max(containment_vals)) if containment_vals.size else 0.0
+            if (
+                weighted_containment < prune_containment_threshold
+                and peak_containment < prune_peak_containment_threshold
+            ):
+                containment_skipped += 1
+                continue
+
+            score = (
+                1.40 * weighted_containment
+                + 0.75 * peak_containment
+                + 0.20 * overlap_fraction
+                + 0.06 * np.log1p(target_meta["n_frames"])
+                + 0.06 * np.log1p(target_meta["area_mean"] / max(cand_area_mean, 1.0))
+                + 0.04 * float(target_meta["keyframe_support_count"] > cand_meta["keyframe_support_count"])
+            )
+            if score > best_score:
+                best_score = score
+                best_target = target_group_id
+
+        if best_target is not None:
+            pruned_groups.add(int(cand_group_id))
+            pruned_count += 1
+
+    kept_groups = [
+        (group_id, id_mapping[group_id])
+        for group_id in sorted(id_mapping)
+        if int(group_id) not in pruned_groups
+    ]
+    new_id_mapping = {}
+    orig_to_new = np.zeros(num_tracks + 1, dtype=np.int32)
+    for new_id, (_, orig_ids) in enumerate(kept_groups, start=1):
+        new_id_mapping[new_id] = list(orig_ids)
+        for orig_id in orig_ids:
+            orig_to_new[int(orig_id)] = int(new_id)
+
+    print(
+        "[SAM2] low-support prune summary: "
+        f"enabled={int(prune_enabled)}, "
+        f"max_frames={prune_max_frames}, "
+        f"max_frame_span={prune_max_frame_span}, "
+        f"area_mean_cap={prune_area_mean_cap}, "
+        f"area_max_cap={prune_area_max_cap}, "
+        f"max_orig_tracks={prune_max_orig_tracks}, "
+        f"max_keyframe_support={prune_max_keyframe_support}, "
+        f"min_shared_frames={prune_min_shared_frames}, "
+        f"overlap_fraction={prune_overlap_fraction}, "
+        f"containment_threshold={prune_containment_threshold}, "
+        f"peak_containment_threshold={prune_peak_containment_threshold}, "
+        f"target_length_ratio={prune_target_length_ratio}, "
+        f"target_area_ratio={prune_target_area_ratio}, "
+        f"candidates={len(prune_candidates)}, "
+        f"compared={compared}, "
+        f"shared_frames_skipped={shared_frames_skipped}, "
+        f"overlap_skipped={overlap_skipped}, "
+        f"strength_skipped={strength_skipped}, "
+        f"containment_skipped={containment_skipped}, "
+        f"pruned={pruned_count}, "
+        f"too_many_frames={too_many_frames}, "
+        f"too_large={too_large}, "
+        f"too_many_tracks={too_many_tracks}, "
+        f"too_many_keyframes={too_many_keyframes}",
+        flush=True,
+    )
+    if pruned_count > 0:
+        print(
+            f"[SAM2] low-support prune reduced objects {len(id_mapping)} -> {len(new_id_mapping)}",
+            flush=True,
+        )
+    return new_id_mapping, orig_to_new
+
+
 def _summarize_merged_groups(id_mapping, track_masks, track_seen, track_areas, tmp_to_scan_fidx):
     object_stats = {}
     num_frames = int(track_seen.shape[1])
@@ -1970,6 +2503,58 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
         os.environ.get("OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_TARGET_AREA_RATIO"),
         cfg.get("merge_fragment_prune_target_area_ratio", 1.4),
     )
+    low_support_prune_enabled = _parse_bool(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_ENABLED"),
+        cfg.get("merge_low_support_prune_enabled", False),
+    )
+    low_support_prune_max_frames = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MAX_FRAMES"),
+        cfg.get("merge_low_support_prune_max_frames", 3),
+    )
+    low_support_prune_max_frame_span = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MAX_FRAME_SPAN"),
+        cfg.get("merge_low_support_prune_max_frame_span", 24),
+    )
+    low_support_prune_area_mean_cap = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_AREA_MEAN_CAP"),
+        cfg.get("merge_low_support_prune_area_mean_cap", 2500.0),
+    )
+    low_support_prune_area_max_cap = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_AREA_MAX_CAP"),
+        cfg.get("merge_low_support_prune_area_max_cap", 7000.0),
+    )
+    low_support_prune_max_orig_tracks = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MAX_ORIG_TRACKS"),
+        cfg.get("merge_low_support_prune_max_orig_tracks", 1),
+    )
+    low_support_prune_max_keyframe_support = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MAX_KEYFRAME_SUPPORT"),
+        cfg.get("merge_low_support_prune_max_keyframe_support", 1),
+    )
+    low_support_prune_min_shared_frames = _parse_int(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MIN_SHARED_FRAMES"),
+        cfg.get("merge_low_support_prune_min_shared_frames", 2),
+    )
+    low_support_prune_overlap_fraction = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_OVERLAP_FRACTION"),
+        cfg.get("merge_low_support_prune_overlap_fraction", 0.80),
+    )
+    low_support_prune_containment_threshold = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_CONTAINMENT_THRESHOLD"),
+        cfg.get("merge_low_support_prune_containment_threshold", 0.98),
+    )
+    low_support_prune_peak_containment_threshold = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_PEAK_CONTAINMENT_THRESHOLD"),
+        cfg.get("merge_low_support_prune_peak_containment_threshold", 0.995),
+    )
+    low_support_prune_target_length_ratio = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_TARGET_LENGTH_RATIO"),
+        cfg.get("merge_low_support_prune_target_length_ratio", 1.5),
+    )
+    low_support_prune_target_area_ratio = _parse_float(
+        os.environ.get("OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_TARGET_AREA_RATIO"),
+        cfg.get("merge_low_support_prune_target_area_ratio", 1.5),
+    )
     max_keyframe_hops = _parse_int(
         os.environ.get("OBJECTX_SAM2_MERGE_KEYFRAME_HOPS"),
         cfg.get("merge_keyframe_hops", 1),
@@ -2019,7 +2604,16 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
         num_frames = len(frame_paths)
         scan_fidxs_in_order = [_frame_key(tmp_to_scan_fidx[i]) for i in range(num_frames)]
         ordered_keyframe_items = sorted(keyframe_masks.items())
-        num_tracks = _count_tracks(dict(ordered_keyframe_items), max_obj)
+        prepared_keyframe_items = []
+        for kf_idx, masks in ordered_keyframe_items:
+            prepared_masks = _prepare_keyframe_masks_for_propagation(
+                kf_idx=kf_idx,
+                masks=masks,
+                max_obj=max_obj,
+                frame_shape=(H, W),
+            )
+            prepared_keyframe_items.append((kf_idx, prepared_masks))
+        num_tracks = sum(len(masks) for _, masks in prepared_keyframe_items)
         packed_len = (H * W + 7) // 8
         track_id_dtype = np.uint16 if num_tracks < np.iinfo(np.uint16).max else np.int32
 
@@ -2054,9 +2648,8 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
             global_track_id = 1
 
             # Pass 1: store original binary tracks exactly as before, but on disk.
-            for key_pos, (kf_idx, masks) in enumerate(ordered_keyframe_items):
-                n_objs = min(len(masks), max_obj)
-                limited_masks = masks[:n_objs]
+            for key_pos, (kf_idx, limited_masks) in enumerate(prepared_keyframe_items):
+                n_objs = len(limited_masks)
                 print(f"  Keyframe {kf_idx}: {n_objs} objectes")
                 for chunk_start in range(0, n_objs, obj_chunk_size):
                     chunk_masks = limited_masks[chunk_start : chunk_start + obj_chunk_size]
@@ -2165,6 +2758,26 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
                 prune_peak_containment_threshold=fragment_prune_peak_containment_threshold,
                 prune_target_length_ratio=fragment_prune_target_length_ratio,
                 prune_target_area_ratio=fragment_prune_target_area_ratio,
+            )
+            id_mapping, orig_to_new = _prune_low_support_groups(
+                id_mapping=id_mapping,
+                track_masks=track_masks,
+                track_seen=track_seen,
+                track_areas=track_areas,
+                track_key_positions=track_key_positions,
+                prune_enabled=low_support_prune_enabled,
+                prune_max_frames=low_support_prune_max_frames,
+                prune_max_frame_span=low_support_prune_max_frame_span,
+                prune_area_mean_cap=low_support_prune_area_mean_cap,
+                prune_area_max_cap=low_support_prune_area_max_cap,
+                prune_max_orig_tracks=low_support_prune_max_orig_tracks,
+                prune_max_keyframe_support=low_support_prune_max_keyframe_support,
+                prune_min_shared_frames=low_support_prune_min_shared_frames,
+                prune_overlap_fraction=low_support_prune_overlap_fraction,
+                prune_containment_threshold=low_support_prune_containment_threshold,
+                prune_peak_containment_threshold=low_support_prune_peak_containment_threshold,
+                prune_target_length_ratio=low_support_prune_target_length_ratio,
+                prune_target_area_ratio=low_support_prune_target_area_ratio,
             )
             object_stats = _summarize_merged_groups(
                 id_mapping=id_mapping,

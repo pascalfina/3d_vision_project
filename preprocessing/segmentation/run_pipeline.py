@@ -5,7 +5,7 @@ Usage: python run_pipeline.py --config configs/pipeline.yaml
 import argparse, os, time, zipfile, torch, yaml
 from pathlib import Path
 from utils.io_utils import load_frames_from_scene, select_keyframes, select_keyframe_candidate_groups
-from segment_sam2 import segment_keyframes, propagate_masks
+from segment_sam2 import ensure_sam2_postprocess_ready, segment_keyframes, propagate_masks
 from keyframe_selection import refine_keyframes_with_mask_preview
 from depth_pose_must3r import run_must3r_on_scene
 from utils.object_registry import build_objects_predicted, save_objects_predicted
@@ -196,6 +196,12 @@ def run_scene(scene_id, scene_dir, cfg):
     if run_sam2:
         # STEP 2: SAM2 grid → masks on keyframes
         sc = cfg["sam2"]
+        require_postprocess = parse_bool(
+            os.environ.get("OBJECTX_SAM2_REQUIRE_POSTPROCESS"),
+            True,
+        )
+        if require_postprocess:
+            ensure_sam2_postprocess_ready(device=sc.get("device", device))
         if refine_keyframes and keyframe_strategy.startswith("quality_"):
             print(
                 "[Keyframes] preview candidates="

@@ -82,6 +82,7 @@ def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: l
 
     # Link persistent metadata and preprocessed artifacts.
     mask_dirname = resolve_mask_source()
+    mask_root = Path(os.environ.get("OBJECTX_MASK_ROOT", str(scratch_root)))
     link_names = [
         "3RScan.json",
         "objects.json",
@@ -97,7 +98,11 @@ def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: l
         if src.exists():
             os.symlink(src, dst)
 
-    mask_src = scratch_root / "files" / mask_dirname
+    mask_src = mask_root / "files" / mask_dirname
+    if not mask_src.exists():
+        fallback_mask_src = scratch_root / "files" / mask_dirname
+        if fallback_mask_src.exists():
+            mask_src = fallback_mask_src
     if mask_src.exists():
         actual_dst = tmp_root / "files" / mask_dirname
         safe_unlink(actual_dst)
@@ -107,7 +112,13 @@ def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: l
         if alias_dst != actual_dst:
             safe_unlink(alias_dst)
             os.symlink(mask_src, alias_dst)
-    print(f"[infer] using mask source {mask_dirname}", flush=True)
+    else:
+        print(
+            f"[infer] WARNING mask source {mask_dirname} not found in "
+            f"{mask_root / 'files' / mask_dirname} or {scratch_root / 'files' / mask_dirname}",
+            flush=True,
+        )
+    print(f"[infer] using mask source {mask_dirname} from {mask_src}", flush=True)
 
     # Write one-line split file for targeted inference, or mirror the requested split.
     split_file = tmp_root / "files" / f"{split}_resplit_scans.txt"
