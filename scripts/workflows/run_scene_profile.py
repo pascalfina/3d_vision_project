@@ -328,7 +328,10 @@ def build_pred_ready_action(repo_root: Path, profile: dict):
     add_cli_arg(cmd, "--split", sec.get("split", shared_value(profile, "split", "val")))
     add_cli_arg(cmd, "--knn", sec.get("knn", 4))
     add_cli_arg(cmd, "--min-voxels", sec.get("min_voxels", 32))
-    add_cli_arg(cmd, "--point-counts", sec.get("point_counts", [64, 128, 256, 512]))
+    point_counts = sec.get("point_counts", [64, 128, 256, 512])
+    if point_counts:
+        cmd.append("--point-counts")
+        cmd.extend(str(x) for x in point_counts)
     add_cli_arg(cmd, "--overwrite", sec.get("overwrite", False))
     log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
     return cmd, {}, log_path
@@ -369,11 +372,17 @@ def build_compare_action(repo_root: Path, profile: dict):
 
 def build_slat_action(repo_root: Path, profile: dict):
     sec = section(profile, "slat")
+    mask_source = sec.get("mask_source", profile_mask_source(repo_root, profile))
     env_updates = {
         "DATA_ROOT_DIR": sec.get("data_root", roots(profile).get("pred_ready")),
         "SPLIT": sec.get("split", shared_value(profile, "split", "val")),
         "SCENE_ID": sec.get("scene_id", shared_value(profile, "scene_id")),
+        "OBJECTX_MASK_SOURCE": mask_source,
     }
+    if mask_source != "gt_projection":
+        env_updates["OBJECTX_MASK_ROOT"] = sec.get(
+            "mask_root", roots(profile).get("reconstruction")
+        )
     for key, value in sec.get("env", {}).items():
         env_updates[key] = str(value)
     cmd = [
@@ -386,14 +395,20 @@ def build_slat_action(repo_root: Path, profile: dict):
 
 def build_u3dgs_action(repo_root: Path, profile: dict):
     sec = section(profile, "u3dgs")
+    mask_source = sec.get("mask_source", profile_mask_source(repo_root, profile))
     env_updates = {
         "DATA_ROOT_DIR": sec.get("data_root", roots(profile).get("pred_ready")),
         "SPLIT": sec.get("split", shared_value(profile, "split", "val")),
         "SCENE_ID": sec.get("scene_id", shared_value(profile, "scene_id")),
+        "OBJECTX_MASK_SOURCE": mask_source,
         "OBJECTX_INFER_CPU_DENSE_DECODE_FALLBACK": str(
             sec.get("cpu_dense_decode_fallback", 1)
         ),
     }
+    if mask_source != "gt_projection":
+        env_updates["OBJECTX_MASK_ROOT"] = sec.get(
+            "mask_root", roots(profile).get("reconstruction")
+        )
     for key, value in sec.get("env", {}).items():
         env_updates[key] = str(value)
     for key in sec.get("unset_env", []):
@@ -410,6 +425,7 @@ def build_u3dgs_action(repo_root: Path, profile: dict):
 
 def build_render_action(repo_root: Path, profile: dict):
     sec = section(profile, "render_bundle")
+    mask_source = sec.get("mask_source", profile_mask_source(repo_root, profile))
     cmd = [
         "bash",
         str(
@@ -429,8 +445,14 @@ def build_render_action(repo_root: Path, profile: dict):
     add_cli_arg(cmd, "--label", sec.get("label"))
     add_cli_arg(cmd, "--manifest", sec.get("manifest", artifacts(profile).get("manifest")))
     add_cli_arg(cmd, "--data-root", sec.get("data_root", roots(profile).get("baseline")))
+    if mask_source != "gt_projection":
+        add_cli_arg(
+            cmd,
+            "--mask-root",
+            sec.get("mask_root", roots(profile).get("reconstruction")),
+        )
     add_cli_arg(cmd, "--joint-ply", sec.get("joint_ply", artifacts(profile).get("joint_ply")))
-    add_cli_arg(cmd, "--mask-source", sec.get("mask_source", profile_mask_source(repo_root, profile)))
+    add_cli_arg(cmd, "--mask-source", mask_source)
     add_cli_arg(cmd, "--background-remove-mode", sec.get("background_remove_mode", "loaded"))
     add_cli_arg(cmd, "--pose-mode", sec.get("pose_mode", "raw"))
     add_cli_arg(cmd, "--lift-coord-system", sec.get("lift_coord_system", "pinhole"))
