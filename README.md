@@ -40,25 +40,33 @@ bash scripts/workflows/run_scene_profile.sh --list-profiles
 
 The current main profile is:
 
+- `cabinet_legacy_sam2_hybrid`
 - `cabinet_predready_v2_floorfix`
 - `oven_predready_v1`
 
-Run the full current `cabinet` pipeline:
+Run the full current `cabinet` SAM2-hybrid pipeline:
 
 ```bash
 cd /work/scratch/$USER/object-x
 
-bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix voxelise
-bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix build-pred-ready
-bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix validate-pred-ready
-bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix compare-arrangement
-bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix slat
-bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix u3dgs
-bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix render
+bash scripts/workflows/run_scene_profile.sh cabinet_legacy_sam2_hybrid segment-inputs
+bash scripts/workflows/run_scene_profile.sh cabinet_legacy_sam2_hybrid voxelise
+bash scripts/workflows/run_scene_profile.sh cabinet_legacy_sam2_hybrid build-pred-ready
+bash scripts/workflows/run_scene_profile.sh cabinet_legacy_sam2_hybrid validate-pred-ready
+bash scripts/workflows/run_scene_profile.sh cabinet_legacy_sam2_hybrid compare-arrangement
+bash scripts/workflows/run_scene_profile.sh cabinet_legacy_sam2_hybrid slat
+bash scripts/workflows/run_scene_profile.sh cabinet_legacy_sam2_hybrid u3dgs
+bash scripts/workflows/run_scene_profile.sh cabinet_legacy_sam2_hybrid render
 ```
+
+The older GT-mask profiles are still useful for comparison and ablations:
+
+- `cabinet_predready_v2_floorfix`
+- `oven_predready_v1`
 
 What each command does:
 
+- `segment-inputs`: runs the SAM2 keyframe selection, propagation, merge/fusion, and writes `files/sam2_projection/`, `objects_sam2.json`, and `scenes_sam2/`
 - `voxelise`: runs the current "2.5" reconstruction path, i.e. builds object geometry from masks + depth + poses and writes `gs_annotations`
 - `build-pred-ready`: rebuilds `objects.json` and `files/orig/data.pkl.gz` from the reconstructed objects
 - `validate-pred-ready`: checks that the new scene root is internally consistent and dataset-loadable
@@ -70,10 +78,31 @@ What each command does:
 Useful extras:
 
 ```bash
-bash scripts/workflows/run_scene_profile.sh cabinet_predready_v2_floorfix u3dgs --dry-run
+bash scripts/workflows/run_scene_profile.sh cabinet_legacy_sam2_hybrid u3dgs --dry-run
 ```
 
 - `--dry-run` prints the exact underlying command without executing it
+
+### SAM2 Hybrid Notes
+
+The `cabinet_legacy_sam2_hybrid` profile is the current end-to-end SAM path:
+
+- `segment-inputs` writes SAM2 masks to `files/sam2_projection/` inside the reconstruction root
+- `voxelise` consumes those SAM2 masks and writes reconstructed object geometry to `files/gs_annotations/<scene>/`
+- `build-pred-ready` and `validate-pred-ready` rebuild the downstream scene graph from those reconstructed objects
+- `slat`, `u3dgs`, and `render` now also use `sam2_projection`
+
+Important implementation detail:
+
+- the pred-ready root stores the rebuilt scene graph and staged scene files
+- the SAM2 mask pickles still live in the reconstruction root
+- the workflow now forwards both automatically, so `slat`, `u3dgs`, and `render` read `sam2_projection` from the reconstruction root while keeping the pred-ready root as the main inference root
+
+That means the current SAM2-hybrid workflow is:
+
+```text
+segment-inputs -> voxelise -> build-pred-ready -> validate/compare -> slat -> u3dgs -> render
+```
 
 ### How To Add A New Scene Profile
 
