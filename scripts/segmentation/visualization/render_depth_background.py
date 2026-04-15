@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import colorsys
 import json
 import os
 import shutil
@@ -138,10 +139,10 @@ def voxel_to_world(voxel_indices: np.ndarray, mean: np.ndarray, scale: float) ->
 
 
 def subsample(points: np.ndarray, colors: np.ndarray, max_points: int):
-    if len(points) <= max_points:
+    if max_points <= 0 or len(points) <= max_points:
         return points, colors
-    step = max(1, len(points) // max_points)
-    return points[::step], colors[::step]
+    indices = np.linspace(0, len(points) - 1, num=max_points, dtype=np.int64)
+    return points[indices], colors[indices]
 
 
 def load_object_points(root: Path, scan_id: str, obj_id: int):
@@ -151,9 +152,19 @@ def load_object_points(root: Path, scan_id: str, obj_id: int):
     return voxel_to_world(vox, ms["mean"].astype(np.float32), float(ms["scale"]))
 
 
-def load_objects_with_colors(root: Path, scan_id: str, obj_ids: list[int]):
-    palette = plt.get_cmap("tab20")
-    pts_all, cols_all, loaded = [], [], []
+def generate_object_color(index: int) -> np.ndarray:
+    # Use a golden-ratio hue sequence so neighboring objects remain visually distinct.
+    hue = (0.618033988749895 * index) % 1.0
+    saturation = 0.72 + 0.18 * ((index % 3) / 2.0)
+    value = 0.88 + 0.10 * ((index % 2))
+    return np.array(
+        colorsys.hsv_to_rgb(hue, min(saturation, 0.95), min(value, 0.98)),
+        dtype=np.float32,
+    )
+
+
+def load_object_cloud_specs(root: Path, scan_id: str, obj_ids: list[int]):
+    specs = []
     for idx, obj_id in enumerate(obj_ids):
         obj_dir = root / "files" / "gs_annotations" / scan_id / str(obj_id)
         if not (obj_dir / "voxel_output_dense.npz").exists():
@@ -161,13 +172,29 @@ def load_objects_with_colors(root: Path, scan_id: str, obj_ids: list[int]):
         if not (obj_dir / "mean_scale_dense.npz").exists():
             continue
         pts = load_object_points(root, scan_id, obj_id)
-        color = np.array(palette(idx % 20)[:3], dtype=np.float32)
+        color = generate_object_color(idx)
+        specs.append(
+            {
+                "obj_id": int(obj_id),
+                "points": pts,
+                "color": color,
+                "point_count": int(len(pts)),
+            }
+        )
+    if not specs:
+        raise FileNotFoundError(f"No replacement objects found for {scan_id}: {obj_ids}")
+    return specs
+
+
+def load_objects_with_colors(root: Path, scan_id: str, obj_ids: list[int]):
+    pts_all, cols_all, loaded = [], [], []
+    for spec in load_object_cloud_specs(root, scan_id, obj_ids):
+        pts = spec["points"]
+        color = spec["color"]
         cols = np.tile(color[None, :], (len(pts), 1))
         pts_all.append(pts)
         cols_all.append(cols)
-        loaded.append(int(obj_id))
-    if not pts_all:
-        raise FileNotFoundError(f"No replacement objects found for {scan_id}: {obj_ids}")
+        loaded.append(int(spec["obj_id"]))
     return np.concatenate(pts_all, axis=0), np.concatenate(cols_all, axis=0), loaded
 
 
@@ -270,6 +297,7 @@ def build_background_from_depth(
             {
                 "OBJECTX_VOXEL_FRAME_SELECTION": frame_selection,
                 "OBJECTX_VOXEL_LIFT_COORD_SYSTEM": lift_coord_system,
+                "OBJECTX_VOXEL_POSE_MODE": pose_mode,
             }
         ):
             selected_frame_ids, selected_masks = vf._select_object_frames(
@@ -277,6 +305,12 @@ def build_background_from_depth(
                 vis_masks,
                 extrinsics=extrinsics,
                 max_views=max_views,
+            )
+            dropped_ids = vf._compute_scene_pose_jump_dropped(frame_ids, extrinsics)
+            selected_frame_ids, selected_masks = vf._filter_frames_by_pose_jumps(
+                selected_frame_ids,
+                selected_masks,
+                dropped_ids=dropped_ids,
             )
 
         depth_width = int(depth_intrinsics["width"])

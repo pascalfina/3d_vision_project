@@ -195,6 +195,17 @@ def link_compatibility_inputs(
         raise FileNotFoundError(f"Missing scene directory for {scene_id}")
     stage_scene(scene_src, scenes_dir / scene_id)
 
+    baseline_scene_src = baseline_root / "scenes" / scene_id
+    if baseline_scene_src.exists() and baseline_scene_src != scene_src:
+        dst_scan_dir = scenes_dir / scene_id
+        for item in baseline_scene_src.iterdir():
+            if item.name in {"sequence", "sequence.zip"}:
+                continue
+            dst_item = dst_scan_dir / item.name
+            if dst_item.exists() or dst_item.is_symlink():
+                continue
+            ensure_symlink(item, dst_item)
+
     scannet_classes = baseline_root / "files" / "scannet40_classes.txt"
     if scannet_classes.exists():
         ensure_symlink(scannet_classes, files_dir / "scannet40_classes.txt")

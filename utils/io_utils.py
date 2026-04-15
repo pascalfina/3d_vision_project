@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import cv2
 from pathlib import Path
 from typing import List, Tuple
 
@@ -8,15 +9,46 @@ def save_masks(masks_list, output_dir, frame_idx, save_format="jpg", scene_id=""
     # This will be called differently now
     pass
 
-def save_depth(depth, output_dir, frame_idx):
-    """Save depth as .pgm."""
-    depth_mm = (depth * 1000).astype(np.uint16)  # Convert to mm
-    cv2.imwrite(os.path.join(output_dir, f"frame-{frame_idx:04d}.depth.pgm"), depth_mm)
+def _resolve_frame_name(frame_idx=None, frame_id=None):
+    if frame_id is not None:
+        return str(frame_id)
+    if frame_idx is None:
+        raise ValueError("Either frame_idx or frame_id must be provided.")
+    return f"{int(frame_idx):06d}"
 
-def save_poses(poses, output_dir, scene_id):
+
+def save_depth(depth, output_dir, frame_idx=None, frame_id=None):
+    """Save depth as .pgm."""
+    frame_name = _resolve_frame_name(frame_idx=frame_idx, frame_id=frame_id)
+    depth_mm = (depth * 1000).astype(np.uint16)  # Convert to mm
+    cv2.imwrite(os.path.join(output_dir, f"frame-{frame_name}.depth.pgm"), depth_mm)
+
+
+def save_depth_raw(depth, output_dir, frame_idx=None, frame_id=None):
+    """Save raw float depth as .npy for downstream fallback consumers."""
+    frame_name = _resolve_frame_name(frame_idx=frame_idx, frame_id=frame_id)
+    np.save(
+        os.path.join(output_dir, f"frame-{frame_name}.depth_raw.npy"),
+        np.asarray(depth, dtype=np.float32),
+    )
+
+
+def save_confidence(confidence, output_dir, frame_idx=None, frame_id=None):
+    """Save MUSt3R confidence as .npy."""
+    frame_name = _resolve_frame_name(frame_idx=frame_idx, frame_id=frame_id)
+    np.save(
+        os.path.join(output_dir, f"frame-{frame_name}.conf.npy"),
+        np.asarray(confidence, dtype=np.float32),
+    )
+
+def save_poses(poses, output_dir, scene_id=None, frame_ids=None):
     """Save poses per frame as .txt."""
     for i, pose in enumerate(poses):
-        np.savetxt(os.path.join(output_dir, f"frame-{i:04d}.pose.txt"), pose)
+        frame_name = _resolve_frame_name(
+            frame_idx=i,
+            frame_id=(frame_ids[i] if frame_ids is not None else None),
+        )
+        np.savetxt(os.path.join(output_dir, f"frame-{frame_name}.pose.txt"), pose)
 
 def load_frames_from_scene(scene_dir, ext=".color.jpg", resize=None):
     """Load frames from scene directory."""

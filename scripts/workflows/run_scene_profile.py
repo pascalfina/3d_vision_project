@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 DEFAULT_ACTIONS = [
+    "must3r",
     "segment-inputs",
     "voxelise",
     "build-pred-ready",
@@ -256,6 +257,8 @@ def build_voxelise_action(repo_root: Path, profile: dict):
     scene_source_dirname = sec.get("scene_source_dirname")
     if scene_source_dirname:
         env_updates["OBJECTX_SCENE_SOURCE_DIRNAME"] = str(scene_source_dirname)
+    if sec.get("override", False):
+        env_updates["OBJECTX_VOXEL_OVERRIDE"] = "1"
     for key, value in sec.get("env", {}).items():
         env_updates[key] = str(value)
     cmd = [
@@ -296,6 +299,48 @@ def build_segment_inputs_action(repo_root: Path, profile: dict):
         "OBJECTX_SEG_RUN_REGISTRY": str(
             int(sec.get("run_registry", variant.get("run_registry", True)))
         ),
+        "MUST3R_PATH": sec.get("must3r_path", str(repo_root / "dependencies" / "must3r")),
+    }
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+
+    cmd = [
+        sys.executable,
+        "-u",
+        str(repo_root / "preprocessing" / "segmentation" / "run_pipeline.py"),
+        "--config",
+        sec.get("config", "preprocessing/segmentation/pipeline.yaml"),
+        "--scene",
+        sec.get("scene_id", shared_value(profile, "scene_id")),
+    ]
+    log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
+    return cmd, env_updates, log_path
+
+
+def build_must3r_action(repo_root: Path, profile: dict):
+    sec = section(profile, "must3r")
+    variant = input_variant_settings(repo_root, profile)
+    if not sec and not variant.get("run_must3r", False):
+        raise ValueError(
+            f"Profile '{profile.get('name', 'unknown')}' uses variant '{input_variant_name(profile)}' "
+            "which does not define a MUSt3R stage."
+        )
+
+    env_updates = {
+        "OBJECTX_SEG_INPUT_ROOT": sec.get("input_root", roots(profile).get("baseline")),
+        "OBJECTX_SEG_OUTPUT_ROOT": sec.get("output_root", roots(profile).get("reconstruction")),
+        "OBJECTX_SEG_MASK_DIRNAME": sec.get(
+            "mask_dirname", variant.get("mask_output_dirname", "gt_projection_predicted")
+        ),
+        "OBJECTX_SEG_OBJECTS_FILENAME": sec.get(
+            "objects_filename", variant.get("objects_filename", "objects_predicted.json")
+        ),
+        "OBJECTX_SEG_SCENES_DIRNAME": sec.get(
+            "scenes_dirname", variant.get("scenes_dirname", "scenes_predicted")
+        ),
+        "OBJECTX_SEG_RUN_MUST3R": str(int(sec.get("run_must3r", True))),
+        "OBJECTX_SEG_RUN_SAM2": str(int(sec.get("run_sam2", False))),
+        "OBJECTX_SEG_RUN_REGISTRY": str(int(sec.get("run_registry", False))),
         "MUST3R_PATH": sec.get("must3r_path", str(repo_root / "dependencies" / "must3r")),
     }
     for key, value in sec.get("env", {}).items():
@@ -434,6 +479,9 @@ def build_u3dgs_action(repo_root: Path, profile: dict):
 def build_render_action(repo_root: Path, profile: dict):
     sec = section(profile, "render_bundle")
     mask_source = sec.get("mask_source", profile_mask_source(repo_root, profile))
+    env_updates = {}
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
     cmd = [
         "bash",
         str(
@@ -481,10 +529,11 @@ def build_render_action(repo_root: Path, profile: dict):
     add_cli_arg(cmd, "--joint-point-size", sec.get("joint_point_size"))
     add_cli_arg(cmd, "--out-dir", sec.get("out_dir"))
     log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
-    return cmd, {}, log_path
+    return cmd, env_updates, log_path
 
 
 ACTION_BUILDERS = {
+    "must3r": build_must3r_action,
     "segment-inputs": build_segment_inputs_action,
     "voxelise": build_voxelise_action,
     "build-pred-ready": build_pred_ready_action,

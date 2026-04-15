@@ -8,11 +8,140 @@ from glob import glob
 from typing import Any, Dict, Tuple
 
 import numpy as np
-import open3d as o3d
 from plyfile import PlyData
 from scipy.spatial.transform import Rotation as R
 
 from utils import common
+
+
+def resolve_pose_mode(pose_mode: str) -> str:
+    mode = (pose_mode or "raw").strip().lower()
+    aliases = {
+        "raw": "raw",
+        "direct": "raw",
+        "camera_to_world": "raw",
+        "cam2world": "raw",
+        "invert": "invert",
+        "inverse": "invert",
+        "world_to_camera": "invert",
+        "world2cam": "invert",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in {"raw", "invert"}:
+        raise ValueError(
+            f"Unsupported pose mode {pose_mode!r}; expected one of raw/invert"
+        )
+    return mode
+
+
+def pose_to_camera_to_world(pose: np.ndarray, pose_mode: str = "raw") -> np.ndarray:
+    pose_arr = np.array(pose, copy=True)
+    if resolve_pose_mode(pose_mode) == "invert":
+        pose_arr = np.linalg.inv(pose_arr)
+    return pose_arr.astype(np.float32)
+
+
+def camera_center_from_pose(pose: np.ndarray, pose_mode: str = "raw") -> np.ndarray:
+    return pose_to_camera_to_world(pose, pose_mode=pose_mode)[:3, 3].astype(np.float32)
+
+
+def _rotation_delta_degrees(
+    pose_a: np.ndarray, pose_b: np.ndarray, pose_mode: str = "raw"
+) -> float:
+    c2w_a = pose_to_camera_to_world(pose_a, pose_mode=pose_mode)
+    c2w_b = pose_to_camera_to_world(pose_b, pose_mode=pose_mode)
+    rel_rot = c2w_a[:3, :3].T @ c2w_b[:3, :3]
+    return float(np.linalg.norm(R.from_matrix(rel_rot).as_rotvec()) * (180.0 / np.pi))
+
+
+def _combine_positive_limits(*values: float) -> float:
+    positive = [float(v) for v in values if v is not None and float(v) > 0.0]
+    if not positive:
+        return 0.0
+    return float(min(positive))
+
+
+def detect_pose_jump_outliers(
+    frame_ids,
+    poses_by_frame,
+    pose_mode: str = "raw",
+    max_translation: float = 0.0,
+    max_z_translation: float = 0.0,
+    max_rotation_deg: float = 0.0,
+    relative_step_factor: float = 0.0,
+):
+    frame_ids = [str(frame_id) for frame_id in frame_ids]
+    if len(frame_ids) <= 1:
+        return {
+            "pose_mode": resolve_pose_mode(pose_mode),
+            "kept_frame_ids": frame_ids,
+            "dropped_frame_ids": [],
+            "dropped": [],
+            "median_step": 0.0,
+            "raw_step_p95": 0.0,
+            "translation_limit": 0.0,
+        }
+
+    centers = np.stack(
+        [camera_center_from_pose(poses_by_frame[frame_id], pose_mode=pose_mode) for frame_id in frame_ids],
+        axis=0,
+    )
+    raw_steps = np.linalg.norm(np.diff(centers, axis=0), axis=1)
+    positive_steps = raw_steps[raw_steps > 1e-6]
+    median_step = float(np.median(positive_steps)) if positive_steps.size else 0.0
+    raw_step_p95 = float(np.percentile(raw_steps, 95)) if raw_steps.size else 0.0
+    dynamic_limit = (
+        float(relative_step_factor) * median_step
+        if float(relative_step_factor) > 0.0 and median_step > 0.0
+        else 0.0
+    )
+    translation_limit = _combine_positive_limits(max_translation, dynamic_limit)
+
+    kept_indices = [0]
+    dropped = []
+    last_kept_idx = 0
+    for idx in range(1, len(frame_ids)):
+        frame_id = frame_ids[idx]
+        prev_frame_id = frame_ids[last_kept_idx]
+        center_delta = centers[idx] - centers[last_kept_idx]
+        step = float(np.linalg.norm(center_delta))
+        z_step = float(abs(center_delta[2]))
+        rot_deg = _rotation_delta_degrees(
+            poses_by_frame[prev_frame_id],
+            poses_by_frame[frame_id],
+            pose_mode=pose_mode,
+        )
+        reasons = []
+        if translation_limit > 0.0 and step > translation_limit:
+            reasons.append("translation")
+        if float(max_z_translation) > 0.0 and z_step > float(max_z_translation):
+            reasons.append("z")
+        if float(max_rotation_deg) > 0.0 and rot_deg > float(max_rotation_deg):
+            reasons.append("rotation")
+        if reasons:
+            dropped.append(
+                {
+                    "frame_id": frame_id,
+                    "prev_frame_id": prev_frame_id,
+                    "step": step,
+                    "z_step": z_step,
+                    "rot_deg": rot_deg,
+                    "reasons": reasons,
+                }
+            )
+            continue
+        kept_indices.append(idx)
+        last_kept_idx = idx
+
+    return {
+        "pose_mode": resolve_pose_mode(pose_mode),
+        "kept_frame_ids": [frame_ids[idx] for idx in kept_indices],
+        "dropped_frame_ids": [item["frame_id"] for item in dropped],
+        "dropped": dropped,
+        "median_step": median_step,
+        "raw_step_p95": raw_step_p95,
+        "translation_limit": translation_limit,
+    }
 
 
 def get_original_scan(scan: str) -> str:
@@ -127,6 +256,7 @@ def load_ply_data(data_dir, scan_id, label_file_name):
 
 
 def load_ply_mesh(data_dir, scan_id, label_file_name):
+    import open3d as o3d
     filename_in = osp.join(data_dir, scan_id, label_file_name)
     mesh = o3d.io.read_triangle_mesh(filename_in)
     return mesh
@@ -751,6 +881,7 @@ def get_scans_id(data_item: Dict[str, Any]) -> np.array:
 
 
 def load_mesh(data_dir: str, scan_id: str, load_seg: bool):
+    import open3d as o3d
     mesh_path = osp.join(data_dir, "scenes", scan_id, "mesh.refined.v2.obj")
     mesh = o3d.io.read_triangle_mesh(mesh_path)
     if load_seg:

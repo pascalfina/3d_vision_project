@@ -100,6 +100,26 @@ def _log_rss(prefix: str) -> None:
     _LOGGER.info("%s | max_rss_mb=%.1f", prefix, rss_mb)
 
 
+def _load_object_depth_map(
+    root_dir: str,
+    scan_id: str,
+    frame_id: str,
+    depth_shift: float,
+) -> np.ndarray:
+    depth_source = (
+        os.getenv("OBJECTX_VOXEL_DEPTH_SOURCE", "default").strip().lower()
+    )
+    sequence_dir = osp.join(root_dir, "scenes", scan_id, "sequence")
+    if depth_source in {"must3r_raw_if_available", "raw_if_available"}:
+        raw_path = osp.join(sequence_dir, f"frame-{frame_id}.depth_raw.npy")
+        if osp.exists(raw_path):
+            return np.load(raw_path).astype(np.float32)
+    return scan3r.load_depth_map(
+        osp.join(sequence_dir, f"frame-{frame_id}.depth.pgm"),
+        depth_shift,
+    )
+
+
 def _save_featured_voxel(
     voxel: torch.Tensor, output_file: str = "voxel_output_dense.npz"
 ):
@@ -357,6 +377,10 @@ def _resolve_frame_selection_mode() -> str:
     return aliases.get(source, "all")
 
 
+def _resolve_pose_mode() -> str:
+    return scan3r.resolve_pose_mode(os.getenv("OBJECTX_VOXEL_POSE_MODE") or "raw")
+
+
 def _normalize_scores(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float32)
     if values.size == 0:
@@ -369,8 +393,68 @@ def _normalize_scores(values: np.ndarray) -> np.ndarray:
 
 
 def _camera_center_from_extrinsic(extrinsic: np.ndarray) -> np.ndarray:
-    camera_to_world = np.linalg.inv(extrinsic)
-    return camera_to_world[:3, 3].astype(np.float32)
+    return scan3r.camera_center_from_pose(extrinsic, pose_mode=_resolve_pose_mode())
+
+
+def _compute_scene_pose_jump_dropped(
+    frame_ids: list[str],
+    extrinsics: Dict[str, np.ndarray],
+) -> set[str]:
+    max_translation = float(os.getenv("OBJECTX_VOXEL_POSE_JUMP_MAX_TRANSLATION", "0"))
+    max_z_translation = float(os.getenv("OBJECTX_VOXEL_POSE_JUMP_MAX_Z_TRANSLATION", "0"))
+    max_rotation_deg = float(os.getenv("OBJECTX_VOXEL_POSE_JUMP_MAX_ROTATION_DEG", "0"))
+    relative_factor = float(os.getenv("OBJECTX_VOXEL_POSE_JUMP_RELATIVE_FACTOR", "0"))
+    if (
+        max_translation <= 0.0
+        and max_z_translation <= 0.0
+        and max_rotation_deg <= 0.0
+        and relative_factor <= 0.0
+    ):
+        return set()
+
+    ordered_ids = [fid for fid in frame_ids if fid in extrinsics]
+    if len(ordered_ids) < 2:
+        return set()
+
+    pose_filter = scan3r.detect_pose_jump_outliers(
+        ordered_ids,
+        extrinsics,
+        pose_mode=_resolve_pose_mode(),
+        max_translation=max_translation,
+        max_z_translation=max_z_translation,
+        max_rotation_deg=max_rotation_deg,
+        relative_step_factor=relative_factor,
+    )
+    dropped_ids = set(pose_filter["dropped_frame_ids"])
+    preview = ",".join(pose_filter["dropped_frame_ids"][: min(8, len(dropped_ids))])
+    _LOGGER.info(
+        "[2.5] scene pose_jump_filter kept=%s/%s dropped=%s median_step=%.4f p95_step=%.4f limit=%.4f ids=%s",
+        len(ordered_ids) - len(dropped_ids),
+        len(ordered_ids),
+        len(dropped_ids),
+        float(pose_filter["median_step"]),
+        float(pose_filter["raw_step_p95"]),
+        float(pose_filter["translation_limit"]),
+        preview,
+    )
+    return dropped_ids
+
+
+def _filter_frames_by_pose_jumps(
+    frame_ids: list[str],
+    masks: list[np.ndarray],
+    dropped_ids: set[str],
+) -> tuple[list[str], list[np.ndarray]]:
+    if not dropped_ids:
+        return frame_ids, masks
+    filtered_ids = []
+    filtered_masks = []
+    for frame_id, mask in zip(frame_ids, masks):
+        if frame_id in dropped_ids:
+            continue
+        filtered_ids.append(frame_id)
+        filtered_masks.append(mask)
+    return filtered_ids, filtered_masks
 
 
 def _select_object_frames(
@@ -508,25 +592,11 @@ def _resolve_object_source() -> str:
 def _resolve_pose_camera_to_world(
     extrinsics: Dict[str, np.ndarray], frame_ids: list[str]
 ) -> list[np.ndarray]:
-    mode = (os.getenv("OBJECTX_VOXEL_POSE_MODE") or "raw").strip().lower()
-    aliases = {
-        "raw": "raw",
-        "direct": "raw",
-        "camera_to_world": "raw",
-        "cam2world": "raw",
-        "invert": "invert",
-        "inverse": "invert",
-        "world_to_camera": "invert",
-        "world2cam": "invert",
-    }
-    mode = aliases.get(mode, mode)
-    if mode not in {"raw", "invert"}:
-        raise ValueError(
-            f"Unsupported OBJECTX_VOXEL_POSE_MODE={mode!r}; expected 'raw' or 'invert'"
-        )
-    if mode == "raw":
-        return [np.array(extrinsics[frame_id], copy=True) for frame_id in frame_ids]
-    return [np.linalg.inv(extrinsics[frame_id]) for frame_id in frame_ids]
+    pose_mode = _resolve_pose_mode()
+    return [
+        scan3r.pose_to_camera_to_world(extrinsics[frame_id], pose_mode=pose_mode)
+        for frame_id in frame_ids
+    ]
 
 
 def _invert_pose_list(poses: list[np.ndarray]) -> list[np.ndarray]:
@@ -1054,6 +1124,7 @@ def voxelise_features(
     extrinsics = scan3r.load_frame_poses(
         data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
+    pose_jump_dropped_ids = _compute_scene_pose_jump_dropped(frame_idxs, extrinsics)
     intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
     filter_unobserved = os.getenv("OBJECTX_VOXEL_FILTER_UNOBSERVED", "0").lower() not in {
         "0",
@@ -1165,6 +1236,11 @@ def voxelise_features(
                 extrinsics=extrinsics,
                 max_views=max_views,
             )
+            selected_frame_ids, selected_masks = _filter_frames_by_pose_jumps(
+                selected_frame_ids,
+                selected_masks,
+                dropped_ids=pose_jump_dropped_ids,
+            )
             min_selected_frames = int(os.getenv("OBJECTX_VOXEL_MIN_SELECTED_FRAMES", "0"))
             if len(selected_frame_ids) < max(0, min_selected_frames):
                 _LOGGER.info(
@@ -1186,15 +1262,11 @@ def voxelise_features(
                 rendered_obj.append(image_t * torch.from_numpy(obj_mask[None, :, :]))
                 if requires_depth:
                     if frame_id not in depth_map_cache:
-                        depth_map_cache[frame_id] = scan3r.load_depth_map(
-                            osp.join(
-                                root_dir,
-                                "scenes",
-                                scan_id,
-                                "sequence",
-                                f"frame-{frame_id}.depth.pgm",
-                            ),
-                            depth_shift,
+                        depth_map_cache[frame_id] = _load_object_depth_map(
+                            root_dir=root_dir,
+                            scan_id=scan_id,
+                            frame_id=frame_id,
+                            depth_shift=depth_shift,
                         )
                     selected_depths.append(depth_map_cache[frame_id])
 

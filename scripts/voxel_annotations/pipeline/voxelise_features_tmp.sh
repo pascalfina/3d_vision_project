@@ -31,10 +31,15 @@ export MPLCONFIGDIR="$CACHE_ROOT/matplotlib"
 export OBJECTX_DINOV2_HUB_DIR="$TORCH_HOME/hub/facebookresearch_dinov2_main"
 
 cd "$REPO_ROOT"
+VOXELISE_EXTRA_ARGS=()
+if [[ "${OBJECTX_VOXEL_OVERRIDE:-0}" == "1" ]]; then
+  VOXELISE_EXTRA_ARGS+=(--override)
+fi
 python -u scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py \
   --repo-root "$REPO_ROOT" \
   --scratch-root "$SCRATCH_ROOT" \
   --tmp-root "$TMP_VOX_ROOT" \
   --config "$REPO_ROOT/preprocessing/voxel_anno/voxel_anno.yaml" \
   --split "$SPLIT" \
-  --max-scans "$MAX_SCANS"
+  --max-scans "$MAX_SCANS" \
+  "${VOXELISE_EXTRA_ARGS[@]}"
