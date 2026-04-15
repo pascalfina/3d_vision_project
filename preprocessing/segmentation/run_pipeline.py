@@ -180,10 +180,101 @@ def run_scene(scene_id, scene_dir, cfg):
     if run_must3r:
         # STEP 1: MUSt3R → poses + depth (run first to free VRAM before SAM2)
         mc = cfg["must3r"]
+        must3r_kwargs = {
+            "resolution": env_or_default(
+                "OBJECTX_MUST3R_RESOLUTION", mc.get("resolution", 512), int
+            ),
+            "min_conf_thr": env_or_default(
+                "OBJECTX_MUST3R_MIN_CONF_THR", mc.get("min_conf_thr", 1.5), float
+            ),
+            "execution_mode": env_or_default(
+                "OBJECTX_MUST3R_EXECUTION_MODE",
+                mc.get("execution_mode", "linseq"),
+                str,
+            ),
+            "num_mem_images": env_or_default(
+                "OBJECTX_MUST3R_NUM_MEM_IMAGES", mc.get("num_mem_images", 50), int
+            ),
+            "num_refinements_iterations": env_or_default(
+                "OBJECTX_MUST3R_NUM_REFINEMENTS_ITERATIONS",
+                mc.get("num_refinements_iterations", 0),
+                int,
+            ),
+            "vidseq_local_context_size": env_or_default(
+                "OBJECTX_MUST3R_VIDSEQ_LOCAL_CONTEXT_SIZE",
+                mc.get("vidseq_local_context_size", 0),
+                int,
+            ),
+            "keyframe_interval": env_or_default(
+                "OBJECTX_MUST3R_KEYFRAME_INTERVAL",
+                mc.get("keyframe_interval", 3),
+                int,
+            ),
+            "slam_local_context_size": env_or_default(
+                "OBJECTX_MUST3R_SLAM_LOCAL_CONTEXT_SIZE",
+                mc.get("slam_local_context_size", 0),
+                int,
+            ),
+            "subsample": env_or_default(
+                "OBJECTX_MUST3R_SUBSAMPLE", mc.get("subsample", 2), int
+            ),
+            "min_conf_keyframe": env_or_default(
+                "OBJECTX_MUST3R_MIN_CONF_KEYFRAME",
+                mc.get("min_conf_keyframe", 1.5),
+                float,
+            ),
+            "keyframe_overlap_thr": env_or_default(
+                "OBJECTX_MUST3R_KEYFRAME_OVERLAP_THR",
+                mc.get("keyframe_overlap_thr", 0.05),
+                float,
+            ),
+            "overlap_percentile": env_or_default(
+                "OBJECTX_MUST3R_OVERLAP_PERCENTILE",
+                mc.get("overlap_percentile", 85),
+                float,
+            ),
+            "depth_mask_mode": env_or_default(
+                "OBJECTX_MUST3R_DEPTH_MASK_MODE",
+                mc.get("depth_mask_mode", "hard"),
+                str,
+            ),
+            "save_raw_depth": parse_bool(
+                os.environ.get("OBJECTX_MUST3R_SAVE_RAW_DEPTH"),
+                mc.get("save_raw_depth", False),
+            ),
+            "save_confidence_maps": parse_bool(
+                os.environ.get("OBJECTX_MUST3R_SAVE_CONFIDENCE"),
+                mc.get("save_confidence_maps", False),
+            ),
+            "pose_jump_max_translation": env_or_default(
+                "OBJECTX_MUST3R_POSE_JUMP_MAX_TRANSLATION",
+                mc.get("pose_jump_max_translation", 0.0),
+                float,
+            ),
+            "pose_jump_max_z_translation": env_or_default(
+                "OBJECTX_MUST3R_POSE_JUMP_MAX_Z_TRANSLATION",
+                mc.get("pose_jump_max_z_translation", 0.0),
+                float,
+            ),
+            "pose_jump_max_rotation_deg": env_or_default(
+                "OBJECTX_MUST3R_POSE_JUMP_MAX_ROTATION_DEG",
+                mc.get("pose_jump_max_rotation_deg", 0.0),
+                float,
+            ),
+            "pose_jump_relative_factor": env_or_default(
+                "OBJECTX_MUST3R_POSE_JUMP_RELATIVE_FACTOR",
+                mc.get("pose_jump_relative_factor", 0.0),
+                float,
+            ),
+            "zero_invalid_pose_depths": parse_bool(
+                os.environ.get("OBJECTX_MUST3R_ZERO_INVALID_POSE_DEPTHS"),
+                mc.get("zero_invalid_pose_depths", False),
+            ),
+        }
         _, depths = run_must3r_on_scene(
             frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
             dirs["pointmaps"] if mc.get("output_pointmaps") else None,
-            scene_id, mc.get("resolution", 512), mc.get("min_conf_thr",1.5), device)
+            scene_id, device=device, **must3r_kwargs)
         print(frames[0].shape[:2])
         print(depths[0].shape)
     else:
