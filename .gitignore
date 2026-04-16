@@ -54,4 +54,6 @@ slurm-*.err
 
 # vendored dependency build artifacts
 dependencies/**
+!dependencies/must3r/
+!dependencies/must3r/**
 vis/rendered
