@@ -56,4 +56,6 @@ slurm-*.err
 dependencies/**
 !dependencies/must3r/
 !dependencies/must3r/**
+!dependencies/mast3r/
+!dependencies/mast3r/**
 vis/rendered
