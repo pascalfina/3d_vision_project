@@ -99,11 +99,11 @@ def detect_pose_jump_outliers(
 
     kept_indices = [0]
     dropped = []
-    last_kept_idx = 0
     for idx in range(1, len(frame_ids)):
         frame_id = frame_ids[idx]
-        prev_frame_id = frame_ids[last_kept_idx]
-        center_delta = centers[idx] - centers[last_kept_idx]
+        prev_idx = idx - 1
+        prev_frame_id = frame_ids[prev_idx]
+        center_delta = centers[idx] - centers[prev_idx]
         step = float(np.linalg.norm(center_delta))
         z_step = float(abs(center_delta[2]))
         rot_deg = _rotation_delta_degrees(
@@ -131,7 +131,6 @@ def detect_pose_jump_outliers(
             )
             continue
         kept_indices.append(idx)
-        last_kept_idx = idx
 
     return {
         "pose_mode": resolve_pose_mode(pose_mode),
@@ -266,6 +265,7 @@ def load_pose(data_dir, scan_id, frame_id):
     pose_path = osp.join(
         data_dir, "scenes", scan_id, "sequence", "frame-{}.pose.txt".format(frame_id)
     )
+    
     pose = np.genfromtxt(pose_path)
     return pose
 

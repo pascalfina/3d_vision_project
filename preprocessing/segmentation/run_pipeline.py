@@ -8,6 +8,7 @@ from utils.io_utils import load_frames_from_scene, select_keyframes, select_keyf
 from segment_sam2 import ensure_sam2_postprocess_ready, segment_keyframes, propagate_masks
 from keyframe_selection import refine_keyframes_with_mask_preview
 from depth_pose_must3r import run_must3r_on_scene
+from depth_pose_mast3r_sfm import run_mast3r_sfm_on_scene
 from utils.object_registry import build_objects_predicted, save_objects_predicted
 
 def resolve_model_path(path):
@@ -178,9 +179,107 @@ def run_scene(scene_id, scene_dir, cfg):
     run_registry = step_enabled(cfg, "OBJECTX_SEG_RUN_REGISTRY", "run_registry", True)
 
     if run_must3r:
-        # STEP 1: MUSt3R → poses + depth (run first to free VRAM before SAM2)
-        mc = cfg["must3r"]
-        must3r_kwargs = {
+        # STEP 1: pose+depth backend — MUSt3R (default) or MASt3R-SfM
+        backend = os.environ.get(
+            "OBJECTX_POSE_DEPTH_BACKEND", cfg.get("pose_depth_backend", "must3r")
+        ).lower()
+        if backend == "mast3r_sfm":
+            mc = cfg.get("mast3r_sfm", {})
+            mast3r_kwargs = {
+                "resolution": env_or_default(
+                    "OBJECTX_MAST3R_SFM_RESOLUTION", mc.get("resolution", 512), int
+                ),
+                "min_conf_thr": env_or_default(
+                    "OBJECTX_MAST3R_SFM_MIN_CONF_THR", mc.get("min_conf_thr", 0.5), float
+                ),
+                "scene_graph": env_or_default(
+                    "OBJECTX_MAST3R_SFM_SCENE_GRAPH",
+                    mc.get("scene_graph", "swin-15"),
+                    str,
+                ),
+                "shared_intrinsics": parse_bool(
+                    os.environ.get("OBJECTX_MAST3R_SFM_SHARED_INTRINSICS"),
+                    mc.get("shared_intrinsics", True),
+                ),
+                "lr1": env_or_default(
+                    "OBJECTX_MAST3R_SFM_LR1", mc.get("lr1", 0.07), float
+                ),
+                "niter1": env_or_default(
+                    "OBJECTX_MAST3R_SFM_NITER1", mc.get("niter1", 300), int
+                ),
+                "lr2": env_or_default(
+                    "OBJECTX_MAST3R_SFM_LR2", mc.get("lr2", 0.01), float
+                ),
+                "niter2": env_or_default(
+                    "OBJECTX_MAST3R_SFM_NITER2", mc.get("niter2", 300), int
+                ),
+                "opt_depth": parse_bool(
+                    os.environ.get("OBJECTX_MAST3R_SFM_OPT_DEPTH"),
+                    mc.get("opt_depth", True),
+                ),
+                "matching_conf_thr": env_or_default(
+                    "OBJECTX_MAST3R_SFM_MATCHING_CONF_THR",
+                    mc.get("matching_conf_thr", 0.0),
+                    float,
+                ),
+                "loss_dust3r_w": env_or_default(
+                    "OBJECTX_MAST3R_SFM_LOSS_DUST3R_W",
+                    mc.get("loss_dust3r_w", 0.01),
+                    float,
+                ),
+                "subsample": env_or_default(
+                    "OBJECTX_MAST3R_SFM_SUBSAMPLE", mc.get("subsample", 8), int
+                ),
+                "depth_mask_mode": env_or_default(
+                    "OBJECTX_MAST3R_SFM_DEPTH_MASK_MODE",
+                    mc.get("depth_mask_mode", "hard"),
+                    str,
+                ),
+                "save_raw_depth": parse_bool(
+                    os.environ.get("OBJECTX_MAST3R_SFM_SAVE_RAW_DEPTH"),
+                    mc.get("save_raw_depth", False),
+                ),
+                "save_confidence_maps": parse_bool(
+                    os.environ.get("OBJECTX_MAST3R_SFM_SAVE_CONFIDENCE"),
+                    mc.get("save_confidence_maps", False),
+                ),
+                "pose_jump_max_translation": env_or_default(
+                    "OBJECTX_MAST3R_SFM_POSE_JUMP_MAX_TRANSLATION",
+                    mc.get("pose_jump_max_translation", 0.0),
+                    float,
+                ),
+                "pose_jump_max_z_translation": env_or_default(
+                    "OBJECTX_MAST3R_SFM_POSE_JUMP_MAX_Z_TRANSLATION",
+                    mc.get("pose_jump_max_z_translation", 0.0),
+                    float,
+                ),
+                "pose_jump_max_rotation_deg": env_or_default(
+                    "OBJECTX_MAST3R_SFM_POSE_JUMP_MAX_ROTATION_DEG",
+                    mc.get("pose_jump_max_rotation_deg", 0.0),
+                    float,
+                ),
+                "pose_jump_relative_factor": env_or_default(
+                    "OBJECTX_MAST3R_SFM_POSE_JUMP_RELATIVE_FACTOR",
+                    mc.get("pose_jump_relative_factor", 0.0),
+                    float,
+                ),
+                "zero_invalid_pose_depths": parse_bool(
+                    os.environ.get("OBJECTX_MAST3R_SFM_ZERO_INVALID_POSE_DEPTHS"),
+                    mc.get("zero_invalid_pose_depths", False),
+                ),
+                "cache_dir": os.environ.get(
+                    "OBJECTX_MAST3R_SFM_CACHE_DIR", mc.get("cache_dir")
+                ),
+            }
+            _, depths = run_mast3r_sfm_on_scene(
+                frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
+                dirs["pointmaps"] if mc.get("output_pointmaps") else None,
+                scene_id, device=device, **mast3r_kwargs)
+            print(frames[0].shape[:2])
+            print(depths[0].shape)
+        else:
+            mc = cfg["must3r"]
+            must3r_kwargs = {
             "resolution": env_or_default(
                 "OBJECTX_MUST3R_RESOLUTION", mc.get("resolution", 512), int
             ),
@@ -271,12 +370,12 @@ def run_scene(scene_id, scene_dir, cfg):
                 mc.get("zero_invalid_pose_depths", False),
             ),
         }
-        _, depths = run_must3r_on_scene(
-            frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
-            dirs["pointmaps"] if mc.get("output_pointmaps") else None,
-            scene_id, device=device, **must3r_kwargs)
-        print(frames[0].shape[:2])
-        print(depths[0].shape)
+            _, depths = run_must3r_on_scene(
+                frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
+                dirs["pointmaps"] if mc.get("output_pointmaps") else None,
+                scene_id, device=device, **must3r_kwargs)
+            print(frames[0].shape[:2])
+            print(depths[0].shape)
     else:
         print("[MUSt3R] skipped by configuration")
 
