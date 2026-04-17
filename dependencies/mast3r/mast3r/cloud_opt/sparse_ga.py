@@ -16,6 +16,10 @@ from functools import lru_cache
 from scipy import sparse as sp
 import copy
 import scipy.cluster.hierarchy as sch
+import gc
+import time
+import pickle
+import gzip
 
 from mast3r.utils.misc import mkdir_for, hash_md5
 from mast3r.cloud_opt.utils.losses import gamma_loss
@@ -25,6 +29,7 @@ from mast3r.fast_nn import fast_reciprocal_NNs, merge_corres
 import mast3r.utils.path_to_dust3r  # noqa
 from dust3r.utils.geometry import inv, geotrf  # noqa
 from dust3r.utils.device import to_cpu, to_numpy, todevice  # noqa
+from dust3r.utils.image import load_images as dust3r_load_images  # noqa
 from dust3r.post_process import estimate_focal_knowing_depth  # noqa
 from dust3r.optim_factory import adjust_learning_rate_by_lr  # noqa
 from dust3r.cloud_opt.base_opt import clean_pointcloud
@@ -37,9 +42,11 @@ class SparseGA():
             def torgb(x): return (x[0].permute(1, 2, 0).numpy() * .5 + .5).clip(min=0., max=1.)
             for im1, im2 in pairs_in:
                 if im1['instance'] == im:
-                    return torgb(im1['img'])
+                    entry = _materialize_img_entry(im1)
+                    return torgb(entry['img'])
                 if im2['instance'] == im:
-                    return torgb(im2['img'])
+                    entry = _materialize_img_entry(im2)
+                    return torgb(entry['img'])
         self.canonical_paths = canonical_paths
         self.img_paths = img_paths
         self.imgs = [fetch_img(img) for img in img_paths]
@@ -75,7 +82,7 @@ class SparseGA():
         base_focals = []
         anchors = {}
         for i, canon_path in enumerate(self.canonical_paths):
-            (canon, canon2, conf), focal = torch.load(canon_path, map_location=device)
+            (canon, canon2, conf), focal = _load_cache(canon_path, map_location=device)
             confs.append(conf)
             base_focals.append(focal)
 
@@ -116,6 +123,22 @@ def convert_dust3r_pairs_naming(imgs, pairs_in):
     return pairs_in
 
 
+def _materialize_img_entry(img):
+    tensor = img.get('img')
+    if tensor is not None:
+        return img
+    source_path = img.get('source_path')
+    load_size = int(img.get('load_size', 512))
+    if source_path is None:
+        raise KeyError("Missing 'source_path' for lazy MASt3R image loading")
+    loaded = dust3r_load_images([source_path], size=load_size, verbose=False)[0]
+    return {
+        **img,
+        'img': loaded['img'],
+        'true_shape': loaded['true_shape'],
+    }
+
+
 def sparse_global_alignment(imgs, pairs_in, cache_path, model, subsample=8, desc_conf='desc_conf',
                             kinematic_mode='hclust-ward', device='cuda', dtype=torch.float32, shared_intrinsics=False, **kw):
     """ Sparse alignment with MASt3R
@@ -127,16 +150,33 @@ def sparse_global_alignment(imgs, pairs_in, cache_path, model, subsample=8, desc
 
         lora_depth: smart dimensionality reduction with depthmaps
     """
+    loss_dust3r_w = float(kw.get("loss_dust3r_w", 0.01))
+    keep_preds_21 = loss_dust3r_w > 0.0
+
     # Convert pair naming convention from dust3r to mast3r
     pairs_in = convert_dust3r_pairs_naming(imgs, pairs_in)
     # forward pass
     pairs, cache_path = forward_mast3r(pairs_in, model,
                                        cache_path=cache_path, subsample=subsample,
                                        desc_conf=desc_conf, device=device)
+    # The MASt3R network is only needed for the forward cache generation.
+    # Free it before the canonical/BA stages, which can be the peak-memory
+    # phase on 16 GB GPUs.
+    del model
+    if str(device).startswith('cuda'):
+        torch.cuda.empty_cache()
 
     # extract canonical pointmaps
     tmp_pairs, pairwise_scores, canonical_views, canonical_paths, preds_21 = \
-        prepare_canonical_data(imgs, pairs, subsample, cache_path=cache_path, mode='avg-angle', device=device)
+        prepare_canonical_data(
+            imgs,
+            pairs,
+            subsample,
+            cache_path=cache_path,
+            mode='avg-angle',
+            device=device,
+            keep_preds_21=keep_preds_21,
+        )
 
     # smartly combine all useful data
     imsizes, pps, base_focals, core_depth, anchors, corres, corres2d, preds_21 = \
@@ -249,7 +289,7 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
     # intrinsics parameters
     if shared_intrinsics:
         # Optimize a single set of intrinsics for all cameras. Use averages as init.
-        confs = torch.stack([torch.load(pth)[0][2].mean() for pth in canonical_paths]).to(pps)
+        confs = torch.stack([_load_cache(pth)[0][2].mean() for pth in canonical_paths]).to(pps)
         weighting = confs / confs.sum()
         pp = nn.Parameter((weighting @ pps).to(dtype))
         pps = [pp for _ in range(len(imgs))]
@@ -369,6 +409,8 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
         cleaned_corres2d.append((img1, pix1_filtered, confs_filtered, cf_sum, cleaned_slices))
 
     def loss_dust3r(cam2w, pts3d, pix_loss):
+        if loss_dust3r_w <= 0.0 or preds_21 is None:
+            return 0.
         # In the case no correspondence could be established, fallback to DUSt3R GA regression loss formulation (sparsified)
         loss = 0.
         cf_sum = 0.
@@ -377,6 +419,8 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
                 continue
             # fallback to dust3r regression
             tgt_pts, tgt_confs = preds_21[imgs[s.img2]][imgs[s.img1]]
+            tgt_pts = tgt_pts.to(device=cam2w.device, dtype=pts3d[s.img1].dtype, non_blocking=True)
+            tgt_confs = tgt_confs.to(device=cam2w.device, dtype=pts3d[s.img1].dtype, non_blocking=True)
             tgt_pts = geotrf(cam2w[s.img2], tgt_pts)
             cf_sum += tgt_confs.sum()
             loss += tgt_confs @ pix_loss(pts3d[s.img1], tgt_pts)
@@ -544,7 +588,7 @@ def make_dense_pts3d(intrinsics, cam2w, depthmaps, canonical_paths, subsample, d
     anchors = {}
     confs = []
     for i, canon_path in enumerate(canonical_paths):
-        (canon, canon2, conf), focal = torch.load(canon_path, map_location=device)
+        (canon, canon2, conf), focal = _load_cache(canon_path, map_location=device)
         confs.append(conf)
         base_focals.append(focal)
         H, W = conf.shape
@@ -557,6 +601,164 @@ def make_dense_pts3d(intrinsics, cam2w, depthmaps, canonical_paths, subsample, d
                                       d.ravel() for d in depthmaps], base_focals=base_focals, ret_depth=True)
 
     return pts3d, depthmaps_out, confs
+
+
+_CACHE_MAGIC = b"OBJECTX_MAST3R_CACHE_V1\n"
+_CACHE_MAGIC_GZIP = b"OBJECTX_MAST3R_CACHE_V2GZ\n"
+
+
+def _maybe_compact_array(arr: np.ndarray):
+    arr = np.ascontiguousarray(arr)
+    meta = {"orig_dtype": arr.dtype.str}
+    if arr.size == 0:
+        return arr, meta
+
+    if arr.dtype == np.float32:
+        return arr.astype(np.float16), meta
+    if arr.dtype == np.float64:
+        return arr.astype(np.float32), meta
+
+    if arr.dtype in (np.int64, np.int32, np.int16):
+        arr_min = int(arr.min())
+        arr_max = int(arr.max())
+        if arr_min >= 0 and arr_max <= np.iinfo(np.uint16).max:
+            return arr.astype(np.uint16), meta
+        if np.iinfo(np.int32).min <= arr_min and arr_max <= np.iinfo(np.int32).max:
+            return arr.astype(np.int32), meta
+        if np.iinfo(np.int16).min <= arr_min and arr_max <= np.iinfo(np.int16).max:
+            return arr.astype(np.int16), meta
+
+    return arr, meta
+
+
+def _cache_pack(obj):
+    if torch.is_tensor(obj):
+        arr, meta = _maybe_compact_array(obj.detach().cpu().contiguous().numpy())
+        return {"__cache_type__": "tensor", "array": arr, **meta}
+    if isinstance(obj, np.ndarray):
+        arr, meta = _maybe_compact_array(obj)
+        return {"__cache_type__": "ndarray", "array": arr, **meta}
+    if isinstance(obj, dict):
+        return {
+            "__cache_type__": "dict",
+            "items": {k: _cache_pack(v) for k, v in obj.items()},
+        }
+    if isinstance(obj, list):
+        return {"__cache_type__": "list", "items": [_cache_pack(v) for v in obj]}
+    if isinstance(obj, tuple):
+        return {"__cache_type__": "tuple", "items": [_cache_pack(v) for v in obj]}
+    return obj
+
+
+def _cache_unpack(obj, map_location='cpu'):
+    if isinstance(obj, dict) and "__cache_type__" in obj:
+        kind = obj["__cache_type__"]
+        if kind in {"tensor", "ndarray"}:
+            arr = obj["array"]
+            orig_dtype = np.dtype(obj.get("orig_dtype", arr.dtype.str))
+            if arr.dtype != orig_dtype:
+                arr = arr.astype(orig_dtype, copy=False)
+            tensor = torch.from_numpy(arr)
+            return tensor.to(map_location) if map_location is not None else tensor
+        if kind == "dict":
+            return {k: _cache_unpack(v, map_location=map_location) for k, v in obj["items"].items()}
+        if kind == "list":
+            return [_cache_unpack(v, map_location=map_location) for v in obj["items"]]
+        if kind == "tuple":
+            return tuple(_cache_unpack(v, map_location=map_location) for v in obj["items"])
+    return obj
+
+
+def _load_cache(path, map_location='cpu'):
+    with open(path, "rb") as f:
+        magic = f.read(max(len(_CACHE_MAGIC), len(_CACHE_MAGIC_GZIP)))
+        if magic[:len(_CACHE_MAGIC_GZIP)] == _CACHE_MAGIC_GZIP:
+            with gzip.GzipFile(fileobj=f, mode="rb") as gz:
+                payload = pickle.load(gz)
+            return _cache_unpack(payload, map_location=map_location)
+        if magic[:len(_CACHE_MAGIC)] == _CACHE_MAGIC:
+            payload = pickle.load(f)
+            return _cache_unpack(payload, map_location=map_location)
+    return torch.load(path, map_location=map_location)
+
+
+def _save_atomic(obj, path, retries=8):
+    """Atomic torch.save with retry + exponential back-off.
+
+    MASt3R's cache files are transient intermediate artifacts, so we always use
+    the legacy serializer here. In practice the zip serializer in torch 2.x has
+    been the least reliable part of this pipeline on large tmpfs-backed caches
+    and can surface as misleading "unexpected pos X vs Y" write failures even
+    when /tmp has ample space left.
+    """
+    import errno as _errno
+    import tempfile
+    import shutil
+
+    last_exc = None
+    for attempt in range(retries):
+        parent = os.path.dirname(path) or "."
+        os.makedirs(parent, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            prefix=os.path.basename(path) + ".tmp.",
+            dir=parent,
+        )
+        try:
+            payload = _cache_pack(obj)
+            with os.fdopen(fd, "wb") as f:
+                f.write(_CACHE_MAGIC_GZIP)
+                with gzip.GzipFile(fileobj=f, mode="wb", compresslevel=6) as gz:
+                    pickle.dump(payload, gz, protocol=pickle.HIGHEST_PROTOCOL)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            return
+        except Exception as exc:
+            last_exc = exc
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+
+            is_quota = (isinstance(exc, OSError) and
+                        getattr(exc, 'errno', None) == _errno.EDQUOT)
+            delay = min(2.0 ** attempt, 30.0)
+
+            if attempt == 0 or is_quota:
+                try:
+                    disk = shutil.disk_usage(parent)
+                    disk_msg = (f"disk_total={disk.total/1e9:.1f}G "
+                                f"disk_used={disk.used/1e9:.1f}G "
+                                f"disk_free={disk.free/1e9:.1f}G")
+                except Exception:
+                    disk_msg = "disk_usage=unavailable"
+                try:
+                    import psutil
+                    mem = psutil.virtual_memory()
+                    mem_msg = (f"ram_total={mem.total/1e9:.1f}G "
+                               f"ram_avail={mem.available/1e9:.1f}G")
+                except Exception:
+                    mem_msg = "ram=unavailable"
+                print(f"[_save_atomic] attempt {attempt+1}/{retries} FAILED "
+                      f"{'EDQUOT' if is_quota else type(exc).__name__}: {exc}\n"
+                      f"  path={path}\n  {disk_msg} {mem_msg}\n"
+                      f"  retrying in {delay:.1f}s with legacy_pickle=True")
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            gc.collect()
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"_save_atomic failed after {retries} retries for {path}: {last_exc}"
+    ) from last_exc
 
 
 @torch.no_grad()
@@ -574,8 +776,8 @@ def forward_mast3r(pairs, model, cache_path, desc_conf='desc_conf',
         path_corres2 = cache_path + f'/corres_conf={desc_conf}_{subsample=}/{idx2}-{idx1}.pth'
 
         if os.path.isfile(path_corres2) and not os.path.isfile(path_corres):
-            score, (xy1, xy2, confs) = torch.load(path_corres2)
-            torch.save((score, (xy2, xy1, confs)), path_corres)
+            score, (xy1, xy2, confs) = _load_cache(path_corres2)
+            _save_atomic((score, (xy2, xy1, confs)), mkdir_for(path_corres))
 
         if not all(os.path.isfile(p) for p in (path1, path2, path_corres)):
             if model is None:
@@ -586,9 +788,19 @@ def forward_mast3r(pairs, model, cache_path, desc_conf='desc_conf',
             descs = [r['desc'][0] for r in res]
             qonfs = [r[desc_conf][0] for r in res]
 
-            # save
-            torch.save(to_cpu((X11, C11, X21, C21)), mkdir_for(path1))
-            torch.save(to_cpu((X22, C22, X12, C12)), mkdir_for(path2))
+            # save — force detach+contiguous on CPU to avoid torch.save view/stride
+            # issues that surface in torch 2.x zipwriter as "unexpected pos X vs Y".
+            def _safe_cpu(t):
+                return t.detach().contiguous().cpu().contiguous()
+
+            _save_atomic(
+                tuple(_safe_cpu(t) for t in (X11, C11, X21, C21)),
+                mkdir_for(path1),
+            )
+            _save_atomic(
+                tuple(_safe_cpu(t) for t in (X22, C22, X12, C12)),
+                mkdir_for(path2),
+            )
 
             # perform reciprocal matching
             corres = extract_correspondences(descs, qonfs, device=device, subsample=subsample)
@@ -596,7 +808,7 @@ def forward_mast3r(pairs, model, cache_path, desc_conf='desc_conf',
             conf_score = (C11.mean() * C12.mean() * C21.mean() * C22.mean()).sqrt().sqrt()
             matching_score = (float(conf_score), float(corres[2].sum()), len(corres[2]))
             if cache_path is not None:
-                torch.save((matching_score, corres), mkdir_for(path_corres))
+                _save_atomic((matching_score, corres), mkdir_for(path_corres))
 
         res_paths[img1['instance'], img2['instance']] = (path1, path2), path_corres
 
@@ -607,6 +819,8 @@ def forward_mast3r(pairs, model, cache_path, desc_conf='desc_conf',
 
 
 def symmetric_inference(model, img1, img2, device):
+    img1 = _materialize_img_entry(img1)
+    img2 = _materialize_img_entry(img2)
     shape1 = torch.from_numpy(img1['true_shape']).to(device, non_blocking=True)
     shape2 = torch.from_numpy(img2['true_shape']).to(device, non_blocking=True)
     img1 = img1['img'].to(device, non_blocking=True)
@@ -670,18 +884,18 @@ def extract_correspondences(feats, qonfs, subsample=8, device=None, ptmap_key='p
 
 @torch.no_grad()
 def prepare_canonical_data(imgs, tmp_pairs, subsample, order_imgs=False, min_conf_thr=0,
-                           cache_path=None, device='cuda', **kw):
+                           cache_path=None, device='cuda', keep_preds_21=True, **kw):
     canonical_views = {}
     pairwise_scores = torch.zeros((len(imgs), len(imgs)), device=device)
     canonical_paths = []
-    preds_21 = {}
+    preds_21 = {} if keep_preds_21 else None
 
     for img in tqdm(imgs):
         if cache_path:
             cache = os.path.join(cache_path, 'canon_views', hash_md5(img) + f'_{subsample=}_{kw=}.pth')
             canonical_paths.append(cache)
         try:
-            (canon, canon2, cconf), focal = torch.load(cache, map_location=device)
+            (canon, canon2, cconf), focal = _load_cache(cache, map_location=device)
         except IOError:
             # cache does not exist yet, we create it!
             canon = focal = None
@@ -695,21 +909,28 @@ def prepare_canonical_data(imgs, tmp_pairs, subsample, order_imgs=False, min_con
         for (img1, img2), ((path1, path2), path_corres) in tmp_pairs.items():
             score = None
             if img == img1:
-                X, C, X2, C2 = torch.load(path1, map_location=device)
+                X, C, X2, C2 = _load_cache(path1, map_location=device)
                 score, (xy1, xy2, confs) = load_corres(path_corres, device, min_conf_thr)
                 pixels[img2] = xy1, confs
-                if img not in preds_21:
-                    preds_21[img] = {}
-                # Subsample preds_21
-                preds_21[img][img2] = X2[::subsample, ::subsample].reshape(-1, 3), C2[::subsample, ::subsample].ravel()
+                if keep_preds_21:
+                    if img not in preds_21:
+                        preds_21[img] = {}
+                    preds_21[img][img2] = to_cpu((
+                        X2[::subsample, ::subsample].reshape(-1, 3).to(torch.float16),
+                        C2[::subsample, ::subsample].ravel().to(torch.float16),
+                    ))
 
             if img == img2:
-                X, C, X2, C2 = torch.load(path2, map_location=device)
+                X, C, X2, C2 = _load_cache(path2, map_location=device)
                 score, (xy1, xy2, confs) = load_corres(path_corres, device, min_conf_thr)
                 pixels[img1] = xy2, confs
-                if img not in preds_21:
-                    preds_21[img] = {}
-                preds_21[img][img1] = X2[::subsample, ::subsample].reshape(-1, 3), C2[::subsample, ::subsample].ravel()
+                if keep_preds_21:
+                    if img not in preds_21:
+                        preds_21[img] = {}
+                    preds_21[img][img1] = to_cpu((
+                        X2[::subsample, ::subsample].reshape(-1, 3).to(torch.float16),
+                        C2[::subsample, ::subsample].ravel().to(torch.float16),
+                    ))
 
             if score is not None:
                 i, j = imgs.index(img1), imgs.index(img2)
@@ -741,7 +962,7 @@ def prepare_canonical_data(imgs, tmp_pairs, subsample, order_imgs=False, min_con
         if focal is None:
             focal = estimate_focal_knowing_depth(canon[None], pp, focal_mode='weiszfeld', min_focal=0.5, max_focal=3.5)
             if cache:
-                torch.save(to_cpu(((canon, canon2, cconf), focal)), mkdir_for(cache))
+                _save_atomic(to_cpu(((canon, canon2, cconf), focal)), mkdir_for(cache))
 
         # extract depth offsets with correspondences
         core_depth = canon[subsample // 2::subsample, subsample // 2::subsample, 2]
@@ -753,7 +974,7 @@ def prepare_canonical_data(imgs, tmp_pairs, subsample, order_imgs=False, min_con
 
 
 def load_corres(path_corres, device, min_conf_thr):
-    score, (xy1, xy2, confs) = torch.load(path_corres, map_location=device)
+    score, (xy1, xy2, confs) = _load_cache(path_corres, map_location=device)
     valid = confs > min_conf_thr if min_conf_thr else slice(None)
     # valid = (xy1 > 0).all(dim=1) & (xy2 > 0).all(dim=1) & (xy1 < 512).all(dim=1) & (xy2 < 512).all(dim=1)
     # print(f'keeping {valid.sum()} / {len(valid)} correspondences')
@@ -842,12 +1063,17 @@ def condense_data(imgs, tmp_paths, canonical_views, preds_21, dtype=torch.float3
     focals = torch.cat(focals)
 
     # Subsample preds_21
-    subsamp_preds_21 = {}
-    for imk, imv in preds_21.items():
-        subsamp_preds_21[imk] = {}
-        for im2k, (pred, conf) in preds_21[imk].items():
-            idxs = img_anchors[imgs.index(im2k)][1]
-            subsamp_preds_21[imk][im2k] = (pred[idxs], conf[idxs])  # anchors subsample
+    subsamp_preds_21 = None
+    if preds_21 is not None:
+        subsamp_preds_21 = {}
+        for imk, imv in preds_21.items():
+            subsamp_preds_21[imk] = {}
+            for im2k, (pred, conf) in preds_21[imk].items():
+                idxs = img_anchors[imgs.index(im2k)][1].detach().cpu()
+                subsamp_preds_21[imk][im2k] = (
+                    pred.index_select(0, idxs),
+                    conf.index_select(0, idxs),
+                )  # anchors subsample, kept on CPU to avoid GPU OOM
 
     return imsizes, principal_points, focals, core_depth, img_anchors, corres, corres2d, subsamp_preds_21
 
@@ -959,7 +1185,7 @@ def spectral_projection_depth(K, depthmap, subsample, k=64, cache_path='',
     try:
         if cache_path:
             cache_path = cache_path + f'_{k=}_norm={normalized_cuts}_{gamma=}.pth'
-        lora_proj = torch.load(cache_path, map_location=K.device)
+        lora_proj = _load_cache(cache_path, map_location=K.device)
 
     except IOError:
         # reconstruct 3d points in camera coordinates
@@ -971,7 +1197,7 @@ def spectral_projection_depth(K, depthmap, subsample, k=64, cache_path='',
         _, lora_proj = spectral_clustering(graph, k, normalized_cuts=normalized_cuts)
 
         if cache_path:
-            torch.save(lora_proj.cpu(), mkdir_for(cache_path))
+            _save_atomic(lora_proj.cpu(), mkdir_for(cache_path))
 
     lora_proj, coeffs = lora_encode_normed(lora_proj, depthmap.ravel(), min_norm=min_norm)
 

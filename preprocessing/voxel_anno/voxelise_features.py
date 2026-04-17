@@ -113,6 +113,7 @@ def _load_object_depth_map(
     if depth_source in {"must3r_raw_if_available", "raw_if_available"}:
         raw_path = osp.join(sequence_dir, f"frame-{frame_id}.depth_raw.npy")
         if osp.exists(raw_path):
+            import ipdb ; ipdb.set_trace()
             return np.load(raw_path).astype(np.float32)
     return scan3r.load_depth_map(
         osp.join(sequence_dir, f"frame-{frame_id}.depth.pgm"),
@@ -1133,6 +1134,7 @@ def voxelise_features(
         "off",
         "",
     }
+    import ipdb ; ipdb.set_trace()
     object_source = _resolve_object_source()
     depth_intrinsics = None
     depth_shift = None
