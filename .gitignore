@@ -24,6 +24,7 @@ __pycache__/
 **/vis/
 !vis/
 vis/*
+debug
 
 # temporary files
 logs/
