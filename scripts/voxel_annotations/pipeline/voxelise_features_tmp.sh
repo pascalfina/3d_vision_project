@@ -20,6 +20,13 @@ if [[ "$RESET_TMP" == "1" ]]; then
   rm -rf "$TMP_VOX_ROOT"
 fi
 
+# Older runs left /work/scratch/.../objectx-cache as a symlink into a deleted
+# cache tree. Replace that broken link with a real directory so cache setup and
+# downstream torch/matplotlib caches work again.
+if [[ -L "$CACHE_ROOT" && ! -e "$CACHE_ROOT" ]]; then
+  rm -f "$CACHE_ROOT"
+fi
+
 mkdir -p "$TMP_VOX_ROOT/scenes" "$TMP_VOX_ROOT/files"
 mkdir -p "$SCRATCH_ROOT/files/gs_annotations"
 mkdir -p "$CACHE_ROOT/torch/hub" "$CACHE_ROOT/xdg" "$CACHE_ROOT/matplotlib"

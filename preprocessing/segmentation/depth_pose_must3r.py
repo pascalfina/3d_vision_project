@@ -11,7 +11,13 @@ centers; depths are scaled accordingly.
 import os, re, sys, numpy as np, torch, cv2
 from pathlib import Path
 from typing import List, Optional, Tuple
-from utils.io_utils import save_confidence, save_depth, save_depth_raw, save_poses
+from utils.io_utils import (
+    save_confidence,
+    save_depth,
+    save_depth_raw,
+    save_poses,
+    save_xyz_map,
+)
 from utils import scan3r
 
 
@@ -342,11 +348,13 @@ def _run_must3r_chunk(
     poses_c2w = poses_c2w.detach().cpu().numpy().astype(np.float32)
 
     depth_z = []
+    xyz_maps = []
     confs = []
     for o in scene.x_out:
         pts_local = _to_numpy(o["pts3d_local"]).astype(np.float32)
         conf_map = _to_numpy(o["conf"]).astype(np.float32)
         depth_z.append(pts_local[..., 2])
+        xyz_maps.append(pts_local)
         confs.append(conf_map)
 
     del scene
@@ -354,7 +362,10 @@ def _run_must3r_chunk(
         torch.cuda.empty_cache()
 
     return {
-        "poses_c2w": poses_c2w, "depth_z": depth_z, "conf": confs,
+        "poses_c2w": poses_c2w,
+        "depth_z": depth_z,
+        "xyz": xyz_maps,
+        "conf": confs,
         "persistent_state": state_out,
     }
 
@@ -415,6 +426,7 @@ def run_must3r_on_scene(
     # poses are already in a single global frame. No sim3 alignment needed.
     global_poses: dict = {}
     global_depth_z: dict = {}
+    global_xyz: dict = {}
     global_conf: dict = {}
     state = None
     for ci, cidx in enumerate(chunks):
@@ -435,12 +447,14 @@ def run_must3r_on_scene(
         print(f"[MUSt3R] chunk {ci+1} done, persistent keyframes={nmem}")
         poses_local = res["poses_c2w"]
         depths_local = res["depth_z"]
+        xyz_local = res["xyz"]
         confs_local = res["conf"]
         for li, gi in enumerate(cidx):
             if gi in global_poses:
                 continue  # first writer wins
             global_poses[gi] = poses_local[li]
             global_depth_z[gi] = depths_local[li].astype(np.float32)
+            global_xyz[gi] = xyz_local[li].astype(np.float32)
             global_conf[gi] = confs_local[li]
 
     # Assemble in global frame order
@@ -448,6 +462,7 @@ def run_must3r_on_scene(
         [global_poses[i] for i in range(n_frames)], axis=0
     ).astype(np.float32)
     depth_z_list = [global_depth_z[i] for i in range(n_frames)]
+    xyz_list = [global_xyz[i] for i in range(n_frames)]
     conf_list = [global_conf[i] for i in range(n_frames)]
 
     frame_ids = [_frame_id_from_path(p, i) for i, p in enumerate(frame_paths)]
@@ -463,19 +478,14 @@ def run_must3r_on_scene(
     )
     invalid_frame_ids = set(pose_filter["dropped_frame_ids"])
     if invalid_frame_ids:
-        last_valid_idx = 0
-        for idx, frame_id in enumerate(frame_ids):
-            if frame_id in invalid_frame_ids:
-                poses_c2w_np[idx] = poses_c2w_np[last_valid_idx]
-            else:
-                last_valid_idx = idx
         print(
             "[MUSt3R] pose_jump_filter "
             f"kept={len(frame_ids) - len(invalid_frame_ids)}/{len(frame_ids)} "
             f"dropped={len(invalid_frame_ids)} "
             f"median_step={pose_filter['median_step']:.4f} "
             f"p95_step={pose_filter['raw_step_p95']:.4f} "
-            f"limit={pose_filter['translation_limit']:.4f}"
+            f"limit={pose_filter['translation_limit']:.4f} "
+            "mode=non_destructive"
         )
         preview = ", ".join(
             f"{item['frame_id']}<-{item['prev_frame_id']} step={item['step']:.2f} z={item['z_step']:.2f}"
@@ -485,12 +495,13 @@ def run_must3r_on_scene(
             print(f"[MUSt3R] dropped pose jumps: {preview}")
 
     poses_c2w_t = torch.from_numpy(poses_c2w_np)
-    poses_w2c = torch.linalg.inv(poses_c2w_t)
 
     depths = []
     masked_valid_fractions = []
     raw_valid_fractions = []
-    for i, (depth_raw_full, conf_np) in enumerate(zip(depth_z_list, conf_list)):
+    for i, (depth_raw_full, xyz_full, conf_np) in enumerate(
+        zip(depth_z_list, xyz_list, conf_list)
+    ):
         raw_depth = depth_raw_full.astype(np.float32).copy()
         raw_depth[~np.isfinite(raw_depth)] = 0.0
         raw_depth[raw_depth <= 0.0] = 0.0
@@ -511,6 +522,7 @@ def run_must3r_on_scene(
                 Path(output_depth_dir) / f"frame-{legacy_frame_id}.depth.pgm",
                 Path(output_depth_dir) / f"frame-{legacy_frame_id}.depth_raw.npy",
                 Path(output_depth_dir) / f"frame-{legacy_frame_id}.conf.npy",
+                Path(output_depth_dir) / f"frame-{legacy_frame_id}.xyz.npy",
                 Path(output_poses_dir) / f"frame-{legacy_frame_id}.pose.txt",
             ]:
                 if stale_path.exists():
@@ -519,10 +531,15 @@ def run_must3r_on_scene(
         masked_depth = cv2.resize(masked_depth, (224, 172), interpolation=cv2.INTER_NEAREST)
         raw_depth_resized = cv2.resize(raw_depth, (224, 172), interpolation=cv2.INTER_NEAREST)
         conf_resized = cv2.resize(conf_np.astype(np.float32), (224, 172), interpolation=cv2.INTER_LINEAR)
+        xyz_resized = cv2.resize(
+            xyz_full.astype(np.float32), (224, 172), interpolation=cv2.INTER_NEAREST
+        )
+        xyz_resized[~np.isfinite(xyz_resized)] = 0.0
         if frame_ids[i] in invalid_frame_ids and zero_invalid_pose_depths:
             masked_depth.fill(0.0)
             raw_depth_resized.fill(0.0)
             conf_resized.fill(0.0)
+            xyz_resized.fill(0.0)
         masked_valid_fractions.append(float((masked_depth > 0).mean()))
         raw_valid_fractions.append(float((raw_depth_resized > 0).mean()))
         depths.append(masked_depth)
@@ -531,9 +548,13 @@ def run_must3r_on_scene(
             save_depth_raw(raw_depth_resized, output_depth_dir, frame_id=frame_ids[i])
         if save_confidence_maps:
             save_confidence(conf_resized, output_depth_dir, frame_id=frame_ids[i])
+        save_xyz_map(xyz_resized, output_depth_dir, frame_id=frame_ids[i])
 
-    save_poses(poses_w2c, output_poses_dir, scene_id, frame_ids=frame_ids)
-    print(f"[MUSt3R] Poses: {poses_w2c.shape} | Depth shape: {depths[0].shape}")
+    save_poses(poses_c2w_t, output_poses_dir, scene_id, frame_ids=frame_ids)
+    print(
+        f"[MUSt3R] Poses: {poses_c2w_t.shape} (camera_to_world, 3RScan convention) | "
+        f"Depth shape: {depths[0].shape}"
+    )
     if masked_valid_fractions:
         print(
             "[MUSt3R] depth coverage "
@@ -545,7 +566,7 @@ def run_must3r_on_scene(
     del model
     if device == "cuda":
         torch.cuda.empty_cache()
-    return poses_w2c, depths
+    return poses_c2w_t, depths
 
 
 def depth_per_instance(depth_map, masks, p_low=5.0, p_high=95.0):

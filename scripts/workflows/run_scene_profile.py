@@ -10,6 +10,8 @@ from pathlib import Path
 
 DEFAULT_ACTIONS = [
     "must3r",
+    "mast3r-sfm",
+    "fuse",
     "segment-inputs",
     "voxelise",
     "build-pred-ready",
@@ -145,7 +147,7 @@ def print_run_header(profile_path: Path, action: str, cmd, env_updates: dict, lo
     if env_updates:
         print("[env]")
         for key in sorted(env_updates):
-            value = os.environ.get(key, env_updates[key])
+            value = env_updates[key]
             if value is None:
                 print(f"  unset {key}")
             else:
@@ -168,8 +170,6 @@ def stream_command(cmd, cwd: Path, env_updates: dict, log_path: Path, dry_run: b
 
     env = os.environ.copy()
     for key, value in env_updates.items():
-        if key in os.environ:
-            continue
         if value is None:
             env.pop(key, None)
         else:
@@ -359,6 +359,100 @@ def build_must3r_action(repo_root: Path, profile: dict):
     return cmd, env_updates, log_path
 
 
+def build_mast3r_sfm_action(repo_root: Path, profile: dict):
+    """Runs the segmentation pipeline's pose+depth step via the MASt3R-SfM backend.
+
+    Mirrors build_must3r_action but reads the ``mast3r_sfm`` profile section
+    and hard-forces ``OBJECTX_POSE_DEPTH_BACKEND=mast3r_sfm`` so a single
+    profile can orchestrate a MUSt3R run AND a MASt3R-SfM run with distinct
+    output scenes_dirnames.
+    """
+    sec = section(profile, "mast3r_sfm")
+    variant = input_variant_settings(repo_root, profile)
+    if not sec:
+        raise ValueError(
+            f"Profile '{profile.get('name', 'unknown')}' has no 'mast3r_sfm' section."
+        )
+
+    env_updates = {
+        "OBJECTX_SEG_INPUT_ROOT": sec.get("input_root", roots(profile).get("baseline")),
+        "OBJECTX_SEG_OUTPUT_ROOT": sec.get(
+            "output_root", roots(profile).get("reconstruction")
+        ),
+        "OBJECTX_SEG_MASK_DIRNAME": sec.get(
+            "mask_dirname", variant.get("mask_output_dirname", "gt_projection_predicted")
+        ),
+        "OBJECTX_SEG_OBJECTS_FILENAME": sec.get(
+            "objects_filename", variant.get("objects_filename", "objects_predicted.json")
+        ),
+        "OBJECTX_SEG_SCENES_DIRNAME": sec.get(
+            "scenes_dirname", "scenes_sam2_mast3r_sfm"
+        ),
+        "OBJECTX_SEG_RUN_MUST3R": str(int(sec.get("run_must3r", True))),
+        "OBJECTX_SEG_RUN_SAM2": str(int(sec.get("run_sam2", False))),
+        "OBJECTX_SEG_RUN_REGISTRY": str(int(sec.get("run_registry", False))),
+        "OBJECTX_POSE_DEPTH_BACKEND": "mast3r_sfm",
+        "MUST3R_PATH": sec.get("must3r_path", str(repo_root / "dependencies" / "must3r")),
+    }
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+    # Ensure the backend routing cannot be silently overridden by an inherited
+    # env var from a prior must3r step.
+    env_updates["OBJECTX_POSE_DEPTH_BACKEND"] = "mast3r_sfm"
+
+    cmd = [
+        sys.executable,
+        "-u",
+        str(repo_root / "preprocessing" / "segmentation" / "run_pipeline.py"),
+        "--config",
+        sec.get("config", "preprocessing/segmentation/pipeline.yaml"),
+        "--scene",
+        sec.get("scene_id", shared_value(profile, "scene_id")),
+    ]
+    log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
+    return cmd, env_updates, log_path
+
+
+def build_fuse_action(repo_root: Path, profile: dict):
+    """Fuse MASt3R-SfM poses with MUSt3R depth/xyz into a hybrid scene dir."""
+    sec = section(profile, "fuse")
+    reconstruction_root = sec.get(
+        "reconstruction_root", roots(profile).get("reconstruction")
+    )
+    if not reconstruction_root:
+        raise ValueError("fuse action requires 'reconstruction_root' or roots.reconstruction")
+    cmd = [
+        sys.executable,
+        "-u",
+        str(
+            repo_root
+            / "preprocessing"
+            / "segmentation"
+            / "fuse_must3r_pose_mast3r_sfm_depth.py"
+        ),
+        "--reconstruction-root",
+        str(reconstruction_root),
+        "--scene-id",
+        sec.get("scene_id", shared_value(profile, "scene_id")),
+        "--must3r-scenes-dirname",
+        sec.get("must3r_scenes_dirname", "scenes_sam2_must3r"),
+        "--mast3r-sfm-scenes-dirname",
+        sec.get("mast3r_sfm_scenes_dirname", "scenes_sam2_mast3r_sfm"),
+        "--output-scenes-dirname",
+        sec.get("output_scenes_dirname", "scenes_sam2_mast3r_sfm_must3r"),
+    ]
+    baseline_root = sec.get("baseline_root", roots(profile).get("baseline"))
+    if baseline_root:
+        cmd += ["--baseline-root", str(baseline_root)]
+    add_cli_arg(cmd, "--min-conf-thr", sec.get("min_conf_thr"))
+    add_cli_arg(cmd, "--min-alignment-frames", sec.get("min_alignment_frames"))
+    env_updates = {}
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+    log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
+    return cmd, env_updates, log_path
+
+
 def build_pred_ready_action(repo_root: Path, profile: dict):
     sec = section(profile, "build_pred_ready")
     cmd = [
@@ -381,6 +475,10 @@ def build_pred_ready_action(repo_root: Path, profile: dict):
     add_cli_arg(cmd, "--split", sec.get("split", shared_value(profile, "split", "val")))
     add_cli_arg(cmd, "--knn", sec.get("knn", 4))
     add_cli_arg(cmd, "--min-voxels", sec.get("min_voxels", 32))
+    add_cli_arg(cmd, "--max-scale", sec.get("max_scale"))
+    add_cli_arg(cmd, "--max-extent", sec.get("max_extent"))
+    add_cli_arg(cmd, "--max-center-norm", sec.get("max_center_norm"))
+    add_cli_arg(cmd, "--allow-stale-geometry", sec.get("allow_stale_geometry", False))
     point_counts = sec.get("point_counts", [64, 128, 256, 512])
     if point_counts:
         cmd.append("--point-counts")
@@ -534,6 +632,8 @@ def build_render_action(repo_root: Path, profile: dict):
 
 ACTION_BUILDERS = {
     "must3r": build_must3r_action,
+    "mast3r-sfm": build_mast3r_sfm_action,
+    "fuse": build_fuse_action,
     "segment-inputs": build_segment_inputs_action,
     "voxelise": build_voxelise_action,
     "build-pred-ready": build_pred_ready_action,

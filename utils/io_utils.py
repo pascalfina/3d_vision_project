@@ -41,6 +41,21 @@ def save_confidence(confidence, output_dir, frame_idx=None, frame_id=None):
         np.asarray(confidence, dtype=np.float32),
     )
 
+
+def save_xyz_map(xyz, output_dir, frame_idx=None, frame_id=None):
+    """Save MUSt3R per-pixel camera-frame XYZ as .npy with shape (H, W, 3).
+
+    Enables intrinsic-free backprojection downstream: consumers transform
+    these camera-frame 3D points directly by c2w instead of rebuilding them
+    from depth + pinhole intrinsics, avoiding focal/principal-point mismatch
+    against the original Tango intrinsics in _info.txt.
+    """
+    frame_name = _resolve_frame_name(frame_idx=frame_idx, frame_id=frame_id)
+    np.save(
+        os.path.join(output_dir, f"frame-{frame_name}.xyz.npy"),
+        np.asarray(xyz, dtype=np.float32),
+    )
+
 def save_poses(poses, output_dir, scene_id=None, frame_ids=None):
     """Save poses per frame as .txt."""
     for i, pose in enumerate(poses):

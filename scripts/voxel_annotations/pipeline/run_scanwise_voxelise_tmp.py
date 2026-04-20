@@ -257,6 +257,14 @@ def main():
         os.symlink(src, alias_dst)
     print(f"[2.5] using mask source {mask_dirname}", flush=True)
     print(f"[2.5] using scene source {scene_source_dirname}", flush=True)
+    for key in [
+        "OBJECTX_VOXEL_DEPTH_SOURCE",
+        "OBJECTX_VOXEL_REQUIRE_XYZ",
+        "OBJECTX_VOXEL_POSE_MODE",
+        "OBJECTX_VOXEL_OBJECT_SOURCE",
+        "OBJECTX_SCENE_SOURCE_DIRNAME",
+    ]:
+        print(f"[2.5] env {key}={os.environ.get(key, '')}", flush=True)
     print(
         f"[2.5] using cache root {os.environ['OBJECTX_CACHE_ROOT']} "
         f"(hub={os.environ['OBJECTX_DINOV2_HUB_DIR']})",

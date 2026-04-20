@@ -39,19 +39,101 @@ def _ensure_mast3r_on_path() -> None:
 
 
 def _reshape_depth(flat_depth: np.ndarray, H: int, W: int) -> np.ndarray:
-    """MASt3R returns flat per-pixel depth — reshape to (H, W)."""
-    n = int(np.prod(flat_depth.shape))
-    if n == H * W:
-        return flat_depth.reshape(H, W)
-    # Occasionally the canonical depth grid is smaller than the input image
-    # (subsampled); fall back to a square-ish reshape and hope the caller
-    # resizes downstream.
-    side = int(round(np.sqrt(n)))
-    if side * side == n:
-        return flat_depth.reshape(side, side)
+    """MASt3R returns per-pixel depth; fail fast if the layout is unexpected."""
+    arr = np.asarray(flat_depth, dtype=np.float32)
+    if arr.ndim == 2:
+        if arr.shape == (H, W):
+            return arr
+        raise ValueError(
+            f"unexpected MASt3R depth shape {arr.shape}; expected ({H}, {W})"
+        )
+    if arr.ndim != 1:
+        raise ValueError(
+            f"unexpected MASt3R depth rank {arr.ndim}; expected flat vector or 2D grid"
+        )
+    if int(arr.size) != H * W:
+        raise ValueError(
+            f"cannot reshape MASt3R depth of length {int(arr.size)} to ({H}, {W})"
+        )
+    return arr.reshape(H, W)
+
+
+def _reshape_pointmap(flat_pts3d: np.ndarray, H: int, W: int) -> np.ndarray:
+    arr = np.asarray(flat_pts3d, dtype=np.float32)
+    if arr.ndim == 3:
+        if arr.shape == (H, W, 3):
+            return arr
+        raise ValueError(
+            f"unexpected MASt3R pointmap shape {arr.shape}; expected ({H}, {W}, 3)"
+        )
+    if arr.ndim != 2 or arr.shape[-1] != 3:
+        raise ValueError(
+            f"unexpected MASt3R pointmap shape {arr.shape}; expected (N, 3) or ({H}, {W}, 3)"
+        )
+    if int(arr.shape[0]) != H * W:
+        raise ValueError(
+            f"cannot reshape MASt3R pointmap of shape {arr.shape} to ({H}, {W}, 3)"
+        )
+    return arr.reshape(H, W, 3)
+
+
+def _infer_dense_grid_shape(
+    pointmap: np.ndarray,
+    depth: np.ndarray,
+    conf: np.ndarray,
+    H_net: int,
+    W_net: int,
+    subsample: int,
+) -> tuple[int, int]:
+    full_n = H_net * W_net
+    sub_h = H_net // subsample
+    sub_w = W_net // subsample
+    sub_n = sub_h * sub_w
+
+    point_n = int(np.asarray(pointmap).shape[0]) if np.asarray(pointmap).ndim >= 1 else int(np.asarray(pointmap).size)
+    depth_n = int(np.asarray(depth).size)
+    conf_n = int(np.asarray(conf).size)
+
+    sizes = {point_n, depth_n, conf_n}
+    if sizes == {full_n}:
+        return H_net, W_net
+    if sizes == {sub_n}:
+        return sub_h, sub_w
+
     raise ValueError(
-        f"cannot reshape MASt3R depth of length {n} to ({H},{W}) or square"
+        "inconsistent MASt3R dense output sizes: "
+        f"pointmap={np.asarray(pointmap).shape} depth={np.asarray(depth).shape} conf={np.asarray(conf).shape}; "
+        f"expected either full-res {H_net}x{W_net} ({full_n}) or subsampled {sub_h}x{sub_w} ({sub_n})"
     )
+
+
+def _build_depth_conf_mask(
+    conf_map: np.ndarray,
+    raw_depth: np.ndarray,
+    min_conf_thr: float,
+    smooth_sigma: float = 0.0,
+    close_px: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    conf_eval = np.asarray(conf_map, dtype=np.float32)
+    if smooth_sigma > 0.0:
+        conf_eval = cv2.GaussianBlur(
+            conf_eval,
+            (0, 0),
+            sigmaX=float(smooth_sigma),
+            sigmaY=float(smooth_sigma),
+        )
+
+    conf_mask = conf_eval > float(min_conf_thr)
+    if close_px > 0:
+        kernel_size = 2 * int(close_px) + 1
+        kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+        conf_mask = cv2.morphologyEx(
+            conf_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel
+        ).astype(bool)
+
+    valid_depth = np.isfinite(raw_depth) & (raw_depth > 0.0)
+    conf_mask &= valid_depth
+    return conf_mask, conf_eval
 
 
 def run_mast3r_sfm_on_scene(
@@ -75,6 +157,8 @@ def run_mast3r_sfm_on_scene(
     loss_dust3r_w: float = 0.01,
     subsample: int = 8,
     depth_mask_mode: str = "hard",
+    conf_smooth_sigma: float = 0.0,
+    conf_close_px: int = 0,
     save_raw_depth: bool = False,
     save_confidence_maps: bool = False,
     pose_jump_max_translation: float = 0.0,
@@ -83,6 +167,11 @@ def run_mast3r_sfm_on_scene(
     pose_jump_relative_factor: float = 0.0,
     zero_invalid_pose_depths: bool = False,
     cache_dir: Optional[str] = None,
+    loss3d_backward_chunk_pairs: int = 64,
+    loss2d_backward_chunk_pairs: int = 64,
+    loss_dust3r_backward_chunk_pairs: int = 32,
+    streaming_condense: bool = True,
+    fast_loss_path: bool = False,
 ):
     """
     Runs MASt3R-SfM (forward MASt3R + global sparse BA) over the entire scene.
@@ -110,6 +199,12 @@ def run_mast3r_sfm_on_scene(
     imgs = load_images(frame_paths, size=resolution, verbose=False)
     _, _, H_net, W_net = imgs[0]["img"].shape
     print(f"[MASt3R-SfM] loaded {len(imgs)} images, network size={H_net}x{W_net}")
+    if (H_net % subsample) != 0 or (W_net % subsample) != 0:
+        valid = [d for d in range(1, min(H_net, W_net) + 1) if H_net % d == 0 and W_net % d == 0]
+        raise ValueError(
+            f"invalid MASt3R subsample={subsample} for network size {H_net}x{W_net}; "
+            f"valid divisors are {valid}"
+        )
 
     pairs = make_pairs(imgs, scene_graph=scene_graph, prefilter=None, symmetrize=True)
     print(f"[MASt3R-SfM] pairs: {len(pairs)}")
@@ -147,6 +242,11 @@ def run_mast3r_sfm_on_scene(
         matching_conf_thr=matching_conf_thr,
         loss_dust3r_w=loss_dust3r_w,
         subsample=subsample,
+        loss3d_backward_chunk_pairs=loss3d_backward_chunk_pairs,
+        loss2d_backward_chunk_pairs=loss2d_backward_chunk_pairs,
+        loss_dust3r_backward_chunk_pairs=loss_dust3r_backward_chunk_pairs,
+        streaming_condense=streaming_condense,
+        fast_loss_path=fast_loss_path,
     )
 
     poses_c2w = scene.get_im_poses().detach().cpu().numpy().astype(np.float32)
@@ -156,25 +256,48 @@ def run_mast3r_sfm_on_scene(
         f"focal_median={float(np.median(focals)):.2f}px"
     )
 
-    _, dense_depths, dense_confs = scene.get_dense_pts3d(
+    print(
+        f"[MASt3R-SfM] dense export start clean_depth=True subsample={subsample} "
+        f"n_frames={n_frames}"
+    )
+    dense_pts3d, dense_depths, dense_confs = scene.get_dense_pts3d(
         clean_depth=True, subsample=subsample
     )
+    print(
+        f"[MASt3R-SfM] dense export loaded pointmaps={len(dense_pts3d)} "
+        f"depths={len(dense_depths)} confs={len(dense_confs)}"
+    )
 
-    # dense_depths and dense_confs are lists of flat torch tensors.
-    # Per-pixel grid: (H_net // subsample) * (W_net // subsample).
-    H_sub = H_net // subsample
-    W_sub = W_net // subsample
+    pointmap_list: List[np.ndarray] = []
     depth_z_list: List[np.ndarray] = []
     conf_list: List[np.ndarray] = []
+    dense_grid_shape: Optional[tuple[int, int]] = None
     for i in range(n_frames):
+        if i == 0 or (i + 1) % 100 == 0 or (i + 1) == n_frames:
+            print(f"[MASt3R-SfM] dense reshape idx={i + 1}/{n_frames}")
+        p = dense_pts3d[i]
         d = dense_depths[i]
         c = dense_confs[i]
+        p_np = p.detach().cpu().numpy().astype(np.float32) if torch.is_tensor(p) else np.asarray(p, dtype=np.float32)
         d_np = d.detach().cpu().numpy().astype(np.float32) if torch.is_tensor(d) else np.asarray(d, dtype=np.float32)
         c_np = c.detach().cpu().numpy().astype(np.float32) if torch.is_tensor(c) else np.asarray(c, dtype=np.float32)
-        d_np = _reshape_depth(d_np, H_sub, W_sub)
-        c_np = _reshape_depth(c_np, H_sub, W_sub)
+        H_dense, W_dense = _infer_dense_grid_shape(
+            p_np, d_np, c_np, H_net=H_net, W_net=W_net, subsample=subsample
+        )
+        if dense_grid_shape is None:
+            dense_grid_shape = (H_dense, W_dense)
+            print(
+                f"[MASt3R-SfM] dense grid shape={H_dense}x{W_dense} "
+                f"(network={H_net}x{W_net}, subsample={subsample})"
+            )
+        p_np = _reshape_pointmap(p_np, H_dense, W_dense)
+        d_np = _reshape_depth(d_np, H_dense, W_dense)
+        c_np = _reshape_depth(c_np, H_dense, W_dense)
+        pointmap_list.append(p_np)
         depth_z_list.append(d_np)
         conf_list.append(c_np)
+
+    print("[MASt3R-SfM] dense reshape done")
 
     frame_ids = [_frame_id_from_path(p, i) for i, p in enumerate(frame_paths)]
 
@@ -189,12 +312,6 @@ def run_mast3r_sfm_on_scene(
     )
     invalid_frame_ids = set(pose_filter["dropped_frame_ids"])
     if invalid_frame_ids:
-        last_valid_idx = 0
-        for idx, frame_id in enumerate(frame_ids):
-            if frame_id in invalid_frame_ids:
-                poses_c2w[idx] = poses_c2w[last_valid_idx]
-            else:
-                last_valid_idx = idx
         print(
             "[MASt3R-SfM] pose_jump_filter "
             f"kept={len(frame_ids) - len(invalid_frame_ids)}/{len(frame_ids)} "
@@ -214,14 +331,36 @@ def run_mast3r_sfm_on_scene(
     poses_c2w_t = torch.from_numpy(poses_c2w)
     poses_w2c = torch.linalg.inv(poses_c2w_t)
 
+    if output_pointmaps_dir:
+        os.makedirs(output_pointmaps_dir, exist_ok=True)
+
+    print(
+        f"[MASt3R-SfM] export start frames={n_frames} "
+        f"depth_dir={output_depth_dir} poses_dir={output_poses_dir}"
+    )
     depths: List[np.ndarray] = []
+    base_mask_valid_fractions = []
+    processed_mask_valid_fractions = []
+    masked_pre_resize_valid_fractions = []
     masked_valid_fractions = []
+    raw_source_valid_fractions = []
     raw_valid_fractions = []
-    for i, (depth_raw_full, conf_np) in enumerate(zip(depth_z_list, conf_list)):
+    for i, (pointmap_full, depth_raw_full, conf_np) in enumerate(zip(pointmap_list, depth_z_list, conf_list)):
+        if i == 0 or (i + 1) % 100 == 0 or (i + 1) == n_frames:
+            print(f"[MASt3R-SfM] export loop idx={i + 1}/{n_frames}")
         raw_depth = depth_raw_full.astype(np.float32).copy()
         raw_depth[~np.isfinite(raw_depth)] = 0.0
         raw_depth[raw_depth <= 0.0] = 0.0
-        mask_np = conf_np > min_conf_thr
+        raw_source_valid_fractions.append(float((raw_depth > 0).mean()))
+        base_mask_valid_fractions.append(float((conf_np > min_conf_thr).mean()))
+        mask_np, conf_eval = _build_depth_conf_mask(
+            conf_np,
+            raw_depth,
+            min_conf_thr=min_conf_thr,
+            smooth_sigma=conf_smooth_sigma,
+            close_px=conf_close_px,
+        )
+        processed_mask_valid_fractions.append(float(mask_np.mean()))
         masked_depth = raw_depth.copy()
         if depth_mask_mode == "hard":
             masked_depth[~mask_np] = 0.0
@@ -231,6 +370,7 @@ def run_mast3r_sfm_on_scene(
             raise ValueError(
                 f"Unsupported depth_mask_mode={depth_mask_mode!r}; expected 'hard' or 'none'"
             )
+        masked_pre_resize_valid_fractions.append(float((masked_depth > 0).mean()))
 
         legacy_frame_id = f"{i:04d}"
         if legacy_frame_id != frame_ids[i]:
@@ -245,11 +385,9 @@ def run_mast3r_sfm_on_scene(
 
         masked_depth = cv2.resize(masked_depth, (224, 172), interpolation=cv2.INTER_NEAREST)
         raw_depth_resized = cv2.resize(raw_depth, (224, 172), interpolation=cv2.INTER_NEAREST)
-        conf_resized = cv2.resize(conf_np, (224, 172), interpolation=cv2.INTER_LINEAR)
+        conf_resized = cv2.resize(conf_eval, (224, 172), interpolation=cv2.INTER_LINEAR)
         if frame_ids[i] in invalid_frame_ids and zero_invalid_pose_depths:
             masked_depth.fill(0.0)
-            raw_depth_resized.fill(0.0)
-            conf_resized.fill(0.0)
         masked_valid_fractions.append(float((masked_depth > 0).mean()))
         raw_valid_fractions.append(float((raw_depth_resized > 0).mean()))
         depths.append(masked_depth)
@@ -258,16 +396,34 @@ def run_mast3r_sfm_on_scene(
             save_depth_raw(raw_depth_resized, output_depth_dir, frame_id=frame_ids[i])
         if save_confidence_maps:
             save_confidence(conf_resized, output_depth_dir, frame_id=frame_ids[i])
+        if output_pointmaps_dir:
+            np.save(
+                os.path.join(output_pointmaps_dir, f"frame-{frame_ids[i]}.pointmap.npy"),
+                pointmap_full,
+            )
 
     save_poses(poses_w2c, output_poses_dir, scene_id, frame_ids=frame_ids)
+    print("[MASt3R-SfM] export done")
     print(f"[MASt3R-SfM] Poses: {poses_w2c.shape} | Depth shape: {depths[0].shape}")
     if masked_valid_fractions:
         print(
+            "[MASt3R-SfM] confidence mask coverage "
+            f"base_mean={np.mean(base_mask_valid_fractions):.4f} "
+            f"processed_mean={np.mean(processed_mask_valid_fractions):.4f} "
+            f"sigma={float(conf_smooth_sigma):.2f} "
+            f"close_px={int(conf_close_px)}"
+        )
+        print(
             "[MASt3R-SfM] depth coverage "
-            f"masked_mean={np.mean(masked_valid_fractions):.4f} "
-            f"masked_median={np.median(masked_valid_fractions):.4f} "
-            f"raw_mean={np.mean(raw_valid_fractions):.4f} "
-            f"raw_median={np.median(raw_valid_fractions):.4f}"
+            f"raw_source_mean={np.mean(raw_source_valid_fractions):.4f} "
+            f"raw_source_median={np.median(raw_source_valid_fractions):.4f} "
+            f"masked_preresize_mean={np.mean(masked_pre_resize_valid_fractions):.4f} "
+            f"masked_export_mean={np.mean(masked_valid_fractions):.4f} "
+            f"masked_export_median={np.median(masked_valid_fractions):.4f} "
+            f"raw_export_mean={np.mean(raw_valid_fractions):.4f} "
+            f"raw_export_median={np.median(raw_valid_fractions):.4f} "
+            f"invalid_frames={len(invalid_frame_ids)} "
+            f"zero_invalid_pose_depths={int(bool(zero_invalid_pose_depths))}"
         )
     del model, scene
     if device == "cuda":

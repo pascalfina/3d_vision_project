@@ -31,5 +31,16 @@
     "mask_output_dirname": "sam2_projection",
     "objects_filename": "objects_sam2.json",
     "scenes_dirname": "scenes_sam2_must3r"
+  },
+  "legacy+sam+mast3r_sfm+must3r_poses": {
+    "description": "Hybrid: MUSt3R temporally-smooth poses + MASt3R-SfM per-frame depths (sim3 rescaled), SAM2 masks.",
+    "mask_source": "sam2_projection",
+    "run_segment_inputs": false,
+    "run_sam2": false,
+    "run_must3r": false,
+    "run_registry": false,
+    "mask_output_dirname": "sam2_projection",
+    "objects_filename": "objects_sam2.json",
+    "scenes_dirname": "scenes_sam2_mast3r_sfm_must3r"
   }
 }
