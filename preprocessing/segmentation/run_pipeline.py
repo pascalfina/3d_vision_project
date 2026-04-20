@@ -235,6 +235,16 @@ def run_scene(scene_id, scene_dir, cfg):
                     mc.get("depth_mask_mode", "hard"),
                     str,
                 ),
+                "conf_smooth_sigma": env_or_default(
+                    "OBJECTX_MAST3R_SFM_CONF_SMOOTH_SIGMA",
+                    mc.get("conf_smooth_sigma", 0.0),
+                    float,
+                ),
+                "conf_close_px": env_or_default(
+                    "OBJECTX_MAST3R_SFM_CONF_CLOSE_PX",
+                    mc.get("conf_close_px", 0),
+                    int,
+                ),
                 "save_raw_depth": parse_bool(
                     os.environ.get("OBJECTX_MAST3R_SFM_SAVE_RAW_DEPTH"),
                     mc.get("save_raw_depth", False),
@@ -270,13 +280,34 @@ def run_scene(scene_id, scene_dir, cfg):
                 "cache_dir": os.environ.get(
                     "OBJECTX_MAST3R_SFM_CACHE_DIR", mc.get("cache_dir")
                 ),
+                "loss3d_backward_chunk_pairs": env_or_default(
+                    "OBJECTX_MAST3R_SFM_LOSS3D_BACKWARD_CHUNK_PAIRS",
+                    mc.get("loss3d_backward_chunk_pairs", 64),
+                    int,
+                ),
+                "loss2d_backward_chunk_pairs": env_or_default(
+                    "OBJECTX_MAST3R_SFM_LOSS2D_BACKWARD_CHUNK_PAIRS",
+                    mc.get("loss2d_backward_chunk_pairs", 64),
+                    int,
+                ),
+                "loss_dust3r_backward_chunk_pairs": env_or_default(
+                    "OBJECTX_MAST3R_SFM_LOSS_DUST3R_BACKWARD_CHUNK_PAIRS",
+                    mc.get("loss_dust3r_backward_chunk_pairs", 32),
+                    int,
+                ),
+                "streaming_condense": parse_bool(
+                    os.environ.get("OBJECTX_MAST3R_SFM_STREAMING_CONDENSE"),
+                    mc.get("streaming_condense", True),
+                ),
+                "fast_loss_path": parse_bool(
+                    os.environ.get("OBJECTX_MAST3R_SFM_FAST_LOSS_PATH"),
+                    mc.get("fast_loss_path", False),
+                ),
             }
             _, depths = run_mast3r_sfm_on_scene(
                 frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
                 dirs["pointmaps"] if mc.get("output_pointmaps") else None,
                 scene_id, device=device, **mast3r_kwargs)
-            print(frames[0].shape[:2])
-            print(depths[0].shape)
         else:
             mc = cfg["must3r"]
             must3r_kwargs = {

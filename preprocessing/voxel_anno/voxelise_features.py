@@ -73,11 +73,51 @@ def _load_dino_model(model_name: str):
     if not local_hub_dir:
         local_hub_dir = osp.expanduser("~/.cache/torch/hub/facebookresearch_dinov2_main")
     if osp.isdir(local_hub_dir):
+        _ensure_dinov2_py39_compat(local_hub_dir)
         _LOGGER.info("Loading DINOv2 from local hub cache: %s", local_hub_dir)
         return torch.hub.load(local_hub_dir, model_name, source="local")
 
     _LOGGER.info("Loading DINOv2 from torch hub repo")
     return torch.hub.load("facebookresearch/dinov2", model_name)
+
+
+def _ensure_dinov2_py39_compat(local_hub_dir: str) -> None:
+    """Patch the cached DINOv2 checkout so it imports on Python 3.9.
+
+    The current `facebookresearch/dinov2` main branch uses PEP 604 union
+    annotations (`float | None`) in files imported by the backbone hub entry.
+    Those annotations are valid only in Python 3.10+, while voxelise runs in
+    our Python 3.9 environment.
+    """
+    if os.sys.version_info >= (3, 10):
+        return
+
+    patch_specs = {
+        osp.join(local_hub_dir, "dinov2", "layers", "attention.py"): [
+            ("from torch import nn, Tensor", "from typing import Optional\nfrom torch import nn, Tensor"),
+            (
+                "self, init_attn_std: float | None = None, init_proj_std: float | None = None, factor: float = 1.0",
+                "self, init_attn_std: Optional[float] = None, init_proj_std: Optional[float] = None, factor: float = 1.0",
+            ),
+        ],
+        osp.join(local_hub_dir, "dinov2", "layers", "block.py"): [
+            ("init_attn_std: float | None = None,", "init_attn_std: Optional[float] = None,"),
+            ("init_proj_std: float | None = None,", "init_proj_std: Optional[float] = None,"),
+            ("init_fc_std: float | None = None,", "init_fc_std: Optional[float] = None,"),
+        ],
+    }
+
+    for path, replacements in patch_specs.items():
+        if not osp.isfile(path):
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        patched = text
+        for old, new in replacements:
+            patched = patched.replace(old, new)
+        if patched != text:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(patched)
 
 
 def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
@@ -100,6 +140,30 @@ def _log_rss(prefix: str) -> None:
     _LOGGER.info("%s | max_rss_mb=%.1f", prefix, rss_mb)
 
 
+_XYZ_DEPTH_SOURCES = {
+    "must3r_xyz_if_available",
+    "xyz_if_available",
+    "xyz",
+}
+
+
+def _xyz_mode_enabled() -> bool:
+    return (
+        os.getenv("OBJECTX_VOXEL_DEPTH_SOURCE", "default").strip().lower()
+        in _XYZ_DEPTH_SOURCES
+    )
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    }
+
+
 def _load_object_depth_map(
     root_dir: str,
     scan_id: str,
@@ -110,15 +174,80 @@ def _load_object_depth_map(
         os.getenv("OBJECTX_VOXEL_DEPTH_SOURCE", "default").strip().lower()
     )
     sequence_dir = osp.join(root_dir, "scenes", scan_id, "sequence")
+    if depth_source in _XYZ_DEPTH_SOURCES:
+        # xyz-mode path: return z-component of the stored per-pixel camera-frame
+        # point map so TSDF / tolerance-check code that reads a scalar depth keeps
+        # working. Full 3D lift uses _load_object_xyz_map instead of this scalar.
+        xyz_path = osp.join(sequence_dir, f"frame-{frame_id}.xyz.npy")
+        if osp.exists(xyz_path):
+            xyz_map = np.load(xyz_path).astype(np.float32)
+            depth_map = xyz_map[..., 2].copy()
+            depth_map[~np.isfinite(depth_map)] = 0.0
+            depth_map[depth_map <= 0.0] = 0.0
+            raw_conf_thr = float(
+                os.getenv("OBJECTX_VOXEL_RAW_DEPTH_CONF_THR", "0.15")
+            )
+            if raw_conf_thr > 0.0:
+                conf_path = osp.join(
+                    sequence_dir, f"frame-{frame_id}.conf.npy"
+                )
+                if osp.exists(conf_path):
+                    conf_map = np.load(conf_path).astype(np.float32)
+                    if conf_map.shape == depth_map.shape:
+                        depth_map = np.where(
+                            conf_map >= raw_conf_thr, depth_map, 0.0
+                        )
+            return depth_map
     if depth_source in {"must3r_raw_if_available", "raw_if_available"}:
         raw_path = osp.join(sequence_dir, f"frame-{frame_id}.depth_raw.npy")
         if osp.exists(raw_path):
-            import ipdb ; ipdb.set_trace()
-            return np.load(raw_path).astype(np.float32)
+            depth_map = np.load(raw_path).astype(np.float32)
+            raw_conf_thr = float(
+                os.getenv("OBJECTX_VOXEL_RAW_DEPTH_CONF_THR", "0.15")
+            )
+            if raw_conf_thr > 0.0:
+                conf_path = osp.join(
+                    sequence_dir, f"frame-{frame_id}.conf.npy"
+                )
+                if osp.exists(conf_path):
+                    conf_map = np.load(conf_path).astype(np.float32)
+                    if conf_map.shape == depth_map.shape:
+                        depth_map = np.where(
+                            conf_map >= raw_conf_thr, depth_map, 0.0
+                        )
+            return depth_map
     return scan3r.load_depth_map(
         osp.join(sequence_dir, f"frame-{frame_id}.depth.pgm"),
         depth_shift,
     )
+
+
+def _load_object_xyz_map(
+    root_dir: str,
+    scan_id: str,
+    frame_id: str,
+) -> Optional[np.ndarray]:
+    """Load per-pixel camera-frame XYZ map written by the MUSt3R wrapper.
+
+    Returns (H, W, 3) float32 with the same confidence masking applied as
+    _load_object_depth_map; returns None if xyz file is absent so callers can
+    fall back to the intrinsic-lift code path.
+    """
+    sequence_dir = osp.join(root_dir, "scenes", scan_id, "sequence")
+    xyz_path = osp.join(sequence_dir, f"frame-{frame_id}.xyz.npy")
+    if not osp.exists(xyz_path):
+        return None
+    xyz = np.load(xyz_path).astype(np.float32)
+    xyz[~np.isfinite(xyz)] = 0.0
+    raw_conf_thr = float(os.getenv("OBJECTX_VOXEL_RAW_DEPTH_CONF_THR", "0.15"))
+    if raw_conf_thr > 0.0:
+        conf_path = osp.join(sequence_dir, f"frame-{frame_id}.conf.npy")
+        if osp.exists(conf_path):
+            conf_map = np.load(conf_path).astype(np.float32)
+            if conf_map.shape[:2] == xyz.shape[:2]:
+                invalid = conf_map < raw_conf_thr
+                xyz[invalid] = 0.0
+    return xyz
 
 
 def _save_featured_voxel(
@@ -627,11 +756,68 @@ def _normalize_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, float
     return normalized, center.astype(np.float32), float(scale)
 
 
-def _filter_lifted_points(points: np.ndarray) -> np.ndarray:
+def _filter_lifted_points_by_support(
+    points: np.ndarray, view_indices: Optional[np.ndarray]
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    voxel_size = float(os.getenv("OBJECTX_VOXEL_LIFT_SUPPORT_VOXEL_SIZE", "0"))
+    min_points = int(os.getenv("OBJECTX_VOXEL_LIFT_MIN_POINTS_PER_VOXEL", "0"))
+    min_views = int(os.getenv("OBJECTX_VOXEL_LIFT_MIN_VIEWS_PER_VOXEL", "0"))
+    if (
+        voxel_size <= 0.0
+        or (min_points <= 1 and min_views <= 1)
+        or points.shape[0] < 64
+    ):
+        return points, view_indices
+
+    coords = np.floor(points.astype(np.float64) / voxel_size).astype(np.int64)
+    _, inverse = np.unique(coords, axis=0, return_inverse=True)
+    point_counts = np.bincount(inverse)
+    keep_voxels = point_counts >= max(1, min_points)
+
+    if min_views > 1:
+        if view_indices is None:
+            return points, view_indices
+        pairs = np.stack([inverse, view_indices.astype(np.int64)], axis=1)
+        unique_pairs = np.unique(pairs, axis=0)
+        view_counts = np.bincount(unique_pairs[:, 0], minlength=point_counts.shape[0])
+        keep_voxels &= view_counts >= min_views
+
+    keep = keep_voxels[inverse]
+    min_keep_fraction = float(os.getenv("OBJECTX_VOXEL_LIFT_SUPPORT_MIN_KEEP_FRACTION", "0.05"))
+    min_keep = max(32, int(points.shape[0] * min_keep_fraction))
+    if keep.sum() < min_keep:
+        _LOGGER.info(
+            "[2.5] lifted support filter skipped keep=%s/%s min_keep=%s voxel_size=%.4f min_points=%s min_views=%s",
+            int(keep.sum()),
+            int(points.shape[0]),
+            int(min_keep),
+            float(voxel_size),
+            int(min_points),
+            int(min_views),
+        )
+        return points, view_indices
+
+    filtered_points = points[keep]
+    filtered_views = view_indices[keep] if view_indices is not None else None
+    _LOGGER.info(
+        "[2.5] lifted support filter kept %s/%s points voxel_size=%.4f min_points=%s min_views=%s",
+        int(filtered_points.shape[0]),
+        int(points.shape[0]),
+        float(voxel_size),
+        int(min_points),
+        int(min_views),
+    )
+    return filtered_points, filtered_views
+
+
+def _filter_lifted_points_with_views(
+    points: np.ndarray, view_indices: Optional[np.ndarray] = None
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
     if points.shape[0] < 64:
-        return points
+        return points, view_indices
 
     filtered = points
+    filtered_views = view_indices
     lower_q = float(os.getenv("OBJECTX_VOXEL_LIFT_TRIM_LOW_Q", "1.0"))
     upper_q = float(os.getenv("OBJECTX_VOXEL_LIFT_TRIM_HIGH_Q", "99.0"))
     if 0.0 <= lower_q < upper_q <= 100.0:
@@ -640,6 +826,8 @@ def _filter_lifted_points(points: np.ndarray) -> np.ndarray:
         keep = np.all((filtered >= lower) & (filtered <= upper), axis=1)
         if keep.sum() >= max(32, int(0.2 * filtered.shape[0])):
             filtered = filtered[keep]
+            if filtered_views is not None:
+                filtered_views = filtered_views[keep]
 
     if filtered.shape[0] >= 64:
         center = np.median(filtered, axis=0)
@@ -649,8 +837,17 @@ def _filter_lifted_points(points: np.ndarray) -> np.ndarray:
         keep = distances <= keep_radius
         if keep.sum() >= max(32, int(0.2 * filtered.shape[0])):
             filtered = filtered[keep]
+            if filtered_views is not None:
+                filtered_views = filtered_views[keep]
 
-    return filtered.astype(np.float32, copy=False)
+    filtered, filtered_views = _filter_lifted_points_by_support(
+        filtered.astype(np.float32, copy=False), filtered_views
+    )
+    return filtered.astype(np.float32, copy=False), filtered_views
+
+
+def _filter_lifted_points(points: np.ndarray) -> np.ndarray:
+    return _filter_lifted_points_with_views(points)[0]
 
 
 def _normalize_points_with_reference(
@@ -719,11 +916,16 @@ def _lift_masked_points(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> np.ndarray:
     if len(selected_masks) != len(selected_depths) or len(selected_masks) != len(
         pose_camera_to_world
     ):
         raise ValueError("Mismatched mask/depth/pose lengths for lifted object path")
+    if selected_xyz_maps is not None and len(selected_xyz_maps) != len(
+        selected_masks
+    ):
+        raise ValueError("Mismatched xyz/mask lengths for lifted object path")
 
     depth_width = int(depth_intrinsics["width"])
     depth_height = int(depth_intrinsics["height"])
@@ -733,8 +935,11 @@ def _lift_masked_points(
     coord_system = os.getenv("OBJECTX_VOXEL_LIFT_COORD_SYSTEM", "pinhole").strip().lower()
 
     lifted_points = []
-    for obj_mask, depth_map, camera_to_world in zip(
-        selected_masks, selected_depths, pose_camera_to_world
+    lifted_view_indices = []
+    xyz_frames_used = 0
+    intrinsic_frames_used = 0
+    for i, (obj_mask, depth_map, camera_to_world) in enumerate(
+        zip(selected_masks, selected_depths, pose_camera_to_world)
     ):
         mask_depth = np.array(
             Image.fromarray((obj_mask > 0).astype(np.uint8)).resize(
@@ -745,6 +950,42 @@ def _lift_masked_points(
         y, x = np.nonzero(mask_depth)
         if x.size == 0:
             continue
+
+        xyz_map = None
+        if selected_xyz_maps is not None:
+            candidate = selected_xyz_maps[i]
+            if (
+                candidate is not None
+                and candidate.ndim == 3
+                and candidate.shape[:2] == (depth_height, depth_width)
+                and candidate.shape[2] == 3
+            ):
+                xyz_map = candidate
+
+        if xyz_map is not None:
+            cam_xyz = xyz_map[y, x].astype(np.float32)
+            valid = (
+                np.isfinite(cam_xyz).all(axis=1)
+                & (np.abs(cam_xyz).sum(axis=1) > 0.0)
+                & (cam_xyz[:, 2] > 0.0)
+            )
+            if not np.any(valid):
+                continue
+            cam_xyz = cam_xyz[valid]
+            if pixel_stride > 1:
+                cam_xyz = cam_xyz[::pixel_stride]
+            world_points = (
+                camera_to_world[:3, :3].astype(np.float32) @ cam_xyz.T
+                + camera_to_world[:3, 3:4].astype(np.float32)
+            )
+            world_points = world_points.T
+            lifted_points.append(world_points)
+            lifted_view_indices.append(
+                np.full(world_points.shape[0], i, dtype=np.int32)
+            )
+            xyz_frames_used += 1
+            continue
+
         depth = depth_map[y, x]
         valid = depth > 0.0
         if not np.any(valid):
@@ -776,18 +1017,36 @@ def _lift_masked_points(
             camera_to_world[:3, :3].astype(np.float32) @ cam_points
             + camera_to_world[:3, 3:4].astype(np.float32)
         )
-        lifted_points.append(world_points.T)
+        world_points = world_points.T
+        lifted_points.append(world_points)
+        lifted_view_indices.append(np.full(world_points.shape[0], i, dtype=np.int32))
+        intrinsic_frames_used += 1
 
     if not lifted_points:
         return np.zeros((0, 3), dtype=np.float32)
     lifted_points = np.concatenate(lifted_points, axis=0).astype(np.float32)
-    filtered_points = _filter_lifted_points(lifted_points)
+    lifted_view_indices_arr = np.concatenate(lifted_view_indices, axis=0)
+    filtered_points, _ = _filter_lifted_points_with_views(
+        lifted_points, lifted_view_indices_arr
+    )
     _LOGGER.info(
-        "[2.5] lifted points filtered %s -> %s using coord_system=%s",
+        "[2.5] lifted points filtered %s -> %s (xyz_frames=%s pinhole_frames=%s coord_system=%s)",
         int(lifted_points.shape[0]),
         int(filtered_points.shape[0]),
+        xyz_frames_used,
+        intrinsic_frames_used,
         coord_system,
     )
+    if (
+        _env_flag("OBJECTX_VOXEL_REQUIRE_XYZ")
+        and selected_xyz_maps is not None
+        and xyz_frames_used == 0
+        and intrinsic_frames_used > 0
+    ):
+        raise RuntimeError(
+            "OBJECTX_VOXEL_REQUIRE_XYZ=1 but no selected frame used xyz.npy; "
+            "refusing silent pinhole/TSDF fallback"
+        )
     return filtered_points
 
 
@@ -798,12 +1057,14 @@ def _prepare_lifted_geometry(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     lifted_points = _lift_masked_points(
         selected_masks=selected_masks,
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
     _LOGGER.info(
         "[2.5] object %s/%s lifted_points=%s",
@@ -862,6 +1123,7 @@ def _build_lifted_object_voxel_grid(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     lifted_points, normalized_points, mean, scale = _prepare_lifted_geometry(
         scan_id=scan_id,
@@ -870,6 +1132,7 @@ def _build_lifted_object_voxel_grid(
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
     voxel_grid = _voxelize_normalized_points(normalized_points, dilate_iters=1)
     voxel_grid = _finalize_object_voxel_grid(
@@ -896,6 +1159,7 @@ def _build_tsdf_object_voxel_grid(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     lifted_points, normalized_points, mean, scale = _prepare_lifted_geometry(
         scan_id=scan_id,
@@ -904,6 +1168,7 @@ def _build_tsdf_object_voxel_grid(
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
     _LOGGER.info(
         "[2.5] object %s/%s lifted_points=%s before TSDF",
@@ -1070,6 +1335,7 @@ def _build_hybrid_object_voxel_grid(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     lifted_voxel_grid, mean, scale = _build_lifted_object_voxel_grid(
         scan_id=scan_id,
@@ -1078,7 +1344,18 @@ def _build_hybrid_object_voxel_grid(
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
+    if selected_xyz_maps is not None and any(xyz is not None for xyz in selected_xyz_maps):
+        _LOGGER.info(
+            "[2.5] object %s/%s hybrid_xyz_mode lifted=%s tsdf=skipped "
+            "(intrinsic-free MUSt3R XYZ maps are not compatible with pinhole TSDF)",
+            scan_id,
+            obj_id,
+            int(lifted_voxel_grid.shape[0]),
+        )
+        return lifted_voxel_grid, mean, scale
+
     tsdf_voxel_grid, _, _ = _build_tsdf_object_voxel_grid(
         scan_id=scan_id,
         obj_id=obj_id,
@@ -1086,6 +1363,7 @@ def _build_hybrid_object_voxel_grid(
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
     merged = np.concatenate([lifted_voxel_grid, tsdf_voxel_grid], axis=0)
     merged = _finalize_object_voxel_grid(
@@ -1134,13 +1412,14 @@ def voxelise_features(
         "off",
         "",
     }
-    import ipdb ; ipdb.set_trace()
     object_source = _resolve_object_source()
     depth_intrinsics = None
     depth_shift = None
     depth_abs_tol = float(os.getenv("OBJECTX_VOXEL_DEPTH_ABS_TOL", "0.05"))
     depth_rel_tol = float(os.getenv("OBJECTX_VOXEL_DEPTH_REL_TOL", "0.02"))
     depth_map_cache = {}
+    xyz_map_cache: Dict[str, Optional[np.ndarray]] = {}
+    xyz_mode = _xyz_mode_enabled()
     requires_depth = filter_unobserved or object_source in {
         "lifted_masks",
         "tsdf_masks",
@@ -1194,6 +1473,15 @@ def voxelise_features(
 
             os.makedirs(osp.dirname(voxel_path), exist_ok=True)
             os.makedirs(osp.dirname(mean_scale_path), exist_ok=True)
+
+            if args.override and not args.dry_run:
+                for stale_path in (voxel_path, mean_scale_path):
+                    if osp.exists(stale_path):
+                        os.remove(stale_path)
+                        _LOGGER.info(
+                            "[2.5] removed stale output before override: %s",
+                            stale_path,
+                        )
 
             if (
                 osp.exists(mean_scale_path)
@@ -1256,6 +1544,7 @@ def voxelise_features(
 
             rendered_obj = []
             selected_depths = []
+            selected_xyz_maps: list[Optional[np.ndarray]] = []
             for frame_id, obj_mask in zip(selected_frame_ids, selected_masks):
                 image = Image.open(
                     f"{root_dir}/scenes/{scan_id}/sequence/frame-{frame_id}.color.jpg"
@@ -1271,6 +1560,14 @@ def voxelise_features(
                             depth_shift=depth_shift,
                         )
                     selected_depths.append(depth_map_cache[frame_id])
+                    if xyz_mode:
+                        if frame_id not in xyz_map_cache:
+                            xyz_map_cache[frame_id] = _load_object_xyz_map(
+                                root_dir=root_dir,
+                                scan_id=scan_id,
+                                frame_id=frame_id,
+                            )
+                        selected_xyz_maps.append(xyz_map_cache[frame_id])
 
             rendered_obj = torch.stack(rendered_obj).float()
             pose_camera_to_world = _resolve_pose_camera_to_world(
@@ -1280,6 +1577,35 @@ def voxelise_features(
                 f"[2.5] object {scan_id}/{obj_id} selected_frames={len(selected_frame_ids)}"
             )
 
+            xyz_maps_arg = selected_xyz_maps if xyz_mode else None
+            if xyz_mode:
+                xyz_loaded = sum(xyz is not None for xyz in selected_xyz_maps)
+                xyz_shapes = sorted(
+                    {
+                        tuple(xyz.shape)
+                        for xyz in selected_xyz_maps
+                        if xyz is not None
+                    }
+                )
+                depth_shapes = sorted({tuple(depth.shape) for depth in selected_depths})
+                _LOGGER.info(
+                    "[2.5] object %s/%s xyz_precheck depth_source=%s require_xyz=%s "
+                    "loaded=%s/%s xyz_shapes=%s depth_shapes=%s root=%s",
+                    scan_id,
+                    obj_id,
+                    os.getenv("OBJECTX_VOXEL_DEPTH_SOURCE", ""),
+                    int(_env_flag("OBJECTX_VOXEL_REQUIRE_XYZ")),
+                    int(xyz_loaded),
+                    int(len(selected_xyz_maps)),
+                    xyz_shapes,
+                    depth_shapes,
+                    root_dir,
+                )
+                if _env_flag("OBJECTX_VOXEL_REQUIRE_XYZ") and xyz_loaded == 0:
+                    raise RuntimeError(
+                        "OBJECTX_VOXEL_REQUIRE_XYZ=1 but no xyz.npy maps were loaded "
+                        f"for selected frames; first_frames={selected_frame_ids[:8]}"
+                    )
             # STEP 2/3: Build object geometry and voxel grid from the selected source.
             if object_source == "lifted_masks":
                 voxel_grid, mean, scale = _build_lifted_object_voxel_grid(
@@ -1289,6 +1615,7 @@ def voxelise_features(
                     selected_depths=selected_depths,
                     pose_camera_to_world=pose_camera_to_world,
                     depth_intrinsics=depth_intrinsics,
+                    selected_xyz_maps=xyz_maps_arg,
                 )
             elif object_source == "tsdf_masks":
                 voxel_grid, mean, scale = _build_tsdf_object_voxel_grid(
@@ -1298,6 +1625,7 @@ def voxelise_features(
                     selected_depths=selected_depths,
                     pose_camera_to_world=pose_camera_to_world,
                     depth_intrinsics=depth_intrinsics,
+                    selected_xyz_maps=xyz_maps_arg,
                 )
             elif object_source == "hybrid_masks":
                 voxel_grid, mean, scale = _build_hybrid_object_voxel_grid(
@@ -1307,6 +1635,7 @@ def voxelise_features(
                     selected_depths=selected_depths,
                     pose_camera_to_world=pose_camera_to_world,
                     depth_intrinsics=depth_intrinsics,
+                    selected_xyz_maps=xyz_maps_arg,
                 )
             else:
                 segmented_mesh = _segment_mesh(mesh, annos, obj_id, scan_id)
@@ -1439,6 +1768,8 @@ def voxelise_features(
                 _log_rss(f"[2.5] saved voxel {scan_id}/{obj_id}")
         except (FileNotFoundError, RuntimeError, ValueError) as e:
             _LOGGER.exception(f"Error processing {scan_id} ({obj_id}): {e}")
+            if _env_flag("OBJECTX_VOXEL_REQUIRE_XYZ"):
+                raise
         finally:
             for name in [
                 "segmented_mesh",

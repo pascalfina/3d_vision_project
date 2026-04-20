@@ -29,6 +29,14 @@ def parse_args():
     parser.add_argument("--split", default="val", choices=["train", "val", "test"])
     parser.add_argument("--knn", type=int, default=4)
     parser.add_argument("--min-voxels", type=int, default=32)
+    parser.add_argument("--max-scale", type=float, default=0.0)
+    parser.add_argument("--max-extent", type=float, default=0.0)
+    parser.add_argument("--max-center-norm", type=float, default=0.0)
+    parser.add_argument(
+        "--allow-stale-geometry",
+        action="store_true",
+        help="Allow voxel_output_dense.npz older than mean_scale_dense.npz.",
+    )
     parser.add_argument(
         "--point-counts",
         type=int,
@@ -235,6 +243,10 @@ def discover_reconstructed_objects(
     reconstruction_root: Path,
     scene_id: str,
     min_voxels: int,
+    max_scale: float = 0.0,
+    max_extent: float = 0.0,
+    max_center_norm: float = 0.0,
+    allow_stale_geometry: bool = False,
 ) -> list[dict]:
     scene_root = reconstruction_root / "files" / "gs_annotations" / scene_id
     if not scene_root.exists():
@@ -248,6 +260,16 @@ def discover_reconstructed_objects(
         mean_scale_path = obj_dir / "mean_scale_dense.npz"
         if not voxel_path.exists() or not mean_scale_path.exists():
             continue
+        if (
+            not allow_stale_geometry
+            and voxel_path.stat().st_mtime + 1.0 < mean_scale_path.stat().st_mtime
+        ):
+            print(
+                "[pred-ready] skipping "
+                f"{scene_id}/{obj_dir.name}: stale voxel_output_dense.npz "
+                "is older than mean_scale_dense.npz"
+            )
+            continue
 
         voxels = np.load(voxel_path)["arr_0"][:, :3].astype(np.int32)
         if voxels.shape[0] < min_voxels:
@@ -256,9 +278,29 @@ def discover_reconstructed_objects(
         mean_scale = np.load(mean_scale_path)
         mean = mean_scale["mean"].astype(np.float32)
         scale = float(mean_scale["scale"])
+        if max_scale > 0.0 and scale > max_scale:
+            print(
+                f"[pred-ready] skipping {scene_id}/{obj_dir.name}: "
+                f"scale={scale:.4f} > max_scale={max_scale:.4f}"
+            )
+            continue
         points_world = voxel_to_world(voxels, mean, scale)
         center = points_world.mean(axis=0).astype(np.float32)
         extent = (points_world.max(axis=0) - points_world.min(axis=0)).astype(np.float32)
+        extent_max = float(extent.max())
+        center_norm = float(np.linalg.norm(center))
+        if max_extent > 0.0 and extent_max > max_extent:
+            print(
+                f"[pred-ready] skipping {scene_id}/{obj_dir.name}: "
+                f"extent_max={extent_max:.4f} > max_extent={max_extent:.4f}"
+            )
+            continue
+        if max_center_norm > 0.0 and center_norm > max_center_norm:
+            print(
+                f"[pred-ready] skipping {scene_id}/{obj_dir.name}: "
+                f"center_norm={center_norm:.4f} > max_center_norm={max_center_norm:.4f}"
+            )
+            continue
 
         objects.append(
             {
@@ -550,6 +592,10 @@ def main():
         reconstruction_root=reconstruction_root,
         scene_id=scene_id,
         min_voxels=args.min_voxels,
+        max_scale=args.max_scale,
+        max_extent=args.max_extent,
+        max_center_norm=args.max_center_norm,
+        allow_stale_geometry=args.allow_stale_geometry,
     )
     objects_payload, baseline_objects_by_id, copied_semantic_fields = build_objects_json(
         baseline_root=baseline_root,

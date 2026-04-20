@@ -5,7 +5,7 @@
   "input_variant": "legacy+sam+must3r",
   "roots": {
     "baseline": "/work/scratch/pafina/objectx-data-baseline",
-    "reconstruction": "/work/scratch/pafina/objectx-data-fullscene-cabinet-hybrid-sam2mask-must3r",
+    "reconstruction": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-cabinet-hybrid-gtmask",
     "pred_ready": "/work/scratch/pafina/objectx-data-fullscene-cabinet-predready-sam2-must3r-v1"
   },
   "artifacts": {
@@ -24,20 +24,20 @@
       "OBJECTX_MUST3R_NUM_MEM_IMAGES": "64",
       "OBJECTX_MUST3R_RESOLUTION": "512",
       "OBJECTX_MUST3R_SUBSAMPLE": "1",
-      "OBJECTX_MUST3R_CHUNK_SIZE": "100",
-      "OBJECTX_MUST3R_CHUNK_OVERLAP": "0",
+      "OBJECTX_MUST3R_CHUNK_SIZE": "150",
+      "OBJECTX_MUST3R_CHUNK_OVERLAP": "30",
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
-      "OBJECTX_MUST3R_MIN_CONF_KEYFRAME": "1.0",
+      "OBJECTX_MUST3R_MIN_CONF_KEYFRAME": "1.5",
       "OBJECTX_MUST3R_KEYFRAME_OVERLAP_THR": "0.05",
       "OBJECTX_MUST3R_OVERLAP_PERCENTILE": "85",
-      "OBJECTX_MUST3R_MIN_CONF_THR": "0.5",
+      "OBJECTX_MUST3R_MIN_CONF_THR": "1.5",
       "OBJECTX_MUST3R_DEPTH_MASK_MODE": "hard",
       "OBJECTX_MUST3R_SAVE_RAW_DEPTH": "1",
       "OBJECTX_MUST3R_SAVE_CONFIDENCE": "1",
-      "OBJECTX_MUST3R_POSE_JUMP_MAX_TRANSLATION": "0.0",
-      "OBJECTX_MUST3R_POSE_JUMP_MAX_Z_TRANSLATION": "0.0",
+      "OBJECTX_MUST3R_POSE_JUMP_MAX_TRANSLATION": "1.5",
+      "OBJECTX_MUST3R_POSE_JUMP_MAX_Z_TRANSLATION": "1.0",
       "OBJECTX_MUST3R_POSE_JUMP_MAX_ROTATION_DEG": "0.0",
-      "OBJECTX_MUST3R_POSE_JUMP_RELATIVE_FACTOR": "5.0",
+      "OBJECTX_MUST3R_POSE_JUMP_RELATIVE_FACTOR": "10.0",
       "OBJECTX_MUST3R_ZERO_INVALID_POSE_DEPTHS": "1"
     },
     "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_must3r.log"
@@ -111,12 +111,13 @@
     "env": {
       "OBJECTX_VOXEL_OBJECT_SOURCE": "hybrid_masks",
       "OBJECTX_VOXEL_TSDF_FALLBACK_TO_LIFTED": "1",
-      "OBJECTX_VOXEL_POSE_MODE": "invert",
-      "OBJECTX_VOXEL_POSE_JUMP_MAX_TRANSLATION": "0.0",
-      "OBJECTX_VOXEL_POSE_JUMP_MAX_Z_TRANSLATION": "0.0",
+      "OBJECTX_VOXEL_POSE_MODE": "raw",
+      "OBJECTX_VOXEL_POSE_JUMP_MAX_TRANSLATION": "1.5",
+      "OBJECTX_VOXEL_POSE_JUMP_MAX_Z_TRANSLATION": "1.0",
       "OBJECTX_VOXEL_POSE_JUMP_MAX_ROTATION_DEG": "0.0",
-      "OBJECTX_VOXEL_POSE_JUMP_RELATIVE_FACTOR": "5.0",
-      "OBJECTX_VOXEL_DEPTH_SOURCE": "must3r_raw_if_available",
+      "OBJECTX_VOXEL_POSE_JUMP_RELATIVE_FACTOR": "10.0",
+      "OBJECTX_VOXEL_DEPTH_SOURCE": "must3r_xyz_if_available",
+      "OBJECTX_VOXEL_RAW_DEPTH_CONF_THR": "1.5",
       "OBJECTX_VOXEL_MAX_VIEWS": "100",
       "OBJECTX_VOXEL_FRAME_SELECTION": "diverse_area",
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
@@ -181,17 +182,20 @@
     "label": "cabinet_legacy_sam2_must3r_hybrid",
     "data_root": "/work/scratch/pafina/objectx-data-fullscene-cabinet-predready-sam2-must3r-v1",
     "background_remove_mode": "loaded",
-    "pose_mode": "invert",
+    "pose_mode": "raw",
     "lift_coord_system": "pinhole",
     "frame_selection": "all",
     "max_views": 96,
     "bg_max_points": 250000,
     "joint_max_points": 250000,
     "env": {
-      "OBJECTX_VOXEL_POSE_JUMP_MAX_TRANSLATION": "1.40",
-      "OBJECTX_VOXEL_POSE_JUMP_MAX_Z_TRANSLATION": "0.90",
+      "OBJECTX_VOXEL_POSE_JUMP_MAX_TRANSLATION": "1.5",
+      "OBJECTX_VOXEL_POSE_JUMP_MAX_Z_TRANSLATION": "1.0",
       "OBJECTX_VOXEL_POSE_JUMP_MAX_ROTATION_DEG": "0.0",
-      "OBJECTX_VOXEL_POSE_JUMP_RELATIVE_FACTOR": "5.0"
+      "OBJECTX_VOXEL_POSE_JUMP_RELATIVE_FACTOR": "10.0",
+      "OBJECTX_VOXEL_DEPTH_SOURCE": "must3r_xyz_if_available",
+      "OBJECTX_VIS_DEPTH_SOURCE": "must3r_xyz_if_available",
+      "OBJECTX_VIS_RAW_DEPTH_CONF_THR": "1.5"
     }
   }
 }
