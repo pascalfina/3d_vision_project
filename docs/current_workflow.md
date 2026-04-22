@@ -139,6 +139,19 @@ Important files:
 The current profile workflow does not create the full baseline dataset. It
 builds new roots on top of it.
 
+What later stages take from the baseline:
+
+- `files/3RScan.json` is used by `build-pred-ready` to write a one-scene
+  `3RScan.json` into the pred-ready root.
+- `files/objects.json` provides the original object ids, labels, categories,
+  attributes, colors, and global ids.
+- `files/orig/data/<scene_id>.pkl.gz` is used as the template for scene graph
+  feature dimensions and metadata.
+- `files/Features3D/` is linked forward so SLAT/U3DGS can load the expected
+  feature folders.
+- `scenes/<scene_id>/` provides original mesh/metadata assets that may be linked
+  into reconstructed or pred-ready roots for compatibility.
+
 ### 2. `segment-inputs`
 
 Command:
@@ -165,6 +178,35 @@ Creates SAM2 masks:
 
 `obj_id_pkl/<scene_id>.pkl` is the important machine-readable mask file.
 `objects_sam2.json` is not the final Object-X object registry.
+
+More concretely:
+
+```text
+sam2_projection/obj_id_pkl/<scene_id>.pkl
+```
+
+contains per-frame 2D object-id masks. This is what `voxelise` reads when:
+
+```text
+OBJECTX_MASK_SOURCE=sam2_projection
+```
+
+The visual JPGs under `sam2_projection/obj_id/<scene_id>/` are useful for
+inspection, but they are not what the model consumes.
+
+`objects_sam2.json` stores SAM2 track metadata such as:
+
+```text
+id
+n_frames
+first_frame
+last_frame
+area_mean
+area_max
+```
+
+This helps debug segmentation, but downstream Object-X inference still expects
+a normal `files/objects.json` in the pred-ready root.
 
 ### 3. `must3r`, `mast3r-sfm`, and `fuse`
 
@@ -213,6 +255,22 @@ The voxelise stage chooses which one to read with:
 }
 ```
 
+The sequence directory must contain frame files in the expected Scan3R naming
+scheme, for example:
+
+```text
+frame-000123.color.jpg
+frame-000123.pose.txt
+frame-000123.depth.pgm
+frame-000123.depth_raw.npy
+frame-000123.conf.npy
+frame-000123.xyz.npy
+```
+
+Not every variant has every file. For example, `xyz.npy` is important for the
+MUSt3R xyz path, while the original baseline path may only rely on the standard
+depth/pose files.
+
 ### 4. `voxelise`
 
 Command:
@@ -246,6 +304,56 @@ objects: baseline/files/objects.json
 This only makes sense if the mask object ids match the object ids expected by
 `objects.json`.
 
+The voxelise wrapper stages a temporary root. Conceptually it does this:
+
+```text
+tmp/files/objects.json              -> link from reconstruction or baseline
+tmp/files/<mask_source>/            -> link from reconstruction
+tmp/files/gt_projection             -> alias to selected mask source
+tmp/scenes/<scene_id>/sequence/     -> staged from scene_source_dirname
+```
+
+Then the core voxeliser loops over object ids from `files/objects.json`. For
+each object it:
+
+1. finds frames where that object id appears in the selected mask source
+2. optionally filters bad masks / pose jumps / too-small selections
+3. loads the selected RGB, depth, pose, and optionally `xyz.npy` maps
+4. lifts the object masks into 3D using one of the object sources
+5. converts the object geometry into a 64-resolution voxel grid
+6. projects voxels back into images
+7. samples DINOv2 patch features for the projected voxels
+8. writes the dense voxel-feature file
+
+The object construction mode is controlled by:
+
+```text
+OBJECTX_VOXEL_OBJECT_SOURCE
+```
+
+Common values:
+
+```text
+lifted_masks  direct lifted masked depth / xyz points
+tsdf_masks    TSDF fusion path
+hybrid_masks  hybrid path with fallback behaviour
+```
+
+The depth source is controlled by:
+
+```text
+OBJECTX_VOXEL_DEPTH_SOURCE
+```
+
+For our MUSt3R path the important value is usually:
+
+```text
+must3r_xyz_if_available
+```
+
+If `OBJECTX_VOXEL_REQUIRE_XYZ=1`, voxelise fails instead of silently falling
+back when expected `xyz.npy` maps are missing.
+
 Creates one folder per reconstructed object:
 
 ```text
@@ -260,6 +368,15 @@ Meaning:
 
 Objects can disappear here if masks/depth/poses are bad or not enough geometry
 is produced.
+
+The shape of the saved voxel file is expected to be:
+
+```text
+N x 1027
+```
+
+where the first 3 columns are voxel coordinates and the remaining 1024 columns
+are DINO features.
 
 ### 5. `build-pred-ready`
 
@@ -304,6 +421,36 @@ Creates the final dataset root:
 This is the step that generates the final `objects.json` used by downstream
 inference.
 
+In more detail, `build-pred-ready` does five important things:
+
+1. stages a compatible scene folder under `<pred_ready>/scenes/<scene_id>/`
+2. discovers reconstructed object folders under `<reconstruction>/files/gs_annotations/<scene_id>/`
+3. filters out objects without valid voxel geometry or with too few voxels
+4. copies semantic metadata for surviving ids from baseline `objects.json`
+5. rebuilds `files/orig/data/<scene_id>.pkl.gz` so it matches the surviving objects
+
+The rebuilt scene graph contains:
+
+```text
+objects_id
+global_objects_id
+objects_cat
+objects_count
+object_id2idx
+obj_points
+root_obj_id
+rel_trans
+edges
+pairs
+triples
+object_attributes
+bow_vec_object_attr_feats
+bow_vec_object_edge_feats
+```
+
+That is why `build-pred-ready` is the bridge between geometry reconstruction and
+the original Object-X model input format.
+
 ### 6. `validate-pred-ready` and `compare-arrangement`
 
 Commands:
@@ -321,6 +468,13 @@ scripts/segmentation/validation/compare_scene_arrangement.py
 ```
 
 These are checks. They do not create the core inference inputs.
+
+`validate-pred-ready` checks that the pred-ready root has the expected files and
+can be loaded by the dataset code.
+
+`compare-arrangement` compares object layout against the baseline arrangement.
+This is useful when debugging whether object centers, scales, or relative
+positions are broken.
 
 ### 7. `slat`
 
@@ -354,6 +508,25 @@ Writes:
 <pred_ready>/files/gs_embeddings/<scene_id>_slat.npz
 ```
 
+The wrapper does not run directly on the persistent root. It creates/stages a
+temporary inference root under `/tmp` and links the necessary files into it:
+
+```text
+tmp/files/objects.json
+tmp/files/orig/
+tmp/files/gs_annotations/
+tmp/files/Features3D/
+tmp/scenes/<scene_id>/sequence/
+```
+
+The persistent output is forced back into:
+
+```text
+<pred_ready>/files/gs_embeddings/
+```
+
+so the next stage can reuse it.
+
 ### 8. `u3dgs`
 
 Command:
@@ -386,6 +559,9 @@ Writes embeddings and visualization outputs such as:
 <pred_ready>/vis/<scene_id>_joint.ply
 ```
 
+`u3dgs` expects the SLAT embedding to already exist. If `slat` failed or wrote
+to a different root, `u3dgs` will fail or silently run on stale inputs.
+
 ### 9. `render`
 
 Command:
@@ -409,6 +585,64 @@ vis/rendered_joint_depth_bg/
 
 This is for visual debugging, not for model input.
 
+The render step can combine:
+
+- the decoded joint point cloud / Gaussian output
+- reconstructed object geometry
+- background points lifted from scene depth/pose
+- SAM2 masks if the profile points `mask_root` to the reconstruction root
+
+This is why render settings often contain both pred-ready paths and
+reconstruction paths.
+
+## One Concrete Cabinet Example
+
+For a MUSt3R/SAM2 cabinet profile, the important paths usually look like:
+
+```text
+baseline:
+  /work/scratch/pafina/objectx-data-baseline
+
+reconstruction:
+  /work/courses/3dv/team35/pafina/objectx-data-fullscene-cabinet-hybrid-gtmask
+
+pred_ready:
+  /work/scratch/pafina/objectx-data-fullscene-cabinet-predready-v2-floorfix
+```
+
+The core generated flow is:
+
+```text
+segment-inputs
+  -> reconstruction/files/sam2_projection/obj_id_pkl/<scene_id>.pkl
+  -> reconstruction/files/objects_sam2.json
+
+must3r
+  -> reconstruction/scenes_sam2_must3r/<scene_id>/sequence/frame-*.pose.txt
+  -> reconstruction/scenes_sam2_must3r/<scene_id>/sequence/frame-*.depth.pgm
+  -> reconstruction/scenes_sam2_must3r/<scene_id>/sequence/frame-*.xyz.npy
+
+voxelise
+  -> reconstruction/files/gs_annotations/<scene_id>/<obj_id>/voxel_output_dense.npz
+  -> reconstruction/files/gs_annotations/<scene_id>/<obj_id>/mean_scale_dense.npz
+
+build-pred-ready
+  -> pred_ready/files/objects.json
+  -> pred_ready/files/orig/data/<scene_id>.pkl.gz
+  -> pred_ready/files/gs_annotations/<scene_id>/<obj_id>/ symlinks
+
+slat
+  -> pred_ready/files/gs_embeddings/<scene_id>_slat.npz
+
+u3dgs
+  -> pred_ready/files/gs_embeddings/<scene_id>_ulat.npz
+  -> pred_ready/vis/<scene_id>_joint.ply
+
+render
+  -> repo vis/rendered_joint_depth_bg/...html
+  -> repo vis/rendered_joint_depth_bg/...mp4
+```
+
 ## Debugging Order
 
 When a run looks wrong, inspect in this order:
@@ -423,4 +657,3 @@ When a run looks wrong, inspect in this order:
 8. Pred-ready scene graph: `<pred_ready>/files/orig/data/<scene_id>.pkl.gz`
 9. SLAT output: `<pred_ready>/files/gs_embeddings/<scene_id>_slat.npz`
 10. U3DGS / render outputs
-
