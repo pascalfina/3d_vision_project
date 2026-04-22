@@ -1,19 +1,23 @@
-import os
 import json
-import numpy as np
-import cv2
+import os
 from pathlib import Path
-from typing import List, Tuple
+from typing import Optional, Sequence
+
+import cv2
+import numpy as np
+
 
 def save_masks(masks_list, output_dir, frame_idx, save_format="jpg", scene_id=""):
     """Save masks per object in the new format."""
     # This will be called differently now
     pass
 
+
 def save_depth(depth, output_dir, frame_idx):
     """Save depth as .pgm."""
-    depth_mm = (depth * 1000).astype(np.uint16)  # Convert to mm
+    depth_mm = (depth * 1000).astype(np.uint16)
     cv2.imwrite(os.path.join(output_dir, f"frame-{int(frame_idx):06d}.depth.pgm"), depth_mm)
+
 
 def save_poses(poses, output_dir, scene_id=None, frame_idxs=None):
     """Save poses per frame as .txt."""
@@ -74,6 +78,7 @@ def save_sequence_info(
         with open(output_path / "predicted_camera_meta.json", "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
 
+
 def load_frames_from_scene(scene_dir, ext=".color.jpg", resize=None):
     """Load frames from scene directory."""
     frame_paths = sorted(Path(scene_dir).glob(f"*{ext}"))
@@ -85,15 +90,66 @@ def load_frames_from_scene(scene_dir, ext=".color.jpg", resize=None):
         frames.append(img)
     return frames, [str(p) for p in frame_paths]
 
-def select_keyframes(frame_paths, strategy="stride", stride=10, n_keyframes=3):
-    """Select keyframes."""
+
+def _load_rgb_frames_from_paths(frame_paths: Sequence[str]) -> list[np.ndarray]:
+    frames = []
+    for path in frame_paths:
+        image = cv2.imread(str(path))
+        if image is None:
+            raise ValueError(f"Failed to read frame for keyframe selection: {path}")
+        frames.append(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    return frames
+
+
+def select_keyframes(
+    frame_paths,
+    strategy="stride",
+    stride=10,
+    n_keyframes=3,
+    *,
+    frames: Optional[Sequence[np.ndarray]] = None,
+    sam2_cfg: Optional[dict] = None,
+    device="cuda",
+    preview_candidates=8,
+    refine_keyframes=True,
+    scene_id="scene",
+):
+    """Select keyframes.
+
+    For `strategy="heuristic"` this delegates to the SAM2-preview pipeline in
+    `preprocessing/segmentation/keyframe_selection.py`.
+    """
+    num_frames = len(frame_paths)
+    if num_frames == 0:
+        return []
+
     if strategy == "stride":
-        return list(range(0, len(frame_paths), stride))
-    elif strategy == "uniform":
-        indices = np.linspace(0, len(frame_paths)-1, n_keyframes, dtype=int)
+        return list(range(0, num_frames, stride))
+
+    if strategy == "uniform":
+        indices = np.linspace(0, num_frames - 1, n_keyframes, dtype=int)
         return indices.tolist()
-    elif strategy == "heuristic": 
-        indices = False
-        return indices.tolist()
-    else:
-        return list(range(len(frame_paths)))
+
+    if strategy == "heuristic":
+        from preprocessing.segmentation.keyframe_selection import (
+            select_keyframes_heuristic,
+        )
+
+        if frames is None:
+            frames = _load_rgb_frames_from_paths(frame_paths)
+        if sam2_cfg is None:
+            raise ValueError("sam2_cfg is required for heuristic keyframe selection")
+
+        return select_keyframes_heuristic(
+            frame_paths=frame_paths,
+            frames=list(frames),
+            sam2_cfg=sam2_cfg,
+            n_keyframes=int(n_keyframes),
+            stride=int(stride),
+            device=device,
+            preview_candidates=int(preview_candidates),
+            refine_preview=bool(refine_keyframes),
+            scene_id=str(scene_id),
+        )
+
+    return list(range(num_frames))

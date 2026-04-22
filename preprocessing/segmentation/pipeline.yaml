@@ -6,7 +6,7 @@ dataset:
   resize: [960, 540]
 
 keyframes:
-  strategy: "stride"             # "stride" | "uniform" | "all"
+  strategy: "heuristic"             # "stride" | "uniform" | "heuristic" | "all"
   stride: 4
 
 sam2:

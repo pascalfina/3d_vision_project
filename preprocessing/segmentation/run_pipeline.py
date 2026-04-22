@@ -72,9 +72,23 @@ def run_scene(scene_id, scene_dir, cfg):
         raise ValueError(f"Failed to decode one or more frames for scene {scene_id}")
 
     kf_cfg = cfg["keyframes"]
+    keyframe_strategy = kf_cfg.get("strategy", "stride")
+    keyframe_stride = kf_cfg.get("stride", 10)
+    keyframe_count = kf_cfg.get("n_keyframes", 20)
+    refine_keyframes = kf_cfg.get("refine_keyframes", keyframe_strategy == "heuristic")
+    preview_candidates = kf_cfg.get("preview_candidates", 8)
     keyframe_idxs = select_keyframes(
-        frame_paths, kf_cfg.get("strategy","stride"),
-        kf_cfg.get("stride",10), kf_cfg.get("n_keyframes",20))
+        frame_paths,
+        keyframe_strategy,
+        keyframe_stride,
+        keyframe_count,
+        frames=frames,
+        sam2_cfg=cfg.get("sam2"),
+        device=device,
+        preview_candidates=preview_candidates,
+        refine_keyframes=refine_keyframes,
+        scene_id=scene_id,
+    )
     if not keyframe_idxs:
         raise ValueError(f"No keyframes selected for scene {scene_id}")
     if any(idx < 0 or idx >= len(frames) for idx in keyframe_idxs):
