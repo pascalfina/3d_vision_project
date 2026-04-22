@@ -139,6 +139,26 @@ If you want to understand what needs to change, compare:
 
 The structure stays the same. You mainly replace scene-specific values.
 
+#### Local Path Overrides
+
+Profiles can use environment variables such as `${OBJECTX_BASELINE_ROOT}` and
+`${OBJECTX_CABINET_RECON_ROOT}` instead of hardcoding every absolute path.
+
+For a new account, copy the example file once:
+
+```bash
+cp configs/workflows/local_paths.env.example configs/workflows/local_paths.env
+```
+
+Then edit only:
+
+```text
+configs/workflows/local_paths.env
+```
+
+This file is ignored by git. The workflow runner loads it automatically before
+expanding profile JSON values.
+
 #### What You Need Before Creating A New Profile
 
 Before filling a new profile, make sure these files or directories exist for the new scene:

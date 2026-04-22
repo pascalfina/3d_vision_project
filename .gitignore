@@ -35,6 +35,7 @@ runs/
 .venv
 .venv/
 .venv_objx/
+configs/workflows/local_paths.env
 training_out/
 config.yaml
 .codex*

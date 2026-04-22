@@ -52,6 +52,75 @@ def parse_args():
     return parser.parse_args()
 
 
+def _strip_shell_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def load_local_paths_env(repo_root: Path) -> None:
+    """Load optional per-user path overrides before expanding profile JSON.
+
+    The file intentionally supports only simple ``KEY=value`` / ``export KEY=value``
+    lines. That keeps it safe to parse from Python and still easy for teammates to
+    edit without touching every scene profile.
+    """
+
+    path = repo_root / "configs" / "workflows" / "local_paths.env"
+    if not path.exists():
+        return
+    for lineno, raw_line in enumerate(path.read_text().splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            raise ValueError(f"Invalid line in {path}:{lineno}: expected KEY=value")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Invalid empty key in {path}:{lineno}")
+        value = _strip_shell_quotes(value)
+        os.environ[key] = os.path.expanduser(os.path.expandvars(value))
+
+
+def set_base_path_defaults(repo_root: Path) -> None:
+    user = os.environ.get("USER", "pafina")
+    os.environ.setdefault("OBJECTX_REPO_ROOT", str(repo_root))
+    os.environ.setdefault("OBJECTX_USER_ROOT", f"/work/scratch/{user}")
+    os.environ.setdefault("OBJECTX_TEAM_ROOT", f"/work/courses/3dv/team35/{user}")
+
+
+def set_derived_path_defaults() -> None:
+    user_root = os.environ["OBJECTX_USER_ROOT"]
+    team_root = os.environ["OBJECTX_TEAM_ROOT"]
+    os.environ.setdefault("OBJECTX_BASELINE_ROOT", f"{user_root}/objectx-data-baseline")
+    os.environ.setdefault("OBJECTX_WORKFLOW_LOG_ROOT", f"{team_root}/logs")
+
+    # Current shared cabinet profile defaults. Override these in
+    # configs/workflows/local_paths.env when running on another account.
+    os.environ.setdefault(
+        "OBJECTX_CABINET_RECON_ROOT",
+        f"{team_root}/objectx-data-fullscene-cabinet-hybrid-gtmask",
+    )
+    os.environ.setdefault(
+        "OBJECTX_CABINET_PREDREADY_FLOORFIX_ROOT",
+        f"{user_root}/objectx-data-fullscene-cabinet-predready-v2-floorfix",
+    )
+
+
+def expand_profile_values(value):
+    if isinstance(value, str):
+        return os.path.expanduser(os.path.expandvars(value))
+    if isinstance(value, list):
+        return [expand_profile_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: expand_profile_values(item) for key, item in value.items()}
+    return value
+
+
 def profile_dir(repo_root: Path, override: str) -> Path:
     if override:
         return Path(override).expanduser().resolve()
@@ -76,7 +145,7 @@ def resolve_profile_path(repo_root: Path, profile_arg: str, override_dir: str) -
 
 
 def load_profile(path: Path) -> dict:
-    return json.loads(path.read_text())
+    return expand_profile_values(json.loads(path.read_text()))
 
 
 def input_variant_config_path(repo_root: Path) -> Path:
@@ -650,6 +719,9 @@ def main():
         sys.stdout.reconfigure(line_buffering=True)
     args = parse_args()
     repo_root = Path(args.repo_root).resolve()
+    set_base_path_defaults(repo_root)
+    load_local_paths_env(repo_root)
+    set_derived_path_defaults()
 
     if args.list_profiles:
         raise SystemExit(list_profiles(repo_root, args.profile_dir))
