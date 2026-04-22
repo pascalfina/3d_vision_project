@@ -7,12 +7,12 @@ SCRATCH_ROOT="${Data_ROOT_DIR:-/work/scratch/pafina/objectx-data-baseline}"
 TMP_GT_ROOT="${TMP_GT_ROOT:-/tmp/${USER}-objectx-gt-anno}"
 RESET_TMP="${RESET_TMP:-0}"
 
-if [[ ! -d "$REPO_ROOT/.venv_objx" ]]; then
-  echo "Missing venv at $REPO_ROOT/.venv_objx" >&2
+if [[ ! -d "$REPO_ROOT/3dv" ]]; then
+  echo "Missing venv at $REPO_ROOT/3dv" >&2
   exit 1
 fi
 
-source "$REPO_ROOT/.venv_objx/bin/activate"
+source "$REPO_ROOT/3dv/bin/activate"
 
 if [[ "$RESET_TMP" == "1" ]]; then
   rm -rf "$TMP_GT_ROOT"

@@ -10,12 +10,12 @@ SPLIT="${SPLIT:-train}"
 MAX_SCANS="${MAX_SCANS:-0}"
 CACHE_ROOT="${OBJECTX_CACHE_ROOT:-/work/scratch/pafina/objectx-cache}"
 
-if [[ ! -d "$REPO_ROOT/.venv_objx" ]]; then
-  echo "Missing venv at $REPO_ROOT/.venv_objx" >&2
+if [[ ! -d "$REPO_ROOT/3DV" ]]; then
+  echo "Missing venv at $REPO_ROOT/3dv" >&2
   exit 1
 fi
 
-source "$REPO_ROOT/.venv_objx/bin/activate"
+source "$REPO_ROOT/3dv/bin/activate"
 
 if [[ "$RESET_TMP" == "1" ]]; then
   rm -rf "$TMP_FEAT3D_ROOT"
