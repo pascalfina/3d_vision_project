@@ -31,6 +31,9 @@ Each profile defines one scene setup, and each action runs exactly one stage of 
 
 Important: this workflow does **not** replace the earlier Object-X dataset preparation. It builds on top of already prepared scene files and preprocessing artifacts such as `files/3RScan.json`, `files/objects.json`, `files/Features3D/`, `files/<mask_source>/obj_id_pkl/<scene>.pkl`, and `scenes/<scene>/sequence/`.
 
+For a step-by-step explanation of the generated files and how the roots connect,
+see [`docs/current_workflow.md`](docs/current_workflow.md).
+
 List available profiles:
 
 ```bash
