@@ -4,13 +4,13 @@
   "split": "val",
   "input_variant": "legacy+sam",
   "roots": {
-    "baseline": "/work/scratch/pafina/objectx-data-baseline",
-    "reconstruction": "/work/scratch/pafina/objectx-data-fullscene-cabinet-hybrid-sam2mask",
-    "pred_ready": "/work/scratch/pafina/objectx-data-fullscene-cabinet-predready-sam2-v1"
+    "baseline": "${OBJECTX_BASELINE_ROOT}",
+    "reconstruction": "${OBJECTX_CABINET_SAM2_RECON_ROOT}",
+    "pred_ready": "${OBJECTX_CABINET_SAM2_PREDREADY_ROOT}"
   },
   "artifacts": {
-    "manifest": "/work/scratch/pafina/object-x/debug/cabinet_fullscene_all_objects_manifest.json",
-    "joint_ply": "/work/scratch/pafina/object-x/vis/e61b0e04-bada-2f31-82d6-72831a602ba7_joint.ply"
+    "manifest": "${OBJECTX_REPO_DEBUG_ROOT}/cabinet_fullscene_all_objects_manifest.json",
+    "joint_ply": "${OBJECTX_REPO_VIS_ROOT}/e61b0e04-bada-2f31-82d6-72831a602ba7_joint.ply"
   },
   "segment_inputs": {
     "config": "preprocessing/segmentation/pipeline.yaml",
@@ -76,7 +76,7 @@
       "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_TARGET_AREA_RATIO": "1.4",
       "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_ENABLED": "0"
     },
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_segment_inputs_sam2.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_segment_inputs_sam2.log"
   },
   "voxelise": {
     "env": {
@@ -85,7 +85,7 @@
     },
     "reset_tmp": 1,
     "max_scans": 0,
-    "log": "/work/scratch/pafina/object-x/debug/debug_fullscene_cabinet_2_5_sam2_hybrid.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_fullscene_cabinet_2_5_sam2_hybrid.log"
   },
   "build_pred_ready": {
     "knn": 4,
@@ -94,10 +94,10 @@
     "overwrite": true
   },
   "validate_pred_ready": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/pred_ready_validation/cabinet_legacy_sam2_hybrid"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/pred_ready_validation/cabinet_legacy_sam2_hybrid"
   },
   "compare_arrangement": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/arrangement_compare/cabinet_legacy_sam2_hybrid_vs_gt"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/arrangement_compare/cabinet_legacy_sam2_hybrid_vs_gt"
   },
   "slat": {
     "env": {
@@ -105,7 +105,7 @@
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
       "RESET_TMP": "1"
     },
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_legacy_sam2_hybrid_slat.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_legacy_sam2_hybrid_slat.log"
   },
   "u3dgs": {
     "visualize": true,
@@ -136,11 +136,11 @@
       "OBJECTX_VIS_PRUNE_MAX_POINTS",
       "OBJECTX_VIS_PRUNE_QUANTILE_SAMPLE_MAX"
     ],
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_legacy_sam2_hybrid_u3dgs.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_legacy_sam2_hybrid_u3dgs.log"
   },
   "render_bundle": {
     "label": "cabinet_legacy_sam2_hybrid",
-    "data_root": "/work/scratch/pafina/objectx-data-baseline",
+    "data_root": "${OBJECTX_BASELINE_ROOT}",
     "background_remove_mode": "loaded",
     "pose_mode": "raw",
     "lift_coord_system": "pinhole",

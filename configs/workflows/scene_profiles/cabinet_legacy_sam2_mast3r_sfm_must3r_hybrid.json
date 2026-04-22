@@ -5,13 +5,13 @@
   "input_variant": "legacy+sam+must3r",
   "mask_source": "sam2_projection",
   "roots": {
-    "baseline": "/work/scratch/pafina/objectx-data-baseline",
-    "reconstruction": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-cabinet-hybrid-gtmask",
-    "pred_ready": "/work/courses/3dv/team35/pafina/objectx-data/objectx-data-fullscene-cabinet-predready-sam2-mast3r-sfm-must3r-v1"
+    "baseline": "${OBJECTX_BASELINE_ROOT}",
+    "reconstruction": "${OBJECTX_CABINET_RECON_ROOT}",
+    "pred_ready": "${OBJECTX_CABINET_MAST3R_SFM_MUST3R_PREDREADY_ROOT}"
   },
   "artifacts": {
-    "manifest": "/work/scratch/pafina/object-x/debug/cabinet_fullscene_all_objects_manifest.json",
-    "joint_ply": "/work/scratch/pafina/object-x/vis/e61b0e04-bada-2f31-82d6-72831a602ba7_joint_mast3r_sfm_must3r.ply"
+    "manifest": "${OBJECTX_REPO_DEBUG_ROOT}/cabinet_fullscene_all_objects_manifest.json",
+    "joint_ply": "${OBJECTX_REPO_VIS_ROOT}/e61b0e04-bada-2f31-82d6-72831a602ba7_joint_mast3r_sfm_must3r.ply"
   },
   "must3r": {
     "config": "preprocessing/segmentation/pipeline.yaml",
@@ -42,7 +42,7 @@
       "OBJECTX_MUST3R_POSE_JUMP_RELATIVE_FACTOR": "10.0",
       "OBJECTX_MUST3R_ZERO_INVALID_POSE_DEPTHS": "0"
     },
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_mast3r_sfm_must3r_hybrid_must3r.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_mast3r_sfm_must3r_hybrid_must3r.log"
   },
   "mast3r_sfm": {
     "config": "preprocessing/segmentation/pipeline.yaml",
@@ -77,10 +77,10 @@
       "OBJECTX_MAST3R_SFM_LOSS2D_BACKWARD_CHUNK_PAIRS": "0",
       "OBJECTX_MAST3R_SFM_LOSS_DUST3R_BACKWARD_CHUNK_PAIRS": "0",
       "OBJECTX_MAST3R_SFM_FAST_LOSS_PATH": "1",
-      "OBJECTX_MAST3R_SFM_CACHE_DIR": "/work/courses/3dv/team35/pafina/objectx-cache/mast3r_sfm_cabinet",
+      "OBJECTX_MAST3R_SFM_CACHE_DIR": "${OBJECTX_MAST3R_SFM_CACHE_DIR}",
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
     },
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_mast3r_sfm_must3r_hybrid_mast3r_sfm.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_mast3r_sfm_must3r_hybrid_mast3r_sfm.log"
   },
   "segment_inputs": {
     "config": "preprocessing/segmentation/pipeline.yaml",
@@ -102,7 +102,7 @@
       "OBJECTX_SEG_REFINE_KEYFRAMES": "1",
       "OBJECTX_SEG_KEYFRAME_PREVIEW_CANDIDATES": "8"
     },
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_mast3r_sfm_must3r_hybrid_segment_inputs.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_mast3r_sfm_must3r_hybrid_segment_inputs.log"
   },
   "fuse": {
     "must3r_scenes_dirname": "scenes_sam2_must3r",
@@ -110,7 +110,7 @@
     "output_scenes_dirname": "scenes_sam2_mast3r_sfm_must3r",
     "min_conf_thr": 0.4,
     "min_alignment_frames": 20,
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_mast3r_sfm_must3r_hybrid_fuse.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_mast3r_sfm_must3r_hybrid_fuse.log"
   },
   "voxelise": {
     "scene_source_dirname": "scenes_sam2_mast3r_sfm_must3r",
@@ -139,7 +139,7 @@
     },
     "reset_tmp": 1,
     "max_scans": 0,
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_mast3r_sfm_must3r_hybrid_voxelise.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_mast3r_sfm_must3r_hybrid_voxelise.log"
   },
   "build_pred_ready": {
     "reconstruction_scenes_dirname": "scenes_sam2_mast3r_sfm_must3r",
@@ -149,10 +149,10 @@
     "overwrite": true
   },
   "validate_pred_ready": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/pred_ready_validation/cabinet_legacy_sam2_mast3r_sfm_must3r_hybrid"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/pred_ready_validation/cabinet_legacy_sam2_mast3r_sfm_must3r_hybrid"
   },
   "compare_arrangement": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/arrangement_compare/cabinet_legacy_sam2_mast3r_sfm_must3r_hybrid_vs_gt"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/arrangement_compare/cabinet_legacy_sam2_mast3r_sfm_must3r_hybrid_vs_gt"
   },
   "slat": {
     "env": {
@@ -161,7 +161,7 @@
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
       "RESET_TMP": "1"
     },
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_mast3r_sfm_must3r_hybrid_slat.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_mast3r_sfm_must3r_hybrid_slat.log"
   },
   "u3dgs": {
     "visualize": true,
@@ -193,11 +193,11 @@
       "OBJECTX_VIS_PRUNE_MAX_POINTS",
       "OBJECTX_VIS_PRUNE_QUANTILE_SAMPLE_MAX"
     ],
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_mast3r_sfm_must3r_hybrid_u3dgs.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_mast3r_sfm_must3r_hybrid_u3dgs.log"
   },
   "render_bundle": {
     "label": "cabinet_mast3r_sfm_must3r_hybrid",
-    "data_root": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-cabinet-hybrid-gtmask",
+    "data_root": "${OBJECTX_CABINET_RECON_ROOT}",
     "mask_source": "sam2_projection",
     "background_remove_mode": "loaded",
     "pose_mode": "invert",

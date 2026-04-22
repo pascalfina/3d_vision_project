@@ -5,13 +5,13 @@
   "input_variant": "legacy",
   "mask_source": "gt_projection",
   "roots": {
-    "baseline": "/work/scratch/pafina/objectx-data-baseline",
-    "reconstruction": "/work/scratch/pafina/objectx-data-fullscene-oven-hybrid-gtmask",
-    "pred_ready": "/work/scratch/pafina/objectx-data-fullscene-oven-predready-v1"
+    "baseline": "${OBJECTX_BASELINE_ROOT}",
+    "reconstruction": "${OBJECTX_OVEN_RECON_ROOT}",
+    "pred_ready": "${OBJECTX_OVEN_PREDREADY_ROOT}"
   },
   "artifacts": {
-    "manifest": "/work/scratch/pafina/object-x/debug/oven_fullscene_all_objects_manifest.json",
-    "joint_ply": "/work/scratch/pafina/object-x/vis/5341b7e3-8a66-2cdd-8709-66a2159f0017_joint.ply"
+    "manifest": "${OBJECTX_REPO_DEBUG_ROOT}/oven_fullscene_all_objects_manifest.json",
+    "joint_ply": "${OBJECTX_REPO_VIS_ROOT}/5341b7e3-8a66-2cdd-8709-66a2159f0017_joint.ply"
   },
   "voxelise": {
     "env": {
@@ -20,7 +20,7 @@
     },
     "reset_tmp": 1,
     "max_scans": 0,
-    "log": "/work/scratch/pafina/object-x/debug/debug_fullscene_oven_2_5.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_fullscene_oven_2_5.log"
   },
   "build_pred_ready": {
     "knn": 4,
@@ -29,10 +29,10 @@
     "overwrite": true
   },
   "validate_pred_ready": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/pred_ready_validation/oven_predready_v1"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/pred_ready_validation/oven_predready_v1"
   },
   "compare_arrangement": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/arrangement_compare/oven_predready_v1_vs_gt"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/arrangement_compare/oven_predready_v1_vs_gt"
   },
   "slat": {
     "env": {
@@ -41,7 +41,7 @@
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
       "RESET_TMP": "1"
     },
-    "log": "/work/scratch/pafina/object-x/debug/debug_oven_predready_v1_slat.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_oven_predready_v1_slat.log"
   },
   "u3dgs": {
     "visualize": true,
@@ -73,11 +73,11 @@
       "OBJECTX_VIS_PRUNE_MAX_POINTS",
       "OBJECTX_VIS_PRUNE_QUANTILE_SAMPLE_MAX"
     ],
-    "log": "/work/scratch/pafina/object-x/debug/debug_oven_predready_v1_u3dgs_supportonly.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_oven_predready_v1_u3dgs_supportonly.log"
   },
   "render_bundle": {
     "label": "oven_predready_v1_supportonly",
-    "data_root": "/work/scratch/pafina/objectx-data-baseline",
+    "data_root": "${OBJECTX_BASELINE_ROOT}",
     "mask_source": "gt_projection",
     "background_remove_mode": "loaded",
     "pose_mode": "raw",

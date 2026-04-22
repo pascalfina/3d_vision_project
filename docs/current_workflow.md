@@ -102,6 +102,10 @@ profile should run on a different account or storage root. The runner expands
 `${OBJECTX_BASELINE_ROOT}`, `${OBJECTX_CABINET_RECON_ROOT}`, and related
 variables inside profile JSON files.
 
+This file is the main place for account-specific paths. It controls the roots
+used by `segment-inputs`, pose/depth runs, `voxelise`, `build-pred-ready`,
+inference, validation, and rendering.
+
 ```text
 configs/workflows/input_variants.json
 ```
