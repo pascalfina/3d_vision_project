@@ -5,21 +5,21 @@
   "input_variant": "legacy+sam+must3r",
   "mask_source": "sam2_projection",
   "roots": {
-    "baseline": "/work/scratch/pafina/objectx-data-baseline",
-    "reconstruction": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-cabinet-hybrid-gtmask",
-    "pred_ready": "/work/scratch/pafina/objectx-data-fullscene-cabinet-predready-v2-floorfix"
+    "baseline": "${OBJECTX_BASELINE_ROOT}",
+    "reconstruction": "${OBJECTX_CABINET_RECON_ROOT}",
+    "pred_ready": "${OBJECTX_CABINET_PREDREADY_FLOORFIX_ROOT}"
   },
   "artifacts": {
-    "manifest": "/work/scratch/pafina/object-x/debug/cabinet_fullscene_all_objects_manifest.json",
-    "joint_ply": "/work/scratch/pafina/object-x/vis/e61b0e04-bada-2f31-82d6-72831a602ba7_joint.ply"
+    "manifest": "${OBJECTX_REPO_ROOT}/debug/cabinet_fullscene_all_objects_manifest.json",
+    "joint_ply": "${OBJECTX_REPO_ROOT}/vis/e61b0e04-bada-2f31-82d6-72831a602ba7_joint.ply"
   },
   "must3r": {
     "config": "preprocessing/segmentation/pipeline.yaml",
     "run_must3r": true,
     "run_sam2": false,
     "run_registry": false,
-    "input_root": "/work/scratch/pafina/objectx-data-baseline",
-    "output_root": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-cabinet-hybrid-gtmask",
+    "input_root": "${OBJECTX_BASELINE_ROOT}",
+    "output_root": "${OBJECTX_CABINET_RECON_ROOT}",
     "mask_dirname": "sam2_projection",
     "objects_filename": "objects_sam2.json",
     "scenes_dirname": "scenes_sam2_must3r",
@@ -55,7 +55,7 @@
       "OBJECTX_SEG_REFINE_KEYFRAMES": "1",
       "OBJECTX_SEG_KEYFRAME_PREVIEW_CANDIDATES": "8"
     },
-    "log": "/work/courses/3dv/team35/pafina/logs/debug_cabinet_floorfix_must3r.log"
+    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_cabinet_floorfix_must3r.log"
   },
   "voxelise": {
     "scene_source_dirname": "scenes_sam2_must3r",
@@ -84,7 +84,7 @@
     },
     "reset_tmp": 1,
     "max_scans": 0,
-    "log": "/work/courses/3dv/team35/pafina/logs/debug_fullscene_cabinet_2_5_floorfix_rerun.log"
+    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_fullscene_cabinet_2_5_floorfix_rerun.log"
   },
   "build_pred_ready": {
     "reconstruction_scenes_dirname": "scenes_sam2_must3r",
@@ -94,10 +94,10 @@
     "overwrite": true
   },
   "validate_pred_ready": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/pred_ready_validation/cabinet_predready_v2_floorfix"
+    "out_dir": "${OBJECTX_REPO_ROOT}/vis/pred_ready_validation/cabinet_predready_v2_floorfix"
   },
   "compare_arrangement": {
-    "out_dir": "/work/scratch/pafina/object-x/vis/arrangement_compare/cabinet_predready_v2_floorfix_vs_gt"
+    "out_dir": "${OBJECTX_REPO_ROOT}/vis/arrangement_compare/cabinet_predready_v2_floorfix_vs_gt"
   },
   "slat": {
     "env": {
@@ -106,7 +106,7 @@
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
       "RESET_TMP": "1"
     },
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_predready_v2_floorfix_slat.log"
+    "log": "${OBJECTX_REPO_ROOT}/debug/debug_cabinet_predready_v2_floorfix_slat.log"
   },
   "u3dgs": {
     "visualize": true,
@@ -138,11 +138,11 @@
       "OBJECTX_VIS_PRUNE_MAX_POINTS",
       "OBJECTX_VIS_PRUNE_QUANTILE_SAMPLE_MAX"
     ],
-    "log": "/work/scratch/pafina/object-x/debug/debug_cabinet_predready_v2_floorfix_u3dgs_supportonly.log"
+    "log": "${OBJECTX_REPO_ROOT}/debug/debug_cabinet_predready_v2_floorfix_u3dgs_supportonly.log"
   },
   "render_bundle": {
     "label": "cabinet_predready_v2_floorfix_supportonly",
-    "data_root": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-cabinet-hybrid-gtmask",
+    "data_root": "${OBJECTX_CABINET_RECON_ROOT}",
     "mask_source": "sam2_projection",
     "background_remove_mode": "loaded",
     "pose_mode": "raw",
