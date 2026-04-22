@@ -93,6 +93,16 @@ Main configs. They define scene id, roots, mask source, scene source directory,
 stage logs, and stage-specific environment variables.
 
 ```text
+configs/workflows/local_paths.env
+```
+
+Optional per-user path override file. Copy it from
+`configs/workflows/local_paths.env.example` and edit only this file if the same
+profile should run on a different account or storage root. The runner expands
+`${OBJECTX_BASELINE_ROOT}`, `${OBJECTX_CABINET_RECON_ROOT}`, and related
+variables inside profile JSON files.
+
+```text
 configs/workflows/input_variants.json
 ```
 
