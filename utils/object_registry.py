@@ -6,13 +6,32 @@ from pathlib import Path
 from typing import Dict, List
 
 
+def _validate_registry(registry: dict) -> dict:
+    scans = registry.get("scans")
+    if not isinstance(scans, list) or len(scans) != 1:
+        raise ValueError("Predicted registry must contain exactly one scan entry")
+
+    scan_entry = scans[0]
+    if not isinstance(scan_entry, dict):
+        raise ValueError("Predicted scan entry must be a dict")
+    if "scan" not in scan_entry or "objects" not in scan_entry:
+        raise ValueError("Predicted scan entry must contain 'scan' and 'objects'")
+    if not isinstance(scan_entry["objects"], list):
+        raise ValueError("Predicted scan entry field 'objects' must be a list")
+    return scan_entry
+
+
 def build_objects_predicted(
     merged_tracks: Dict[int, Dict[int, np.ndarray]],
     scene_id: str,
 ) -> dict:
     """
-    Builds a dict with the same schema as 3RScan's objects.json,
-    but with objects predicted by SAM2.
+    Builds a predicted object registry with the same outer structure as
+    3RScan's objects.json: {"scans": [{"scan": ..., "objects": [...]}]}.
+
+    Predicted objects only include fields that are available or useful for the
+    current pipeline, instead of trying to emulate every GT-only annotation
+    field such as labels or affordances.
 
     Args:
         obj_id_imgs: {scan_fidx → (H, W) int32}  — one ID map per frame
@@ -30,8 +49,7 @@ def build_objects_predicted(
           "first_frame": int,    # first scan frame index
           "last_frame": int,     # last scan frame index
           "area_mean": float,    # mean pixel area across frames
-          "area_max": float,     # max pixel area across frames
-          "median_depth": float  # (optional) median depth at first frame
+          "area_max": float      # max pixel area across frames
         }]
       }]
     }
@@ -62,20 +80,38 @@ def build_objects_predicted(
 
 def save_objects_predicted(registry: dict, out_path: str):
     """
-    Appends or creates objects_predicted.json in out_dir.
-    If the file already exists, the new scan entry is merged in.
+    Creates or updates objects_predicted.json.
+
+    If the file already exists, the scan entry in ``registry`` replaces the
+    existing entry with the same scan id and all other scan entries are kept.
 
     Args:
         registry: output of build_objects_predicted()
-        out_dir:  directory where objects_predicted.json will be written
-        scene_id: used only for the log message
+        out_path: file path where objects_predicted.json will be written
     Returns:
         absolute path to the written file
     """
+    scan_entry = _validate_registry(registry)
+    scan_id = scan_entry["scan"]
+
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    merged = {"scans": []}
+    if Path(out_path).exists():
+        with open(out_path) as f:
+            existing = json.load(f)
+        if not isinstance(existing, dict) or not isinstance(existing.get("scans"), list):
+            raise ValueError(f"Existing predicted registry has invalid format: {out_path}")
+        merged["scans"] = [
+            entry for entry in existing["scans"]
+            if isinstance(entry, dict) and entry.get("scan") != scan_id
+        ]
+
+    merged["scans"].append(scan_entry)
+    merged["scans"].sort(key=lambda entry: entry["scan"])
+
     with open(out_path, "w") as f:
-        json.dump(registry, f, indent=2)
-    print(f"[Registry] Stored: {out_path}")
+        json.dump(merged, f, indent=2)
+    print(f"[Registry] Stored scan {scan_id}: {out_path}")
     return out_path
 
 

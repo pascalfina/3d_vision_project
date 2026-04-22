@@ -9,7 +9,8 @@ import gzip
 
 import colorlog
 import numpy as np
-import pickle5
+#import pickle5
+import pickle as pickle5
 
 _LOGGER = logging.getLogger(__name__)
 

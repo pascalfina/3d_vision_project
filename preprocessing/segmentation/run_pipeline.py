@@ -48,19 +48,39 @@ def make_output_dirs(cfg, scene_id):
 
 def run_scene(scene_id, scene_dir, cfg):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\n{'='*60}\n Escena: {scene_id}  |  device: {device}\n{'='*60}")
+    print(f"\n{'='*60}\n Scene: {scene_id}  |  device: {device}\n{'='*60}")
     t0 = time.time()
     dirs = make_output_dirs(cfg, scene_id)
+
+    scene_path = Path(scene_dir)
+    if not scene_path.exists():
+        raise FileNotFoundError(f"Scene directory does not exist: {scene_path}")
 
     resize = cfg["dataset"].get("resize")
     if isinstance(resize, list): resize = tuple(resize)
     frames, frame_paths = load_frames_from_scene(
         scene_dir, cfg["dataset"].get("image_ext", ".color.jpg"), resize)
+    if not frame_paths:
+        raise ValueError(
+            f"No frames found in {scene_path} matching '*{cfg['dataset'].get('image_ext', '.color.jpg')}'"
+        )
+    if len(frames) != len(frame_paths):
+        raise ValueError(
+            f"Loaded {len(frames)} frames but found {len(frame_paths)} frame paths for scene {scene_id}"
+        )
+    if any(frame is None for frame in frames):
+        raise ValueError(f"Failed to decode one or more frames for scene {scene_id}")
 
     kf_cfg = cfg["keyframes"]
     keyframe_idxs = select_keyframes(
         frame_paths, kf_cfg.get("strategy","stride"),
         kf_cfg.get("stride",10), kf_cfg.get("n_keyframes",20))
+    if not keyframe_idxs:
+        raise ValueError(f"No keyframes selected for scene {scene_id}")
+    if any(idx < 0 or idx >= len(frames) for idx in keyframe_idxs):
+        raise ValueError(
+            f"Keyframe indices out of range for scene {scene_id}: {keyframe_idxs}"
+        )
 
     # STEP 1: MUSt3R → poses + depth (run first to free VRAM before SAM2)
     mc = cfg["must3r"]
@@ -68,9 +88,12 @@ def run_scene(scene_id, scene_dir, cfg):
         frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
         dirs["pointmaps"] if mc.get("output_pointmaps") else None,
         scene_id, mc.get("resolution", 512), mc.get("min_conf_thr",1.5), device)
-    
-    print(frames[0].shape[:2])
-    print(depths[0].shape)
+    if not depths:
+        raise ValueError(f"MUSt3R returned no depth maps for scene {scene_id}")
+    if len(depths) != len(frame_paths):
+        raise ValueError(
+            f"MUSt3R returned {len(depths)} depth maps for {len(frame_paths)} input frames in scene {scene_id}"
+        )
 
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -98,16 +121,14 @@ def main():
     cfg = load_config(args.config)
     if args.scene: cfg["dataset"]["scene_id"] = args.scene
     
-    # Resolve model paths relative to repo root if needed
     cfg["sam2"]["checkpoint"] = str(resolve_model_path(cfg["sam2"]["checkpoint"]))
-    cfg["sam2"]["model_cfg"] = str(resolve_model_path(cfg["sam2"]["model_cfg"]))
     cfg["must3r"]["checkpoint"] = str(resolve_model_path(cfg["must3r"]["checkpoint"]))
 
     for scene_id, scene_dir in get_scene_dirs(cfg):
         try: run_scene(scene_id, scene_dir, cfg)
         except Exception as e:
             print(f"[ERROR] {scene_id}: {e}")
-            import traceback; traceback.print_exc()
+            raise
 
 if __name__ == "__main__":
     main()

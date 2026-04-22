@@ -12,6 +12,7 @@ data :
   label_file_name : labels.instances.align.annotated.v2.ply
   pred_subfix     : inseg.ply
   resplit: True
+  root_dir: "/cluster/project/cvg/data/3RScan"               # Change
 
 preprocess :
   pc_resolutions      : [64, 128, 256, 512, 2048]

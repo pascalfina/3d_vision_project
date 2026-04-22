@@ -33,7 +33,7 @@ def segment_keyframes(frames, keyframe_idxs, cfg, device="cuda"):
             masks = gen.generate(frames[idx])
         masks = sorted(masks, key=lambda x: x["area"], reverse=True)
         keyframe_masks[idx] = masks
-        print(f"  Frame {idx:5d}: {len(masks):3d} màscares")
+        print(f"  Frame {idx:5d}: {len(masks):3d} masks")
     del gen, sam2
     torch.cuda.empty_cache()
     return keyframe_masks
@@ -79,7 +79,7 @@ def colorize_obj_map(obj_map):
 def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, device="cuda"):
     """
     Propagate SAM2 masks across all frames and save in VLSG/Object-X format:
-      obj_id/<scan_id>/frame-xxxxxx.png   — uint16 lossless ID map
+      obj_id/<scan_id>/frame-xxxxxx.jpg   — jpg ID map
       obj_id_pkl/<scan_id>.pkl            — {frame_idx: np.ndarray int32}
       color/<scan_id>/frame-xxxxxx.jpg    — RGB visualization
     Returns:
@@ -117,6 +117,10 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
         for kf_idx, masks in keyframe_masks.items():
             n_objs = min(len(masks), max_obj)
             print(f"  Keyframe {kf_idx}: {n_objs} objectes")
+            if n_objs == 0:
+                # SAM2 video predictor requires at least one prompt (point/mask)
+                # before propagate_in_video; skip empty keyframes safely.
+                continue
 
             with torch.inference_mode(), torch.autocast(device_type=device, dtype=torch.bfloat16):
                 state = predictor.init_state(video_path=str(tmp_dir))
@@ -225,9 +229,14 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
                 cv2.cvtColor(color_vis, cv2.COLOR_RGB2BGR)
             )
 
-        # Save full int32 maps as pickle
+        # Save full int32 maps as pickle using zero-padded string frame ids
+        # to match the canonical 3RScan/Object-X style ("000042").
+        obj_id_imgs_for_pkl = {
+            f"{int(scan_fidx):06d}": obj_id_map
+            for scan_fidx, obj_id_map in obj_id_imgs.items()
+        }
         with open(os.path.join(pkl_dir, f"{scan_id}.pkl"), "wb") as f:
-            pickle.dump(obj_id_imgs, f)
+            pickle.dump(obj_id_imgs_for_pkl, f)
 
         merged_binary_scan = {
             new_id: {

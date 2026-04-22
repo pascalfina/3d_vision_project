@@ -1,13 +1,13 @@
 dataset:
   root: "/cluster/project/cvg/data/3RScan"               # Change
-  scene_id: "20c993b7-698f-29c5-847d-c8cb8a685f5a"       # or "all" fir everything
+  scene_id: "0ad2d3a1-79e2-2212-9b99-a96495d9f7fe"       # or "all" fir everything
   image_subdir: "sequence"
   image_ext: ".color.jpg"
   resize: [960, 540]
 
 keyframes:
   strategy: "stride"             # "stride" | "uniform" | "all"
-  stride: 500
+  stride: 4
 
 sam2:
   model_cfg:  "sam2.1_hiera_l.yaml"
