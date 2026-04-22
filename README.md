@@ -446,7 +446,7 @@ This repository differs from the original upstream checkout in two important way
    - safer attention backend fallbacks (`sdpa` / `naive`)
    - compatibility fixes for the Gaussian Splatting camera and renderer APIs
    - compatibility fixes for TRELLIS path resolution
-   - cluster helper scripts such as [`scripts/activate_objectx_env.sh`](scripts/activate_objectx_env.sh), [`run.sh`](run.sh), and [`run_all.sh`](run_all.sh)
+   - cluster helper scripts such as [`scripts/activate_objectx_env.sh`](scripts/activate_objectx_env.sh) and the workflow entrypoints under [`scripts/workflows/`](scripts/workflows/)
 
 ### 1. Storage, Quotas, and Where to Put Things
 
@@ -754,7 +754,7 @@ python -m pip install --no-cache-dir --no-build-isolation dependencies/gaussian-
 Then verify the full environment:
 
 ```bash
-./run.sh --action check_env
+bash scripts/check_objectx_env.sh
 python -c "import src.trainval.train_latent_autoencoder; print('latent train import ok')"
 ```
 
@@ -856,13 +856,13 @@ Then run the preprocessing steps from the dataset section below.
 
 ### 15. Running the Project
 
-We added a small runner abstraction to make the cluster workflow less fragile.
+We use small shell wrappers to make the cluster workflow less fragile.
 
 Main files:
 
 - [`scripts/activate_objectx_env.sh`](scripts/activate_objectx_env.sh)
-- [`run.sh`](run.sh)
-- [`run_all.sh`](run_all.sh)
+- [`scripts/workflows/run_scene_profile.sh`](scripts/workflows/run_scene_profile.sh)
+- [`scripts/check_objectx_env.sh`](scripts/check_objectx_env.sh)
 - [`configs/objectx_runner.env`](configs/objectx_runner.env)
 - [`configs/objectx_train_params.env`](configs/objectx_train_params.env)
 
@@ -874,14 +874,14 @@ source scripts/activate_objectx_env.sh
 export DATA_ROOT_DIR=/work/scratch/$USER/objectx-data
 export SCRATCH=/work/scratch/$USER
 
-./run.sh --action check_env
-./run.sh --action train_latent_autoencoder
+bash scripts/check_objectx_env.sh
+bash scripts/train_val/train_latent_autoencoder.sh
 ```
 
 For Slurm batch mode:
 
 ```bash
-./run.sh --mode sbatch --action train_latent_autoencoder
+sbatch scripts/slurm/objectx_job.sbatch
 ```
 
 The helper config [`configs/objectx_train_params.env`](configs/objectx_train_params.env) lets you override common training settings such as the maximum number of epochs. For quick smoke tests, we used:
@@ -919,7 +919,7 @@ If you want the shortest path to a working setup on the cluster, this is the ord
 2. create `.venv_objx` on `/work/scratch/$USER`
 3. install the core Python stack
 4. build the two Gaussian Splatting CUDA extensions on a GPU node
-5. run `./run.sh --action check_env`
+5. run `bash scripts/check_objectx_env.sh`
 6. download TRELLIS to `/work/scratch/$USER/TRELLIS-image-large`
 7. prepare `DATA_ROOT_DIR`
 8. run the required preprocessing

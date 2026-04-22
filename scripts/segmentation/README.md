@@ -35,16 +35,6 @@ Scene/object inspection, HTML export, and MP4 rendering utilities.
 
 Reserved for future active experiments that are not part of the main path.
 
-## `archive/`
-
-Older builders / selection files that are kept for reference but are not part of the current workflow.
-
-- `bootstrap_pred_projection_from_gt.py`
-- `build_mixed_scene_root.py`
-- `build_object_level_pilot_root.py`
-- `build_partial_context_mixed_root.py`
-- archived selection JSON files
-
 ## Recommended entrypoint
 
 For the stable current workflow, prefer:
