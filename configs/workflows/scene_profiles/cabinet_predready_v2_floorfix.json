@@ -10,8 +10,8 @@
     "pred_ready": "${OBJECTX_CABINET_PREDREADY_FLOORFIX_ROOT}"
   },
   "artifacts": {
-    "manifest": "${OBJECTX_REPO_ROOT}/debug/cabinet_fullscene_all_objects_manifest.json",
-    "joint_ply": "${OBJECTX_REPO_ROOT}/vis/e61b0e04-bada-2f31-82d6-72831a602ba7_joint.ply"
+    "manifest": "${OBJECTX_REPO_DEBUG_ROOT}/cabinet_fullscene_all_objects_manifest.json",
+    "joint_ply": "${OBJECTX_REPO_VIS_ROOT}/e61b0e04-bada-2f31-82d6-72831a602ba7_joint.ply"
   },
   "must3r": {
     "config": "preprocessing/segmentation/pipeline.yaml",
@@ -94,10 +94,10 @@
     "overwrite": true
   },
   "validate_pred_ready": {
-    "out_dir": "${OBJECTX_REPO_ROOT}/vis/pred_ready_validation/cabinet_predready_v2_floorfix"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/pred_ready_validation/cabinet_predready_v2_floorfix"
   },
   "compare_arrangement": {
-    "out_dir": "${OBJECTX_REPO_ROOT}/vis/arrangement_compare/cabinet_predready_v2_floorfix_vs_gt"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/arrangement_compare/cabinet_predready_v2_floorfix_vs_gt"
   },
   "slat": {
     "env": {
@@ -106,7 +106,7 @@
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
       "RESET_TMP": "1"
     },
-    "log": "${OBJECTX_REPO_ROOT}/debug/debug_cabinet_predready_v2_floorfix_slat.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_predready_v2_floorfix_slat.log"
   },
   "u3dgs": {
     "visualize": true,
@@ -138,7 +138,7 @@
       "OBJECTX_VIS_PRUNE_MAX_POINTS",
       "OBJECTX_VIS_PRUNE_QUANTILE_SAMPLE_MAX"
     ],
-    "log": "${OBJECTX_REPO_ROOT}/debug/debug_cabinet_predready_v2_floorfix_u3dgs_supportonly.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_cabinet_predready_v2_floorfix_u3dgs_supportonly.log"
   },
   "render_bundle": {
     "label": "cabinet_predready_v2_floorfix_supportonly",

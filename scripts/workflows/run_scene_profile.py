@@ -97,17 +97,63 @@ def set_derived_path_defaults() -> None:
     user_root = os.environ["OBJECTX_USER_ROOT"]
     team_root = os.environ["OBJECTX_TEAM_ROOT"]
     os.environ.setdefault("OBJECTX_BASELINE_ROOT", f"{user_root}/objectx-data-baseline")
+    os.environ.setdefault("OBJECTX_REPO_DEBUG_ROOT", f"{os.environ['OBJECTX_REPO_ROOT']}/debug")
+    os.environ.setdefault("OBJECTX_REPO_VIS_ROOT", f"{os.environ['OBJECTX_REPO_ROOT']}/vis")
     os.environ.setdefault("OBJECTX_WORKFLOW_LOG_ROOT", f"{team_root}/logs")
 
-    # Current shared cabinet profile defaults. Override these in
-    # configs/workflows/local_paths.env when running on another account.
+    # Scene/profile roots. Override these in configs/workflows/local_paths.env
+    # when running on another account or storage layout.
+    os.environ.setdefault(
+        "OBJECTX_CABINET_SAM2_RECON_ROOT",
+        f"{user_root}/objectx-data-fullscene-cabinet-hybrid-sam2mask",
+    )
+    os.environ.setdefault(
+        "OBJECTX_CABINET_SAM2_PREDREADY_ROOT",
+        f"{user_root}/objectx-data-fullscene-cabinet-predready-sam2-v1",
+    )
     os.environ.setdefault(
         "OBJECTX_CABINET_RECON_ROOT",
         f"{team_root}/objectx-data-fullscene-cabinet-hybrid-gtmask",
     )
     os.environ.setdefault(
+        "OBJECTX_CABINET_MUST3R_PREDREADY_ROOT",
+        f"{user_root}/objectx-data-fullscene-cabinet-predready-sam2-must3r-v1",
+    )
+    os.environ.setdefault(
         "OBJECTX_CABINET_PREDREADY_FLOORFIX_ROOT",
         f"{user_root}/objectx-data-fullscene-cabinet-predready-v2-floorfix",
+    )
+    os.environ.setdefault(
+        "OBJECTX_CABINET_MAST3R_SFM_RECON_ROOT",
+        f"{user_root}/objectx-data-fullscene-cabinet-hybrid-sam2mask-mast3r-sfm",
+    )
+    os.environ.setdefault(
+        "OBJECTX_CABINET_MAST3R_SFM_PREDREADY_ROOT",
+        f"{user_root}/objectx-data-fullscene-cabinet-predready-sam2-mast3r-sfm-v1",
+    )
+    os.environ.setdefault(
+        "OBJECTX_CABINET_MAST3R_SFM_MUST3R_PREDREADY_ROOT",
+        f"{team_root}/objectx-data/objectx-data-fullscene-cabinet-predready-sam2-mast3r-sfm-must3r-v1",
+    )
+    os.environ.setdefault(
+        "OBJECTX_CABINET_LIFTED_RECON_ROOT",
+        f"{user_root}/objectx-data-fullscene-cabinet-lifted-gtmask",
+    )
+    os.environ.setdefault(
+        "OBJECTX_CABINET_LIFTED_PREDREADY_ROOT",
+        f"{user_root}/objectx-data-fullscene-cabinet-predready-v2-liftedonly",
+    )
+    os.environ.setdefault(
+        "OBJECTX_OVEN_RECON_ROOT",
+        f"{user_root}/objectx-data-fullscene-oven-hybrid-gtmask",
+    )
+    os.environ.setdefault(
+        "OBJECTX_OVEN_PREDREADY_ROOT",
+        f"{user_root}/objectx-data-fullscene-oven-predready-v1",
+    )
+    os.environ.setdefault(
+        "OBJECTX_MAST3R_SFM_CACHE_DIR",
+        f"{team_root}/objectx-cache/mast3r_sfm_cabinet",
     )
 
 

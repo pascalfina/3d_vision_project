@@ -159,6 +159,11 @@ configs/workflows/local_paths.env
 This file is ignored by git. The workflow runner loads it automatically before
 expanding profile JSON values.
 
+It covers the common roots for all workflow actions: `segment-inputs`, `must3r`,
+`mast3r-sfm`, `fuse`, `voxelise`, `build-pred-ready`, validation, `slat`,
+`u3dgs`, and `render`. The comments inside the file explain which variable
+controls which dataset/output family.
+
 #### What You Need Before Creating A New Profile
 
 Before filling a new profile, make sure these files or directories exist for the new scene:
