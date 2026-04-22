@@ -12,12 +12,17 @@ keyframes:
 sam2:
   model_cfg:  "sam2.1_hiera_l.yaml"
   checkpoint: "/cluster/home/ealegret/3d_vision_project/models/sam2ckpt/sam2.1_hiera_large.pt"
-  points_per_side: 32
-  pred_iou_thresh: 0.86
-  stability_score_thresh: 0.92
-  min_mask_region_area: 200
+  points_per_side: 24
+  points_per_batch: 64
+  pred_iou_thresh: 0.92
+  stability_score_thresh: 0.96
+  stability_score_offset: 1.0
+  box_nms_thresh: 0.40
+  crop_n_layers: 1
+  crop_n_points_downscale_factor: 2
+  min_mask_region_area: 3000
   max_obj_ids: 50
-
+  
 must3r:
   checkpoint: "models/must3r/MUSt3R_512.pth"
   resolution: 512

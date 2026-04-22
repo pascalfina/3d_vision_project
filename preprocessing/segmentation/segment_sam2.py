@@ -17,13 +17,13 @@ def segment_keyframes(frames, keyframe_idxs, cfg, device="cuda"):
     gen = SAM2AutomaticMaskGenerator(
         model=sam2,
         points_per_side=cfg.get("points_per_side", 32),
-        pred_iou_thresh=cfg.get("pred_iou_thresh", 0.86),
+        pred_iou_thresh=cfg.get("pred_iou_thresh", 0.95),
         stability_score_thresh=cfg.get("stability_score_thresh", 0.92),
         stability_score_offset=cfg.get("stability_score_offset", 1.0),
-        box_nms_thresh=cfg.get("box_nms_thresh", 0.7),
-        crop_n_layers=cfg.get("crop_n_layers", 1),
+        box_nms_thresh=cfg.get("box_nms_thresh", 0.5),
+        crop_n_layers=cfg.get("crop_n_layers", 0),
         crop_n_points_downscale_factor=cfg.get("crop_n_points_downscale_factor", 2),
-        min_mask_region_area=cfg.get("min_mask_region_area", 200),
+        min_mask_region_area=cfg.get("min_mask_region_area", 1200),
         output_mode=cfg.get("output_mode", "binary_mask"),
         points_per_batch=cfg.get("points_per_batch", 64),
     )

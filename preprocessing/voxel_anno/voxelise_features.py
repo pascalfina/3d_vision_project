@@ -952,13 +952,13 @@ def voxelise_features(
                 np.savez(mean_scale_path, mean=mean, scale=scale)
                 _LOGGER.info(f"Saved mean and scale to {mean_scale_path}")
 
-            if has_existing_outputs and not args.override:
-                _LOGGER.info(
-                    "Skipping voxel feature extraction for %s (%s) because outputs exist",
-                    scan_id,
-                    obj["id"],
-                )
-                continue
+            #if has_existing_outputs and not args.override:
+            #    _LOGGER.info(
+            #        "Skipping voxel feature extraction for %s (%s) because outputs exist",
+            #        scan_id,
+            #        obj["id"],
+            #    )
+            #    continue
 
             # STEP 5: Project the voxel to the image
             pose_world_to_camera = _invert_pose_list(pose_camera_to_world)

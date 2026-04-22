@@ -85,12 +85,15 @@ def load_frames_from_scene(scene_dir, ext=".color.jpg", resize=None):
         frames.append(img)
     return frames, [str(p) for p in frame_paths]
 
-def select_keyframes(frame_paths, strategy="stride", stride=10, n_keyframes=20):
+def select_keyframes(frame_paths, strategy="stride", stride=10, n_keyframes=3):
     """Select keyframes."""
     if strategy == "stride":
         return list(range(0, len(frame_paths), stride))
     elif strategy == "uniform":
         indices = np.linspace(0, len(frame_paths)-1, n_keyframes, dtype=int)
+        return indices.tolist()
+    elif strategy == "heuristic": 
+        indices = False
         return indices.tolist()
     else:
         return list(range(len(frame_paths)))
