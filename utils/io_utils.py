@@ -12,12 +12,17 @@ def save_masks(masks_list, output_dir, frame_idx, save_format="jpg", scene_id=""
 def save_depth(depth, output_dir, frame_idx):
     """Save depth as .pgm."""
     depth_mm = (depth * 1000).astype(np.uint16)  # Convert to mm
-    cv2.imwrite(os.path.join(output_dir, f"frame-{frame_idx:04d}.depth.pgm"), depth_mm)
+    cv2.imwrite(os.path.join(output_dir, f"frame-{int(frame_idx):06d}.depth.pgm"), depth_mm)
 
-def save_poses(poses, output_dir, scene_id):
+def save_poses(poses, output_dir, scene_id=None, frame_idxs=None):
     """Save poses per frame as .txt."""
-    for i, pose in enumerate(poses):
-        np.savetxt(os.path.join(output_dir, f"frame-{i:04d}.pose.txt"), pose)
+    if frame_idxs is None:
+        frame_idxs = range(len(poses))
+    for frame_idx, pose in zip(frame_idxs, poses):
+        np.savetxt(
+            os.path.join(output_dir, f"frame-{int(frame_idx):06d}.pose.txt"),
+            pose,
+        )
 
 def load_frames_from_scene(scene_dir, ext=".color.jpg", resize=None):
     """Load frames from scene directory."""

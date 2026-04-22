@@ -84,7 +84,7 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
       color/<scan_id>/frame-xxxxxx.jpg    — RGB visualization
     Returns:
         obj_id_imgs:   {scan_fidx → (H,W) int32}
-        merged_binary: {new_id   → {tmp_fidx → bool mask}}
+        merged_binary: {new_id   → {scan_fidx → bool mask}}
     """
     print("\n[SAM2] Step 2: Propagating with VideoPredictor")
     predictor = build_sam2_video_predictor(
@@ -229,6 +229,14 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
         with open(os.path.join(pkl_dir, f"{scan_id}.pkl"), "wb") as f:
             pickle.dump(obj_id_imgs, f)
 
+        merged_binary_scan = {
+            new_id: {
+                tmp_to_scan_fidx[tmp_fidx]: mask_bin
+                for tmp_fidx, mask_bin in frame_dict.items()
+            }
+            for new_id, frame_dict in merged_binary.items()
+        }
+
         n_empty = sum(1 for m in obj_id_imgs.values() if m.max() == 0)
         print(f"[SAM2] {len(merged_binary)} objects after fusion")
         print(f"[SAM2] {len(obj_id_imgs)} frames saved ({n_empty} empty / background-only)")
@@ -238,4 +246,4 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
         del predictor
         torch.cuda.empty_cache()
 
-    return obj_id_imgs, merged_binary
+    return obj_id_imgs, merged_binary_scan

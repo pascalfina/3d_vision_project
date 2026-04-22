@@ -31,4 +31,4 @@ echo "Current dir: $(pwd)"
 echo "Arguments passed to sbatch: $@"
 echo "Submitting training with override if provided"
 
-bash scripts/segmentation/segmentation_sam3.sh "$@" 
+bash scripts/segmentation/segmentation_sam.sh "$@" 

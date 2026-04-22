@@ -3,8 +3,14 @@ MUSt3R: predicts poses (N,4,4) and depth maps (H,W) from RGB only.
 Depth is extracted from the Z channel of the pointmaps (pts3d[...,2]).
 """
 import os, sys, numpy as np, torch, cv2
+from pathlib import Path
 from typing import List, Optional, Tuple
 from utils.io_utils import save_depth, save_poses
+
+
+def _parse_scan_frame_idx(frame_path):
+    stem = Path(frame_path).stem
+    return int(stem.split(".")[0].split("-")[-1])
 
 
 def run_must3r_on_scene(
@@ -17,6 +23,7 @@ def run_must3r_on_scene(
     Returns: poses (N,4,4), depths list of (H,W).
     """
     print(f"\n[MUSt3R] Predicting poses+depth for {len(frame_paths)} frames")
+    frame_idxs = [_parse_scan_frame_idx(fp) for fp in frame_paths]
     must3r_path = os.environ.get("MUST3R_PATH", "must3r")
     if must3r_path not in sys.path:
         sys.path.insert(0, must3r_path)
@@ -83,7 +90,7 @@ def run_must3r_on_scene(
     depths = []
     pts3d_local = [o["pts3d_local"] for o in scene.x_out]
 
-    for i, (pts_local, mask) in enumerate(zip(pts3d_local, conf_masks)):
+    for frame_idx, (pts_local, mask) in zip(frame_idxs, zip(pts3d_local, conf_masks)):
         pts_local_np = pts_local.cpu().numpy() if hasattr(pts_local, "cpu") else pts_local
         mask_np = mask.cpu().numpy() if hasattr(mask, "cpu") else mask
 
@@ -92,9 +99,9 @@ def run_must3r_on_scene(
         
         depth = cv2.resize(depth, (224, 172), interpolation=cv2.INTER_NEAREST)
         depths.append(depth)
-        save_depth(depth, output_depth_dir, frame_idx=i)
+        save_depth(depth, output_depth_dir, frame_idx=frame_idx)
 
-    save_poses(poses_w2c, output_poses_dir, scene_id)
+    save_poses(poses_w2c, output_poses_dir, scene_id, frame_idxs=frame_idxs)
     print(f"[MUSt3R] Poses: {poses_w2c.shape} | Depth shape: {depths[0].shape}")
     del model; torch.cuda.empty_cache()
     return poses_w2c, depths
