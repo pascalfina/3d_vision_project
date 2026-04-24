@@ -138,6 +138,31 @@ def ensure_symlink(src: Path, dst: Path):
     os.symlink(src, dst)
 
 
+def _candidate_object_filenames() -> list[str]:
+    candidates = []
+    for value in [
+        os.environ.get("OBJECTX_VOXEL_OBJECTS_FILENAME"),
+        os.environ.get("OBJECTX_SEG_OBJECTS_FILENAME"),
+        "objects.json",
+    ]:
+        name = (value or "").strip()
+        if name and name not in candidates:
+            candidates.append(name)
+    return candidates
+
+
+def resolve_objects_info_file(scratch_root: Path) -> Path:
+    for name in _candidate_object_filenames():
+        path = scratch_root / "files" / name
+        if path.exists():
+            return path
+    joined = ", ".join(_candidate_object_filenames())
+    raise FileNotFoundError(
+        f"Could not find any object registry file in {scratch_root / 'files'}; "
+        f"tried: {joined}"
+    )
+
+
 def bootstrap_scratch_root(
     scratch_root: Path,
     baseline_root: Optional[Path],
@@ -257,11 +282,17 @@ def main():
         os.symlink(src, alias_dst)
     print(f"[2.5] using mask source {mask_dirname}", flush=True)
     print(f"[2.5] using scene source {scene_source_dirname}", flush=True)
+    objects_info_path = resolve_objects_info_file(scratch_root)
+    objects_info_name = objects_info_path.name
+    ensure_symlink(objects_info_path, tmp_root / "files" / objects_info_name)
+    ensure_symlink(objects_info_path, tmp_root / "files" / "objects.json")
+    print(f"[2.5] using object registry {objects_info_name}", flush=True)
     for key in [
         "OBJECTX_VOXEL_DEPTH_SOURCE",
         "OBJECTX_VOXEL_REQUIRE_XYZ",
         "OBJECTX_VOXEL_POSE_MODE",
         "OBJECTX_VOXEL_OBJECT_SOURCE",
+        "OBJECTX_VOXEL_OBJECTS_FILENAME",
         "OBJECTX_SCENE_SOURCE_DIRNAME",
     ]:
         print(f"[2.5] env {key}={os.environ.get(key, '')}", flush=True)
@@ -303,14 +334,14 @@ def main():
         ]
     )
 
-    all_obj_info = json.load(open(scratch_root / "files" / "objects.json"))["scans"]
+    all_obj_info = json.load(open(objects_info_path))["scans"]
     obj_lookup = {entry["scan"]: entry for entry in all_obj_info}
     scan_ids = load_scan_ids(scratch_root, args.split)
     target_scene_id = (os.environ.get("OBJECTX_SCENE_ID") or "").strip()
     if target_scene_id:
         if target_scene_id not in obj_lookup:
             raise ValueError(
-                f"OBJECTX_SCENE_ID={target_scene_id} not found in files/objects.json"
+                f"OBJECTX_SCENE_ID={target_scene_id} not found in files/{objects_info_name}"
             )
         if target_scene_id not in scan_ids:
             print(

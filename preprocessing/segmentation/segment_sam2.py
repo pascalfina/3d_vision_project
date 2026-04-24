@@ -2650,12 +2650,13 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
             # Pass 1: store original binary tracks exactly as before, but on disk.
             for key_pos, (kf_idx, limited_masks) in enumerate(prepared_keyframe_items):
                 n_objs = len(limited_masks)
-                print(f"  Keyframe {kf_idx}: {n_objs} objectes")
+                print(f"  Keyframe {kf_idx}: {n_objs} objects")
                 for chunk_start in range(0, n_objs, obj_chunk_size):
                     chunk_masks = limited_masks[chunk_start : chunk_start + obj_chunk_size]
                     chunk_end = chunk_start + len(chunk_masks) - 1
+                    chunk_label = "full-batch" if len(chunk_masks) == n_objs else "chunk"
                     print(
-                        f"    pass1 chunk {chunk_start}-{chunk_end} "
+                        f"    pass1 {chunk_label} {chunk_start}-{chunk_end} "
                         f"of keyframe {kf_idx} (size={len(chunk_masks)})"
                     )
 
