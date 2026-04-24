@@ -152,6 +152,14 @@ def set_derived_path_defaults() -> None:
         f"{user_root}/objectx-data-fullscene-oven-predready-v1",
     )
     os.environ.setdefault(
+        "OBJECTX_OVEN_SAM2_MUST3R_RECON_ROOT",
+        f"{user_root}/objectx-data-fullscene-oven-hybrid-sam2mask-must3r",
+    )
+    os.environ.setdefault(
+        "OBJECTX_OVEN_SAM2_MUST3R_PREDREADY_ROOT",
+        f"{user_root}/objectx-data-fullscene-oven-predready-sam2-must3r-v1",
+    )
+    os.environ.setdefault(
         "OBJECTX_MAST3R_SFM_CACHE_DIR",
         f"{team_root}/objectx-cache/mast3r_sfm_cabinet",
     )
@@ -358,6 +366,7 @@ def add_cli_arg(parts, flag: str, value):
 
 def build_voxelise_action(repo_root: Path, profile: dict):
     sec = section(profile, "voxelise")
+    variant = input_variant_settings(repo_root, profile)
     env_updates = {
         "DATA_ROOT_DIR": sec.get("data_root", roots(profile).get("reconstruction")),
         "OBJECTX_BASELINE_ROOT": sec.get("baseline_root", roots(profile).get("baseline")),
@@ -365,6 +374,9 @@ def build_voxelise_action(repo_root: Path, profile: dict):
         "SPLIT": sec.get("split", shared_value(profile, "split", "val")),
         "OBJECTX_MASK_SOURCE": sec.get(
             "mask_source", profile_mask_source(repo_root, profile)
+        ),
+        "OBJECTX_VOXEL_OBJECTS_FILENAME": sec.get(
+            "objects_filename", variant.get("objects_filename", "objects.json")
         ),
         "RESET_TMP": str(sec.get("reset_tmp", 1)),
         "MAX_SCANS": str(sec.get("max_scans", 0)),
