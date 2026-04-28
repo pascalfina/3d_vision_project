@@ -1,27 +1,40 @@
 dataset:
   root: "/cluster/project/cvg/data/3RScan"               # Change
-  scene_id: "0ad2d3a1-79e2-2212-9b99-a96495d9f7fe"       # or "all" fir everything
+  scene_id: "5341b7e3-8a66-2cdd-8709-66a2159f0017"       # or "all" fir everything
   image_subdir: "sequence"
   image_ext: ".color.jpg"
   resize: [960, 540]
 
 keyframes:
-  strategy: "heuristic"             # "stride" | "uniform" | "heuristic" | "all"
-  stride: 4
+  strategy: "stride"             # "stride" | "uniform" | "heuristic" | "all"
+  stride: 15
 
 sam2:
   model_cfg:  "sam2.1_hiera_l.yaml"
   checkpoint: "/cluster/home/ealegret/3d_vision_project/models/sam2ckpt/sam2.1_hiera_large.pt"
   points_per_side: 24
   points_per_batch: 64
-  pred_iou_thresh: 0.92
+  pred_iou_thresh: 0.95
   stability_score_thresh: 0.96
   stability_score_offset: 1.0
   box_nms_thresh: 0.40
   crop_n_layers: 1
   crop_n_points_downscale_factor: 2
   min_mask_region_area: 3000
-  max_obj_ids: 50
+  max_obj_ids: 40
+  propagation_mode: "per_keyframe"   # "per_keyframe" | "global"
+  global_prompt_keyframes: "all"     # "all" or integer (e.g. 6)
+  global_max_total_obj_ids: 0        # 0 = unlimited (only used in "global")
+  merge_iou_threshold: 0.58
+  merge_iou_reduction: "max"      # "max" (recommended) | "mean"
+  prune_short_tracks: true
+  track_min_frames: 2
+  track_min_peak_area: 1500
+  track_min_total_area: 1600
+  min_mask_pixels_per_frame: 200
+  temporal_vote_weight: 0.15
+  mask_prob_threshold: 0.62
+
   
 must3r:
   checkpoint: "models/must3r/MUSt3R_512.pth"

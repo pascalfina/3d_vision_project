@@ -14,14 +14,16 @@ def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
 def merge_tracks_by_iou(
     tracks: Dict[int, Dict[int, np.ndarray]],
     iou_threshold: float = 0.5,
+    iou_reduction: str = "max",
 ) -> Tuple[Dict[int, Dict[int, np.ndarray]], Dict[int, List[int]]]:
     """
     Merges overlapping tracks from different keyframes using Union-Find.
 
     Args:
         tracks:        {orig_id → {frame_idx → bool mask}}
-        iou_threshold: minimum mean IoU over shared frames to consider
-                       two tracks the same object
+        iou_threshold: threshold over the selected IoU reduction over shared
+                       frames to consider two tracks the same object
+        iou_reduction: "max" (recommended) or "mean"
 
     Returns:
         merged_tracks: {new_id → {frame_idx → bool mask}}  (re-indexed from 1)
@@ -51,7 +53,8 @@ def merge_tracks_by_iou(
             if not shared:
                 continue
             ious = [mask_iou(tracks[ids[i]][f], tracks[ids[j]][f]) for f in shared]
-            if np.mean(ious) >= iou_threshold:
+            pair_iou = float(np.max(ious)) if iou_reduction == "max" else float(np.mean(ious))
+            if pair_iou >= iou_threshold:
                 union(i, j)
 
     # Group track indices by Union-Find component

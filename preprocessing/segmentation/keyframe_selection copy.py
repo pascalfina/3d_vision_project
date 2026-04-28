@@ -424,8 +424,8 @@ def describe_preview_masks(frame, masks, preview_top_k, descriptor_grid):
                             useful_occ_grid[gy, gx] = float(useful_cell.mean())
 
         thumb = cv2.resize(rotated_thumbs[rot_k], (12, 12), interpolation=cv2.INTER_AREA)
-        thumb_rgb = thumb.astype(np.float32) / 255.0
-        thumb_gray = cv2.cvtColor(thumb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+        thumb_rgb = cv2.cvtColor(thumb, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        thumb_gray = cv2.cvtColor(thumb, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
         thumb_edges = cv2.Canny((thumb_gray * 255.0).astype(np.uint8), 40, 120).astype(np.float32) / 255.0
         thumb_small = cv2.resize(thumb_gray, (6, 6), interpolation=cv2.INTER_AREA).astype(np.float32)
         occ_row = occ_grid.mean(axis=1).astype(np.float32)
