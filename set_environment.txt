@@ -1,0 +1,20 @@
+### SAM2Object Set Up
+
+# Prepare environment
+module purge
+module load stack/.2024-06-silent
+module load gcc/12.2.0
+module load cuda/12.4.1
+module load python/3.10.13
+
+
+python -m venv /cluster/scratch/ealegret/.sam2object
+source /cluster/scratch/ealegret/.sam2object/bin/activate
+python --version
+
+pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+pip install open3d natsort matplotlib tqdm opencv-python scipy plyfile
+
+# Install SAM2
+cd segtrack
+pip install -e .
