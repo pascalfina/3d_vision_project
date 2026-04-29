@@ -5,7 +5,7 @@ Usage: python run_pipeline.py --config configs/pipeline.yaml
 import argparse, os, time, torch, yaml
 from pathlib import Path
 from utils.io_utils import load_frames_from_scene, select_keyframes
-from segment_sam2 import segment_keyframes, propagate_masks
+from segment_sam2 import ensure_sam2_postprocess_ready, segment_keyframes, propagate_masks
 from depth_pose_must3r import run_must3r_on_scene
 from utils.object_registry import build_objects_predicted, save_objects_predicted
 
@@ -114,6 +114,9 @@ def run_scene(scene_id, scene_dir, cfg):
 
     # STEP 2: SAM2 grid → masks on keyframes
     sc = cfg["sam2"]
+    require_postprocess = str(os.environ.get("OBJECTX_SAM2_REQUIRE_POSTPROCESS", "0")).strip().lower() not in {"0", "false", "no", "off", ""}
+    if require_postprocess:
+        ensure_sam2_postprocess_ready(device=device)
     keyframe_masks = segment_keyframes(frames, keyframe_idxs, sc, device)
 
     # STEP 3: SAM2 VideoPredictor → propagate to all frames
@@ -124,7 +127,7 @@ def run_scene(scene_id, scene_dir, cfg):
     save_objects_predicted(registry, str(Path(dirs["objects"]) / "objects_predicted.json"))
     # data_root/3RScan/files/objects_predicted.json
 
-    print(f"\n✓ {scene_id} completada en {time.time()-t0:.1f}s")
+    print(f"\n✓ {scene_id} completed in {time.time()-t0:.1f}s")
 
 
 def main():
