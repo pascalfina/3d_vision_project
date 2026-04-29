@@ -5,7 +5,6 @@ args=("$@")
 # Environment setup
 export VLSG_SPACE=$(pwd)
 export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-splatting"
-export MUST3R_PATH=/cluster/home/ealegret/3d_vision_project/models/must3r
 export OBJECTX_SAM2_APPLY_POSTPROCESS=0
 export OBJECTX_SAM2_REQUIRE_POSTPROCESS=0
 
@@ -22,6 +21,6 @@ cd /cluster/home/ealegret/3d_vision_project/models/sam2
 pip install -e ".[notebooks]"
 
 cd /cluster/home/ealegret/3d_vision_project/
-/usr/bin/time -v python preprocessing/segmentation/run_pipeline.py --config preprocessing/segmentation/pipeline.yaml
-python preprocessing/segmentation/run_pipeline.py --config preprocessing/segmentation/pipeline.yaml
-python preprocessing/voxel_anno/voxelise_features.py --config preprocessing/voxel_anno/voxel_anno.yaml --model_dir /cluster/project/cvg/data/3RScan --objects-file objects_predicted.json --scene 5341b7e3-8a66-2cdd-8709-66a2159f0017 --object-source lifted_masks
+# In case of memory debug: /usr/bin/time -v 
+/usr/bin/time -v  python3 preprocessing/segmentation/run_pipeline.py --config preprocessing/segmentation/pipeline.yaml
+python3 preprocessing/voxel_anno/voxelise_features.py --config preprocessing/voxel_anno/voxel_anno.yaml --model_dir /cluster/project/cvg/data/3RScan --objects-file objects_predicted.json --scene 5341b7e3-8a66-2cdd-8709-66a2159f0017 --object-source lifted_masks

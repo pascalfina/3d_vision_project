@@ -1,13 +1,18 @@
 """
-Full pipeline: SAM2 (masks) + MUSt3R (poses + depth).
+GT-geometry pipeline: SAM2 2D hypotheses -> 3D consolidation -> grouped 2D labels.
 Usage: python run_pipeline.py --config configs/pipeline.yaml
 """
-import argparse, os, time, torch, yaml
+import argparse, os, time, torch, yaml, pickle
 from pathlib import Path
 from utils.io_utils import load_frames_from_scene, select_keyframes
 from segment_sam2 import ensure_sam2_postprocess_ready, segment_keyframes, propagate_masks
-from depth_pose_must3r import run_must3r_on_scene
 from utils.object_registry import build_objects_predicted, save_objects_predicted
+from sam2_helpers import parse_scan_frame_idx, save_obj_id_and_color_frames
+from sam2_3d_track_merging import (
+    GeometryProvider,
+    merge_sam2_tracks_in_3d,
+    compose_grouped_2d_labels,
+)
 
 def resolve_model_path(path):
     p = Path(path)
@@ -19,6 +24,22 @@ def resolve_model_path(path):
 def load_config(path):
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def _validate_geometry_flags(cfg):
+    gsrc = cfg.get("sam3d_merge", {}).get("geometry_source", {})
+    use_gt_depth = bool(gsrc.get("use_gt_depth", False))
+    use_pred_depth = bool(gsrc.get("use_pred_depth", False))
+    use_gt_pose = bool(gsrc.get("use_gt_pose", False))
+    use_pred_pose = bool(gsrc.get("use_pred_pose", False))
+    if not (use_gt_depth and use_gt_pose):
+        raise ValueError(
+            "This clean pipeline is GT-geometry only. Set use_gt_depth=true and use_gt_pose=true."
+        )
+    if use_pred_depth or use_pred_pose:
+        raise ValueError(
+            "This clean pipeline is GT-geometry only. Set use_pred_depth=false and use_pred_pose=false."
+        )
 
 def get_scene_dirs(cfg):
     root = Path(cfg["dataset"]["root"])
@@ -36,12 +57,9 @@ def get_scene_dirs(cfg):
 def make_output_dirs(cfg, scene_id):
     data_root = Path(cfg["dataset"]["root"])
     dirs = {
-        "depth": str(data_root / "scenes_predicted" / scene_id / "sequence"),
-        "poses": str(data_root / "scenes_predicted" / scene_id / "sequence"),
-        "pointmaps": str(data_root / "scenes_predicted" / scene_id / "sequence" / "pointmaps"),
         "masks": str(data_root / "files" / "gt_projection_predicted"),
         "objects": str(data_root / "files"),
-        "vis": str(data_root / "scenes_predicted" / scene_id / "sequence" / "vis")
+        "vis": str(data_root / "files" / "sam3d_debug" / scene_id)
     }
     for d in dirs.values(): os.makedirs(d, exist_ok=True)
     return dirs
@@ -96,18 +114,9 @@ def run_scene(scene_id, scene_dir, cfg):
             f"Keyframe indices out of range for scene {scene_id}: {keyframe_idxs}"
         )
 
-    # STEP 1: MUSt3R → poses + depth (run first to free VRAM before SAM2)
-    mc = cfg["must3r"]
-    _, depths = run_must3r_on_scene(
-        frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
-        dirs["pointmaps"] if mc.get("output_pointmaps") else None,
-        scene_id, mc.get("resolution", 512), mc.get("min_conf_thr",1.5), device)
-    if not depths:
-        raise ValueError(f"MUSt3R returned no depth maps for scene {scene_id}")
-    if len(depths) != len(frame_paths):
-        raise ValueError(
-            f"MUSt3R returned {len(depths)} depth maps for {len(frame_paths)} input frames in scene {scene_id}"
-        )
+    # STEP 1: Geometry mode (GT-only for clean pipeline)
+    _validate_geometry_flags(cfg)
+    print("[Geometry] Using GT depth + GT pose", flush=True)
 
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -119,10 +128,57 @@ def run_scene(scene_id, scene_dir, cfg):
         ensure_sam2_postprocess_ready(device=device)
     keyframe_masks = segment_keyframes(frames, keyframe_idxs, sc, device)
 
-    # STEP 3: SAM2 VideoPredictor → propagate to all frames
-    _, merged_tracks = propagate_masks(frame_paths=frame_paths, keyframe_masks=keyframe_masks, cfg=sc, output_dir=dirs["masks"], scan_id=scene_id, device=device)
+    # STEP 3: SAM2 VideoPredictor → propagate to all frames (raw track hypotheses)
+    tracks = propagate_masks(
+        frame_paths=frame_paths,
+        keyframe_masks=keyframe_masks,
+        cfg=sc,
+        device=device,
+    )
 
-    # STEP 4: Build and save object registry
+    # STEP 4: 3D consolidation using GT geometry by default
+    frame_ids = [f"{parse_scan_frame_idx(fp):06d}" for fp in frame_paths]
+    gp = GeometryProvider(
+        scene_id=scene_id,
+        frame_ids=frame_ids,
+        cfg=cfg,
+        dataset_root=cfg["dataset"]["root"],
+    )
+    final_objects = merge_sam2_tracks_in_3d(
+        tracks=tracks,
+        frame_ids=frame_ids,
+        scene_id=scene_id,
+        cfg=cfg,
+        geometry_provider=gp,
+        debug_dir=dirs["vis"],
+    )
+
+    if not final_objects:
+        raise ValueError(f"3D merger produced no objects for scene {scene_id}")
+
+    h, w = frames[0].shape[:2]
+    obj_id_imgs = compose_grouped_2d_labels(
+        final_objects=final_objects,
+        tracks=tracks,
+        frame_ids=frame_ids,
+        image_shape=(h, w),
+        prob_thresh=cfg["sam3d_merge"]["masks"]["soft_prob_thresh"],
+    )
+
+    pkl_dir = Path(dirs["masks"]) / "obj_id_pkl"
+    pkl_dir.mkdir(parents=True, exist_ok=True)
+    save_obj_id_and_color_frames(obj_id_imgs, scan_id=scene_id, output_dir=dirs["masks"])
+    with open(pkl_dir / f"{scene_id}.pkl", "wb") as f:
+        pickle.dump({f"{int(k):06d}": v for k, v in obj_id_imgs.items()}, f)
+
+    merged_tracks = {}
+    for obj in final_objects:
+        merged_tracks[int(obj.object_id)] = {}
+        for fid in frame_ids:
+            fid_int = int(fid)
+            merged_tracks[int(obj.object_id)][fid_int] = (obj_id_imgs[fid_int] == int(obj.object_id))
+
+    # STEP 5: Build and save object registry
     registry = build_objects_predicted(merged_tracks, scene_id)
     save_objects_predicted(registry, str(Path(dirs["objects"]) / "objects_predicted.json"))
     # data_root/3RScan/files/objects_predicted.json
@@ -139,8 +195,6 @@ def main():
     if args.scene: cfg["dataset"]["scene_id"] = args.scene
     
     cfg["sam2"]["checkpoint"] = str(resolve_model_path(cfg["sam2"]["checkpoint"]))
-    cfg["must3r"]["checkpoint"] = str(resolve_model_path(cfg["must3r"]["checkpoint"]))
-
     for scene_id, scene_dir in get_scene_dirs(cfg):
         try: run_scene(scene_id, scene_dir, cfg)
         except Exception as e:

@@ -49,8 +49,6 @@ class Sam2PropagationConfig:
     propagation_mode: str
     global_prompt_keyframes: Any
     global_max_total_obj_ids: int
-    temporal_vote_weight: float
-    min_mask_pixels_per_frame: int
     objects_per_chunk: int
     hard_filter_enabled: bool
     candidate_multiplier: int
@@ -65,30 +63,10 @@ class Sam2PropagationConfig:
 
 
 @dataclass(frozen=True)
-class Sam2MergeConfig:
-    iou_threshold: float
-    iou_reduction: str
-    relaxed_iou_threshold: float
-    containment_threshold: float
-    peak_iou_threshold: float
-    min_shared_frames: int
-
-
-@dataclass(frozen=True)
-class Sam2PruneConfig:
-    enabled: bool
-    min_frames: int
-    min_peak_area: int
-    min_total_area: int
-
-
-@dataclass(frozen=True)
 class Sam2RuntimeConfig:
     model: Sam2ModelConfig
     keyframes: Sam2KeyframeConfig
     propagation: Sam2PropagationConfig
-    merge: Sam2MergeConfig
-    prune: Sam2PruneConfig
 
 
 # Phase 1 note: environment overrides are intentionally limited to a small,
@@ -116,8 +94,6 @@ def build_runtime_config(raw_cfg: Mapping[str, Any]) -> Sam2RuntimeConfig:
         propagation_mode=str(raw_cfg.get("propagation_mode", "per_keyframe")).strip().lower(),
         global_prompt_keyframes=raw_cfg.get("global_prompt_keyframes", "all"),
         global_max_total_obj_ids=_to_int(raw_cfg.get("global_max_total_obj_ids"), 0),
-        temporal_vote_weight=_to_float(raw_cfg.get("temporal_vote_weight"), 0.15),
-        min_mask_pixels_per_frame=_to_int(raw_cfg.get("min_mask_pixels_per_frame"), 0),
         objects_per_chunk=_to_int(raw_cfg.get("propagate_objects_per_chunk"), 8),
         hard_filter_enabled=_to_bool(raw_cfg.get("prop_mask_hard_filter_enabled"), True),
         candidate_multiplier=_to_int(raw_cfg.get("prop_mask_candidate_multiplier"), 2),
@@ -131,26 +107,8 @@ def build_runtime_config(raw_cfg: Mapping[str, Any]) -> Sam2RuntimeConfig:
         dedupe_containment=_to_float(raw_cfg.get("prop_mask_dedupe_containment"), 0.92),
     )
 
-    merge = Sam2MergeConfig(
-        iou_threshold=_to_float(raw_cfg.get("merge_iou_threshold"), 0.6),
-        iou_reduction=str(raw_cfg.get("merge_iou_reduction", "max")),
-        relaxed_iou_threshold=_to_float(raw_cfg.get("merge_relaxed_iou_threshold"), 0.24),
-        containment_threshold=_to_float(raw_cfg.get("merge_containment_threshold"), 0.78),
-        peak_iou_threshold=_to_float(raw_cfg.get("merge_peak_iou_threshold"), 0.40),
-        min_shared_frames=_to_int(raw_cfg.get("merge_min_shared_frames"), 2),
-    )
-
-    prune = Sam2PruneConfig(
-        enabled=_to_bool(raw_cfg.get("prune_short_tracks"), True),
-        min_frames=_to_int(raw_cfg.get("track_min_frames"), 2),
-        min_peak_area=_to_int(raw_cfg.get("track_min_peak_area"), 400),
-        min_total_area=_to_int(raw_cfg.get("track_min_total_area"), 1600),
-    )
-
     return Sam2RuntimeConfig(
         model=Sam2ModelConfig(model_cfg=model_cfg, checkpoint=checkpoint),
         keyframes=keyframes,
         propagation=propagation,
-        merge=merge,
-        prune=prune,
     )

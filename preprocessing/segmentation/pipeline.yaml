@@ -25,22 +25,59 @@ sam2:
   propagation_mode: "per_keyframe"   # "per_keyframe" | "global"
   global_prompt_keyframes: "all"     # "all" or integer (e.g. 6)
   global_max_total_obj_ids: 0        # 0 = unlimited (only used in "global")
-  merge_iou_threshold: 0.58
-  merge_iou_reduction: "max"      # "max" (recommended) | "mean"
-  prune_short_tracks: true
-  track_min_frames: 2
-  track_min_peak_area: 1500
-  track_min_total_area: 1600
-  min_mask_pixels_per_frame: 200
-  temporal_vote_weight: 0.15
   mask_prob_threshold: 0.62
+  prop_mask_hard_filter_enabled: false
+  prop_mask_dedupe_enabled: false
+  prop_mask_candidate_multiplier: 4
+  prop_mask_min_keep: 8
 
-  
-must3r:
-  checkpoint: "models/must3r/MUSt3R_512.pth"
-  resolution: 512
-  min_conf_thr: 1.5
-  output_pointmaps: true
+sam3d_merge:
+  enabled: true
+  geometry_source:
+    use_gt_depth: true
+    use_gt_pose: true
+    use_pred_depth: false
+    use_pred_pose: false
+  masks:
+    core_prob_thresh: 0.7
+    soft_prob_thresh: 0.3
+    min_active_area: 50
+    max_pixels_per_mask: 20000
+  lifting:
+    voxel_size_world: 0.03
+    min_valid_depth: 0.1
+    max_valid_depth: 10.0
+    remove_depth_outliers: true
+    depth_outlier_quantile_low: 0.02
+    depth_outlier_quantile_high: 0.98
+  track_filtering:
+    min_active_frames: 2
+    min_lifted_points: 500
+    min_occupied_voxels: 20
+    min_support_views: 2
+  split:
+    enabled: false
+    min_component_voxels: 30
+    min_component_ratio: 0.05
+    keep_largest_if_all_small: true
+  merge:
+    enabled: true
+    candidate_bbox_margin: 0.10
+    min_pair_support_views: 2
+    voxel_iou_thresh: 0.25
+    containment_thresh: 0.65
+    centroid_dist_norm_thresh: 0.50
+    reproj_iou_thresh: 0.35
+    use_reprojection_check: false
+    use_coview_conflict_check: true
+    coview_conflict_min_frames: 4
+    coview_conflict_max_mask_iou: 0.02
+    coview_block_max_voxel_iou: 0.05
+    coview_block_max_containment: 0.20
+    coview_block_min_centroid_dist_norm: 0.20
+  output:
+    save_debug_json: true
+    save_debug_ply: false
 
 output: 
   visualize: true

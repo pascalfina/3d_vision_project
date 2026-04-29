@@ -1,9 +1,9 @@
 """
 SAM2: AutomaticMaskGenerator (grid) on keyframes + VideoPredictor propagation.
 """
-import os, shutil, tempfile, pickle
+import os, shutil, tempfile
 import sys
-import torch, numpy as np, cv2
+import torch, numpy as np
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -15,13 +15,8 @@ if str(_SAM2_VENDOR_ROOT) not in sys.path:
 
 from sam2.build_sam import build_sam2, build_sam2_video_predictor
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-from utils.mask_utils import merge_tracks_by_iou, visualize_masks_on_frame
 from sam2_config import build_runtime_config
-from sam2_helpers import (
-    parse_scan_frame_idx,
-    prune_short_tracks,
-    save_obj_id_and_color_frames,
-)
+from sam2_helpers import parse_scan_frame_idx
 
 
 def ensure_sam2_postprocess_ready(device="cuda"):
@@ -85,33 +80,10 @@ def segment_keyframes(frames, keyframe_idxs, cfg, device="cuda"):
     return keyframe_masks
 
 
-def visualize_results(frames, obj_id_imgs, frame_paths, out_dir, stride=5):
-    """Visualize obj_id_map as a color overlay and save to disk."""
-    os.makedirs(out_dir, exist_ok=True)
-    for fidx in range(0, len(frames), stride):
-        scan_fidx = parse_scan_frame_idx(frame_paths[fidx])
-        obj_map = obj_id_imgs.get(scan_fidx)
-        if obj_map is None or obj_map.max() == 0:
-            continue
-        unique_ids = np.unique(obj_map[obj_map > 0])
-        masks = [(obj_map == uid) for uid in unique_ids]
-        vis = visualize_masks_on_frame(frames[fidx], masks)
-        cv2.imwrite(
-            os.path.join(out_dir, f"vis_{fidx:06d}.jpg"),
-            cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
-
-
 @dataclass
 class PropagationResult:
     all_binary: dict
     all_probs: dict
-
-
-@dataclass
-class MergeResult:
-    merged_binary: dict
-    id_mapping: dict
-    merged_probs: dict
 
 
 def _copy_frames_for_predictor(frame_paths, tmp_dir):
@@ -204,99 +176,6 @@ def _prepare_keyframe_masks_for_propagation(masks, max_obj, frame_shape, rcfg):
                 break
 
     return selected[:max_obj]
-
-
-def _track_overlap_stats(track_a, track_b):
-    shared = set(track_a.keys()) & set(track_b.keys())
-    if not shared:
-        return 0, 0.0, 0.0
-    peak_iou = 0.0
-    peak_containment = 0.0
-    valid = 0
-    for fidx in shared:
-        a = track_a[fidx]
-        b = track_b[fidx]
-        inter = float(np.logical_and(a, b).sum())
-        if inter <= 0:
-            continue
-        valid += 1
-        union = float(np.logical_or(a, b).sum())
-        iou = inter / max(union, 1.0)
-        containment = max(
-            inter / max(float(a.sum()), 1.0),
-            inter / max(float(b.sum()), 1.0),
-        )
-        peak_iou = max(peak_iou, iou)
-        peak_containment = max(peak_containment, containment)
-    return valid, peak_iou, peak_containment
-
-
-def _merge_tracks_with_overlap_heuristics(merged_binary, id_mapping, rcfg):
-    ids = sorted(merged_binary.keys())
-    parent = {obj_id: obj_id for obj_id in ids}
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    for i, ida in enumerate(ids):
-        for idb in ids[i + 1 :]:
-            shared, peak_iou, peak_containment = _track_overlap_stats(
-                merged_binary[ida],
-                merged_binary[idb],
-            )
-            if shared < rcfg.merge.min_shared_frames:
-                continue
-            if peak_iou >= rcfg.merge.iou_threshold:
-                union(ida, idb)
-            elif peak_iou >= rcfg.merge.relaxed_iou_threshold and peak_containment >= rcfg.merge.containment_threshold:
-                union(ida, idb)
-            elif peak_iou >= rcfg.merge.peak_iou_threshold and peak_containment >= rcfg.merge.containment_threshold:
-                union(ida, idb)
-
-    groups = {}
-    for old_id in ids:
-        root = find(old_id)
-        groups.setdefault(root, []).append(old_id)
-
-    new_binary = {}
-    new_mapping = {}
-    for new_id, (_, members) in enumerate(sorted(groups.items(), key=lambda x: min(x[1])), start=1):
-        frame_union = {}
-        for mid in members:
-            for fidx, mask in merged_binary[mid].items():
-                if fidx in frame_union:
-                    frame_union[fidx] = np.logical_or(frame_union[fidx], mask)
-                else:
-                    frame_union[fidx] = mask.copy()
-        new_binary[new_id] = frame_union
-        src_ids = []
-        for mid in members:
-            src_ids.extend(id_mapping.get(mid, [mid]))
-        new_mapping[new_id] = sorted(set(int(x) for x in src_ids))
-    return new_binary, new_mapping
-
-
-def _prune_low_support_tracks(merged_binary, id_mapping, max_frames=2, max_peak_area=3500):
-    kept_binary = {}
-    kept_mapping = {}
-    removed = 0
-    for obj_id, frame_masks in merged_binary.items():
-        n_frames = len(frame_masks)
-        peak_area = max((int(m.sum()) for m in frame_masks.values()), default=0)
-        if n_frames <= int(max_frames) and peak_area <= int(max_peak_area):
-            removed += 1
-            continue
-        kept_binary[obj_id] = frame_masks
-        kept_mapping[obj_id] = id_mapping[obj_id]
-    return kept_binary, kept_mapping, removed
 
 
 def _propagate_global(
@@ -440,92 +319,12 @@ def _propagate_per_keyframe(predictor, tmp_dir, keyframe_masks, max_obj, prob_th
     return PropagationResult(all_binary=all_binary, all_probs=all_probs)
 
 
-def _merge_and_fuse_tracks(propagation_result, rcfg):
-    """Merge propagated tracks and fuse per-track probability maps."""
-    merged_binary, id_mapping = merge_tracks_by_iou(
-        propagation_result.all_binary,
-        iou_threshold=rcfg.merge.iou_threshold,
-        iou_reduction=rcfg.merge.iou_reduction,
-    )
-
-    if rcfg.prune.enabled:
-        merged_binary, id_mapping, n_removed = prune_short_tracks(
-            merged_binary,
-            id_mapping,
-            min_frames=rcfg.prune.min_frames,
-            min_peak_area=rcfg.prune.min_peak_area,
-            min_total_area=rcfg.prune.min_total_area,
-        )
-        print(f"[SAM2] short-track prune removed {n_removed} tracks")
-
-    merged_binary, id_mapping = _merge_tracks_with_overlap_heuristics(
-        merged_binary, id_mapping, rcfg
-    )
-    merged_binary, id_mapping, n_removed = _prune_low_support_tracks(
-        merged_binary, id_mapping
-    )
-    if n_removed > 0:
-        print(f"[SAM2] low-support prune removed {n_removed} tracks")
-
-    merged_probs = {}
-    for new_id, orig_ids in id_mapping.items():
-        fused = {}
-        for orig_id in orig_ids:
-            for fidx, prob in propagation_result.all_probs[orig_id].items():
-                if fidx not in fused:
-                    fused[fidx] = prob.copy()
-                else:
-                    np.maximum(fused[fidx], prob, out=fused[fidx])
-        merged_probs[new_id] = fused
-    return MergeResult(
-        merged_binary=merged_binary,
-        id_mapping=id_mapping,
-        merged_probs=merged_probs,
-    )
-
-
-def _compose_obj_id_images(merged_binary, merged_probs, tmp_to_scan_fidx, frame_paths, rcfg):
-    if not merged_probs:
-        print("[SAM2] Warning: no objects detected in this scene")
-        H, W = next(iter(cv2.imread(str(frame_paths[0])).shape[:2] for _ in [None])) if frame_paths else (540, 960)
-    else:
-        sample_prob = next(iter(next(iter(merged_probs.values())).values()))
-        H, W = sample_prob.shape
-
-    all_scan_fidxs = sorted({tmp_to_scan_fidx[i] for i in range(len(frame_paths))})
-    obj_id_imgs = {f: np.zeros((H, W), dtype=np.int32) for f in all_scan_fidxs}
-    score_imgs = {f: np.zeros((H, W), dtype=np.float32) for f in all_scan_fidxs}
-    temporal_vote_weight = rcfg.propagation.temporal_vote_weight
-    track_support = {obj_id: len(frame_dict) for obj_id, frame_dict in merged_binary.items()}
-    max_support = max(track_support.values()) if track_support else 1
-    min_mask_pixels_per_frame = rcfg.propagation.min_mask_pixels_per_frame
-
-    for new_id, frame_dict in merged_binary.items():
-        support_norm = float(track_support.get(new_id, 0)) / float(max_support)
-        for tmp_fidx, mask_bin in frame_dict.items():
-            if int(mask_bin.sum()) < min_mask_pixels_per_frame:
-                continue
-            scan_fidx = tmp_to_scan_fidx[tmp_fidx]
-            prob_map = merged_probs[new_id].get(tmp_fidx)
-            if prob_map is not None:
-                effective_score = prob_map * (1.0 + temporal_vote_weight * support_norm)
-                update = mask_bin & (effective_score > score_imgs[scan_fidx])
-                score_imgs[scan_fidx][update] = effective_score[update]
-            else:
-                update = mask_bin & (obj_id_imgs[scan_fidx] == 0)
-            obj_id_imgs[scan_fidx][update] = int(new_id)
-    return obj_id_imgs
-
-
-def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, device="cuda"):
+def propagate_masks(frame_paths, keyframe_masks, cfg, device="cuda"):
     """
-    Propagate SAM2 masks across all frames and save in VLSG/Object-X format:
-      obj_id/<scan_id>/frame-xxxxxx.jpg   — jpg ID map
-      obj_id_pkl/<scan_id>.pkl            — {frame_idx: np.ndarray int32}
-      color/<scan_id>/frame-xxxxxx.jpg    — RGB visualization
+    Propagate SAM2 masks across all frames and return raw hypotheses.
     Returns:
-        obj_id_imgs:   {scan_fidx → (H,W) int32}
-        merged_binary: {new_id   → {scan_fidx → bool mask}}
+        tracks_scan: {track_id -> {"masks_by_frame": {scan_fidx_str: bool mask},
+                                   "probs_by_frame": {scan_fidx_str: float prob}}}
     """
     print("\n[SAM2] Step 2: Propagating with VideoPredictor")
     rcfg = build_runtime_config(cfg)
@@ -569,44 +368,27 @@ def propagate_masks(frame_paths, keyframe_masks, cfg, output_dir, scan_id, devic
                 rcfg,
             )
 
-        merge_result = _merge_and_fuse_tracks(propagation_result, rcfg)
-        obj_id_imgs = _compose_obj_id_images(
-            merge_result.merged_binary,
-            merge_result.merged_probs,
-            tmp_to_scan_fidx,
-            frame_paths,
-            rcfg,
-        )
-
-        # ── Save in VLSG/Object-X format ──
-        pkl_dir = os.path.join(output_dir, "obj_id_pkl")
-        os.makedirs(pkl_dir, exist_ok=True)
-        save_obj_id_and_color_frames(obj_id_imgs, scan_id=scan_id, output_dir=output_dir)
-
-        # Save full int32 maps as pickle using zero-padded string frame ids
-        # to match the canonical 3RScan/Object-X style ("000042").
-        obj_id_imgs_for_pkl = {
-            f"{int(scan_fidx):06d}": obj_id_map
-            for scan_fidx, obj_id_map in obj_id_imgs.items()
-        }
-        with open(os.path.join(pkl_dir, f"{scan_id}.pkl"), "wb") as f:
-            pickle.dump(obj_id_imgs_for_pkl, f)
-
-        merged_binary_scan = {
-            new_id: {
-                tmp_to_scan_fidx[tmp_fidx]: mask_bin
-                for tmp_fidx, mask_bin in frame_dict.items()
+        tracks_scan = {}
+        for tid, frame_dict in propagation_result.all_binary.items():
+            probs_src = propagation_result.all_probs.get(tid, {})
+            masks_by_frame = {}
+            probs_by_frame = {}
+            for tmp_fidx, mask_bin in frame_dict.items():
+                scan_fidx = tmp_to_scan_fidx[tmp_fidx]
+                scan_key = f"{int(scan_fidx):06d}"
+                masks_by_frame[scan_key] = mask_bin
+                prob = probs_src.get(tmp_fidx)
+                if prob is not None:
+                    probs_by_frame[scan_key] = prob
+            tracks_scan[int(tid)] = {
+                "masks_by_frame": masks_by_frame,
+                "probs_by_frame": probs_by_frame,
             }
-            for new_id, frame_dict in merge_result.merged_binary.items()
-        }
-
-        n_empty = sum(1 for m in obj_id_imgs.values() if m.max() == 0)
-        print(f"[SAM2] {len(merge_result.merged_binary)} objects after fusion")
-        print(f"[SAM2] {len(obj_id_imgs)} frames saved ({n_empty} empty / background-only)")
+        print(f"[SAM2] {len(tracks_scan)} raw propagated tracks")
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         del predictor
         torch.cuda.empty_cache()
 
-    return obj_id_imgs, merged_binary_scan
+    return tracks_scan
