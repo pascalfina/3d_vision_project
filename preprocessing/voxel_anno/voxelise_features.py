@@ -941,26 +941,29 @@ def _lift_masked_points(
     for i, (obj_mask, depth_map, camera_to_world) in enumerate(
         zip(selected_masks, selected_depths, pose_camera_to_world)
     ):
-        mask_depth = np.array(
-            Image.fromarray((obj_mask > 0).astype(np.uint8)).resize(
-                (depth_width, depth_height), resample=Image.NEAREST
-            ),
-            dtype=bool,
-        )
-        y, x = np.nonzero(mask_depth)
-        if x.size == 0:
-            continue
-
         xyz_map = None
         if selected_xyz_maps is not None:
             candidate = selected_xyz_maps[i]
             if (
                 candidate is not None
                 and candidate.ndim == 3
-                and candidate.shape[:2] == (depth_height, depth_width)
                 and candidate.shape[2] == 3
             ):
                 xyz_map = candidate
+
+        if xyz_map is not None:
+            map_height, map_width = xyz_map.shape[:2]
+        else:
+            map_height, map_width = depth_height, depth_width
+        mask_depth = np.array(
+            Image.fromarray((obj_mask > 0).astype(np.uint8)).resize(
+                (map_width, map_height), resample=Image.NEAREST
+            ),
+            dtype=bool,
+        )
+        y, x = np.nonzero(mask_depth)
+        if x.size == 0:
+            continue
 
         if xyz_map is not None:
             cam_xyz = xyz_map[y, x].astype(np.float32)

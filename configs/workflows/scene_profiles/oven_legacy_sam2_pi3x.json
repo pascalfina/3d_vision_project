@@ -1,0 +1,149 @@
+{
+  "name": "oven_legacy_sam2_pi3x",
+  "scene_id": "5341b7e3-8a66-2cdd-8709-66a2159f0017",
+  "split": "val",
+  "input_variant": "legacy+sam+must3r",
+  "mask_source": "sam2_projection",
+  "roots": {
+    "baseline": "${OBJECTX_BASELINE_ROOT}",
+    "reconstruction": "/work/scratch/pafina/objectx-data-fullscene-oven-pi3x",
+    "pred_ready": "/work/scratch/pafina/objectx-data-fullscene-oven-predready-sam2-pi3x-v1"
+  },
+  "artifacts": {
+    "manifest": "${OBJECTX_REPO_DEBUG_ROOT}/oven_fullscene_pi3x_manifest.json",
+    "joint_ply": "${OBJECTX_REPO_VIS_ROOT}/5341b7e3-8a66-2cdd-8709-66a2159f0017_joint_pi3x.ply"
+  },
+  "segment_inputs": {
+    "config": "preprocessing/segmentation/pipeline.yaml",
+    "run_must3r": false,
+    "run_sam2": true,
+    "run_registry": true,
+    "input_root": "${OBJECTX_BASELINE_ROOT}",
+    "output_root": "/work/scratch/pafina/objectx-data-fullscene-oven-pi3x",
+    "mask_dirname": "sam2_projection",
+    "objects_filename": "objects_sam2.json",
+    "scenes_dirname": "scenes_sam2_pi3x",
+    "env": {
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+      "OBJECTX_SAM2_OFFLOAD_VIDEO_TO_CPU": "1",
+      "OBJECTX_SAM2_OFFLOAD_STATE_TO_CPU": "1",
+      "OBJECTX_SAM2_ASYNC_LOADING_FRAMES": "0",
+      "OBJECTX_SAM2_PROPAGATE_OBJECTS_PER_CHUNK": "9999",
+      "OBJECTX_SAM2_REQUIRE_POSTPROCESS": "1",
+      "OBJECTX_SEG_KEYFRAME_STRATEGY": "quality_global",
+      "OBJECTX_SEG_N_KEYFRAMES": "4",
+      "OBJECTX_SEG_REFINE_KEYFRAMES": "1",
+      "OBJECTX_SEG_KEYFRAME_PREVIEW_CANDIDATES": "8"
+    },
+    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_oven_pi3x_segment_inputs.log"
+  },
+  "pi3x": {
+    "config": "preprocessing/segmentation/pipeline.yaml",
+    "run_must3r": true,
+    "run_sam2": false,
+    "run_registry": false,
+    "input_root": "${OBJECTX_BASELINE_ROOT}",
+    "output_root": "/work/scratch/pafina/objectx-data-fullscene-oven-pi3x",
+    "mask_dirname": "sam2_projection",
+    "objects_filename": "objects_sam2.json",
+    "scenes_dirname": "scenes_sam2_pi3x",
+    "env": {
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+      "OBJECTX_PI3X_PIXEL_LIMIT": "50000",
+      "OBJECTX_PI3X_CHUNK_SIZE": "512",
+      "OBJECTX_PI3X_OVERLAP": "0",
+      "OBJECTX_PI3X_ANCHOR_COUNT": "0",
+      "OBJECTX_PI3X_CONF_THR": "0.10",
+      "OBJECTX_PI3X_ALIGN_MODE": "sim3",
+      "OBJECTX_PI3X_USE_INTRINSICS": "1",
+      "OBJECTX_PI3X_LOCAL_PIXEL_LIMIT": "0",
+      "OBJECTX_PI3X_LOCAL_CHUNK_SIZE": "25",
+      "OBJECTX_PI3X_LOCAL_OVERLAP": "8",
+      "OBJECTX_PI3X_LOCAL_SCALE_MAX_RATIO": "1.35",
+      "OBJECTX_PI3X_OUTPUT_NATIVE_RES": "1",
+      "OBJECTX_PI3X_SAVE_RAW_DEPTH": "1",
+      "OBJECTX_PI3X_SAVE_CONFIDENCE": "1",
+      "OBJECTX_PI3X_POSE_JUMP_MAX_TRANSLATION": "1.5",
+      "OBJECTX_PI3X_POSE_JUMP_MAX_Z_TRANSLATION": "1.0",
+      "OBJECTX_PI3X_POSE_JUMP_MAX_ROTATION_DEG": "0.0",
+      "OBJECTX_PI3X_POSE_JUMP_RELATIVE_FACTOR": "10.0",
+      "OBJECTX_PI3X_ZERO_INVALID_POSE_DEPTHS": "1",
+      "OBJECTX_PI3X_WEIGHTS": "/work/courses/3dv/team35/pafina/models/pi3/Pi3X.safetensors"
+    },
+    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_oven_pi3x.log"
+  },
+  "voxelise": {
+    "scene_source_dirname": "scenes_sam2_pi3x",
+    "override": true,
+    "env": {
+      "OBJECTX_VOXEL_OBJECT_SOURCE": "lifted_masks",
+      "OBJECTX_VOXEL_TSDF_FALLBACK_TO_LIFTED": "0",
+      "OBJECTX_VOXEL_REQUIRE_XYZ": "1",
+      "OBJECTX_VOXEL_DEPTH_SOURCE": "must3r_xyz_if_available",
+      "OBJECTX_VOXEL_RAW_DEPTH_CONF_THR": "0.30",
+      "OBJECTX_VOXEL_RAW_DEPTH_CONF_FALLBACK_THR": "0.20",
+      "OBJECTX_VOXEL_CONF_FALLBACK_ON_LOW_POINTS": "1",
+      "OBJECTX_VOXEL_POSE_MODE": "raw",
+      "OBJECTX_VOXEL_POSE_JUMP_MAX_TRANSLATION": "1.5",
+      "OBJECTX_VOXEL_POSE_JUMP_MAX_Z_TRANSLATION": "1.0",
+      "OBJECTX_VOXEL_POSE_JUMP_MAX_ROTATION_DEG": "0.0",
+      "OBJECTX_VOXEL_POSE_JUMP_RELATIVE_FACTOR": "10.0",
+      "OBJECTX_VOXEL_MAX_VIEWS": "64",
+      "OBJECTX_VOXEL_FRAME_SELECTION": "liftable_diverse_area",
+      "OBJECTX_VOXEL_MIN_SELECTED_FRAMES": "2",
+      "OBJECTX_VOXEL_MIN_LIFTED_POINTS": "128",
+      "OBJECTX_VOXEL_LIFT_PIXEL_STRIDE": "2",
+      "OBJECTX_VOXEL_LIFT_TRIM_LOW_Q": "2.0",
+      "OBJECTX_VOXEL_LIFT_TRIM_HIGH_Q": "98.0",
+      "OBJECTX_VOXEL_LIFT_KEEP_RADIUS_Q": "98.0",
+      "OBJECTX_VOXEL_LIFT_SUPPORT_VOXEL_SIZE": "0.04",
+      "OBJECTX_VOXEL_LIFT_MIN_POINTS_PER_VOXEL": "3",
+      "OBJECTX_VOXEL_LIFT_MIN_VIEWS_PER_VOXEL": "3",
+      "OBJECTX_VOXEL_LIFT_SUPPORT_MIN_KEEP_FRACTION": "0.05",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+    },
+    "reset_tmp": 1,
+    "max_scans": 0,
+    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_oven_2_5_pi3x.log"
+  },
+  "build_pred_ready": {
+    "reconstruction_scenes_dirname": "scenes_sam2_pi3x",
+    "knn": 4,
+    "min_voxels": 32,
+    "point_counts": [64, 128, 256, 512],
+    "overwrite": true
+  },
+  "validate_pred_ready": {
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/pred_ready_validation/oven_legacy_sam2_pi3x"
+  },
+  "compare_arrangement": {
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/arrangement_compare/oven_legacy_sam2_pi3x_vs_gt"
+  },
+  "render_bundle": {
+    "label": "oven_legacy_sam2_pi3x",
+    "data_root": "/work/scratch/pafina/objectx-data-fullscene-oven-pi3x",
+    "mask_source": "sam2_projection",
+    "background_remove_mode": "loaded",
+    "pose_mode": "raw",
+    "lift_coord_system": "pinhole",
+    "frame_selection": "diverse_area",
+    "max_views": 96,
+    "bg_max_points": 250000,
+    "joint_max_points": 250000,
+    "env": {
+      "OBJECTX_VOXEL_DEPTH_SOURCE": "must3r_xyz_if_available",
+      "OBJECTX_VIS_DEPTH_SOURCE": "must3r_xyz_if_available",
+      "OBJECTX_VIS_SCENES_DIRNAME": "scenes_sam2_pi3x",
+      "OBJECTX_VIS_RAW_DEPTH_CONF_THR": "0.30",
+      "OBJECTX_VIS_RAW_DEPTH_MAX": "5.0",
+      "OBJECTX_VOXEL_LIFT_PIXEL_STRIDE": "2",
+      "OBJECTX_VOXEL_LIFT_TRIM_LOW_Q": "2.0",
+      "OBJECTX_VOXEL_LIFT_TRIM_HIGH_Q": "97.5",
+      "OBJECTX_VOXEL_LIFT_KEEP_RADIUS_Q": "96.0",
+      "OBJECTX_VIS_BG_VOXEL_SIZE": "0.07",
+      "OBJECTX_VIS_BG_MIN_POINTS_PER_VOXEL": "6",
+      "OBJECTX_VIS_BG_MIN_VIEWS_PER_VOXEL": "3",
+      "OBJECTX_VIS_BG_MIN_KEEP_FRACTION": "0.05"
+    }
+  }
+}

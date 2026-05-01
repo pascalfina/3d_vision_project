@@ -12,6 +12,7 @@ DEFAULT_ACTIONS = [
     "features3d",
     "must3r",
     "mast3r-sfm",
+    "pi3x",
     "fuse",
     "segment-inputs",
     "voxelise",
@@ -541,6 +542,57 @@ def build_mast3r_sfm_action(repo_root: Path, profile: dict):
     return cmd, env_updates, log_path
 
 
+def build_pi3x_action(repo_root: Path, profile: dict):
+    """Runs the segmentation pipeline's pose+depth step via the Pi3X backend.
+
+    Mirrors build_must3r_action / build_mast3r_sfm_action but reads the
+    ``pi3x`` profile section and hard-forces ``OBJECTX_POSE_DEPTH_BACKEND=pi3x``.
+    """
+    sec = section(profile, "pi3x")
+    variant = input_variant_settings(repo_root, profile)
+    if not sec:
+        raise ValueError(
+            f"Profile '{profile.get('name', 'unknown')}' has no 'pi3x' section."
+        )
+
+    env_updates = {
+        "OBJECTX_SEG_INPUT_ROOT": sec.get("input_root", roots(profile).get("baseline")),
+        "OBJECTX_SEG_OUTPUT_ROOT": sec.get(
+            "output_root", roots(profile).get("reconstruction")
+        ),
+        "OBJECTX_SEG_MASK_DIRNAME": sec.get(
+            "mask_dirname", variant.get("mask_output_dirname", "gt_projection_predicted")
+        ),
+        "OBJECTX_SEG_OBJECTS_FILENAME": sec.get(
+            "objects_filename", variant.get("objects_filename", "objects_predicted.json")
+        ),
+        "OBJECTX_SEG_SCENES_DIRNAME": sec.get(
+            "scenes_dirname", "scenes_sam2_pi3x"
+        ),
+        "OBJECTX_SEG_RUN_MUST3R": str(int(sec.get("run_must3r", True))),
+        "OBJECTX_SEG_RUN_SAM2": str(int(sec.get("run_sam2", False))),
+        "OBJECTX_SEG_RUN_REGISTRY": str(int(sec.get("run_registry", False))),
+        "OBJECTX_POSE_DEPTH_BACKEND": "pi3x",
+        "MUST3R_PATH": sec.get("must3r_path", str(repo_root / "dependencies" / "must3r")),
+        "PI3_PATH": sec.get("pi3_path", str(repo_root / "dependencies" / "pi3")),
+    }
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+    env_updates["OBJECTX_POSE_DEPTH_BACKEND"] = "pi3x"
+
+    cmd = [
+        sys.executable,
+        "-u",
+        str(repo_root / "preprocessing" / "segmentation" / "run_pipeline.py"),
+        "--config",
+        sec.get("config", "preprocessing/segmentation/pipeline.yaml"),
+        "--scene",
+        sec.get("scene_id", shared_value(profile, "scene_id")),
+    ]
+    log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
+    return cmd, env_updates, log_path
+
+
 def build_fuse_action(repo_root: Path, profile: dict):
     """Fuse MASt3R-SfM poses with MUSt3R depth/xyz into a hybrid scene dir."""
     sec = section(profile, "fuse")
@@ -793,6 +845,7 @@ ACTION_BUILDERS = {
     "features3d": build_features3d_action,
     "must3r": build_must3r_action,
     "mast3r-sfm": build_mast3r_sfm_action,
+    "pi3x": build_pi3x_action,
     "fuse": build_fuse_action,
     "segment-inputs": build_segment_inputs_action,
     "voxelise": build_voxelise_action,

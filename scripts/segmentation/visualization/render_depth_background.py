@@ -451,9 +451,13 @@ def build_background_from_depth(
                     depth_map = np.where(depth_map <= raw_depth_max, depth_map, 0.0)
 
             bg_mask = 1 - union_mask.astype(np.uint8)
+            if xyz_map is not None:
+                map_height, map_width = xyz_map.shape[:2]
+            else:
+                map_height, map_width = depth_height, depth_width
             mask_depth = np.array(
                 Image.fromarray((bg_mask > 0).astype(np.uint8)).resize(
-                    (depth_width, depth_height), resample=Image.NEAREST
+                    (map_width, map_height), resample=Image.NEAREST
                 ),
                 dtype=bool,
             )
@@ -518,8 +522,12 @@ def build_background_from_depth(
                 camera_to_world[:3, :3].astype(np.float32) @ cam_points
                 + camera_to_world[:3, 3:4].astype(np.float32)
             )
+            # Load color at the same resolution as the xyz/depth map we
+            # indexed with (y, x). Pi3X writes xyz at its native net size
+            # (e.g. 476x266), which differs from the Tango depth grid
+            # (224x172).
             color_image = load_color_frame_array(
-                scenes_dir, scan_id, frame_id, depth_width, depth_height
+                scenes_dir, scan_id, frame_id, map_width, map_height
             )
             point_colors = color_image[y, x]
             frame_points = world_points.T
