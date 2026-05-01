@@ -9,6 +9,7 @@ from segment_sam2 import ensure_sam2_postprocess_ready, segment_keyframes, propa
 from keyframe_selection import refine_keyframes_with_mask_preview
 from depth_pose_must3r import run_must3r_on_scene
 from depth_pose_mast3r_sfm import run_mast3r_sfm_on_scene
+from depth_pose_pi3x import run_pi3x_on_scene
 from utils.object_registry import build_objects_predicted, save_objects_predicted
 
 def resolve_model_path(path):
@@ -308,6 +309,103 @@ def run_scene(scene_id, scene_dir, cfg):
                 frame_paths, mc["checkpoint"], dirs["depth"], dirs["poses"],
                 dirs["pointmaps"] if mc.get("output_pointmaps") else None,
                 scene_id, device=device, **mast3r_kwargs)
+        elif backend == "pi3x":
+            mc = cfg.get("pi3x", {})
+            pi3x_kwargs = {
+                "pixel_limit": env_or_default(
+                    "OBJECTX_PI3X_PIXEL_LIMIT", mc.get("pixel_limit", 255000), int
+                ),
+                "chunk_size": env_or_default(
+                    "OBJECTX_PI3X_CHUNK_SIZE", mc.get("chunk_size", 16), int
+                ),
+                "overlap": env_or_default(
+                    "OBJECTX_PI3X_OVERLAP", mc.get("overlap", 6), int
+                ),
+                "conf_thr": env_or_default(
+                    "OBJECTX_PI3X_CONF_THR", mc.get("conf_thr", 0.05), float
+                ),
+                "align_mode": str(
+                    os.environ.get(
+                        "OBJECTX_PI3X_ALIGN_MODE",
+                        mc.get("align_mode", "se3"),
+                    )
+                ).strip().lower(),
+                "save_raw_depth": parse_bool(
+                    os.environ.get("OBJECTX_PI3X_SAVE_RAW_DEPTH"),
+                    mc.get("save_raw_depth", True),
+                ),
+                "save_confidence_maps": parse_bool(
+                    os.environ.get("OBJECTX_PI3X_SAVE_CONFIDENCE"),
+                    mc.get("save_confidence_maps", mc.get("save_confidence", True)),
+                ),
+                "pose_jump_max_translation": env_or_default(
+                    "OBJECTX_PI3X_POSE_JUMP_MAX_TRANSLATION",
+                    mc.get("pose_jump_max_translation", 0.0),
+                    float,
+                ),
+                "pose_jump_max_z_translation": env_or_default(
+                    "OBJECTX_PI3X_POSE_JUMP_MAX_Z_TRANSLATION",
+                    mc.get("pose_jump_max_z_translation", 0.0),
+                    float,
+                ),
+                "pose_jump_max_rotation_deg": env_or_default(
+                    "OBJECTX_PI3X_POSE_JUMP_MAX_ROTATION_DEG",
+                    mc.get("pose_jump_max_rotation_deg", 0.0),
+                    float,
+                ),
+                "pose_jump_relative_factor": env_or_default(
+                    "OBJECTX_PI3X_POSE_JUMP_RELATIVE_FACTOR",
+                    mc.get("pose_jump_relative_factor", 0.0),
+                    float,
+                ),
+                "zero_invalid_pose_depths": parse_bool(
+                    os.environ.get("OBJECTX_PI3X_ZERO_INVALID_POSE_DEPTHS"),
+                    mc.get("zero_invalid_pose_depths", False),
+                ),
+                "anchor_count": env_or_default(
+                    "OBJECTX_PI3X_ANCHOR_COUNT",
+                    mc.get("anchor_count", 0),
+                    int,
+                ),
+                "use_intrinsics": parse_bool(
+                    os.environ.get("OBJECTX_PI3X_USE_INTRINSICS"),
+                    mc.get("use_intrinsics", False),
+                ),
+                "local_pixel_limit": env_or_default(
+                    "OBJECTX_PI3X_LOCAL_PIXEL_LIMIT",
+                    mc.get("local_pixel_limit", 0),
+                    int,
+                ),
+                "local_chunk_size": env_or_default(
+                    "OBJECTX_PI3X_LOCAL_CHUNK_SIZE",
+                    mc.get("local_chunk_size", 25),
+                    int,
+                ),
+                "local_overlap": env_or_default(
+                    "OBJECTX_PI3X_LOCAL_OVERLAP",
+                    mc.get("local_overlap", 8),
+                    int,
+                ),
+                "local_scale_max_ratio": env_or_default(
+                    "OBJECTX_PI3X_LOCAL_SCALE_MAX_RATIO",
+                    mc.get("local_scale_max_ratio", 1.35),
+                    float,
+                ),
+                "output_native_resolution": parse_bool(
+                    os.environ.get("OBJECTX_PI3X_OUTPUT_NATIVE_RES"),
+                    mc.get("output_native_resolution", False),
+                ),
+            }
+            _, depths = run_pi3x_on_scene(
+                frame_paths,
+                mc.get("checkpoint"),
+                dirs["depth"],
+                dirs["poses"],
+                dirs["pointmaps"] if mc.get("output_pointmaps") else None,
+                scene_id,
+                device=device,
+                **pi3x_kwargs,
+            )
         else:
             mc = cfg["must3r"]
             must3r_kwargs = {
