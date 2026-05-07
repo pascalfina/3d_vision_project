@@ -1,17 +1,17 @@
 {
-  "name": "oven_legacy_sam2_must3r_hybrid",
-  "scene_id": "5341b7e3-8a66-2cdd-8709-66a2159f0017",
-  "split": "val",
+  "name": "scene_b05fddd1_legacy_sam2_must3r_hybrid",
+  "scene_id": "b05fddd1-fca0-2d4f-8ab9-ecffab72e046",
+  "split": "train",
   "input_variant": "legacy+sam+must3r",
   "mask_source": "sam2_projection",
   "roots": {
     "baseline": "${OBJECTX_BASELINE_ROOT}",
-    "reconstruction": "${OBJECTX_OVEN_SAM2_MUST3R_RECON_ROOT}",
-    "pred_ready": "${OBJECTX_OVEN_SAM2_MUST3R_PREDREADY_ROOT}"
+    "reconstruction": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-b05fddd1-hybrid-sam2mask-must3r",
+    "pred_ready": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-b05fddd1-predready-sam2-must3r-v1"
   },
   "artifacts": {
-    "manifest": "${OBJECTX_REPO_DEBUG_ROOT}/oven_fullscene_all_objects_manifest.json",
-    "joint_ply": "${OBJECTX_REPO_VIS_ROOT}/5341b7e3-8a66-2cdd-8709-66a2159f0017_joint.ply"
+    "manifest": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-b05fddd1-predready-sam2-must3r-v1/files/pred_ready_scene_manifest.json",
+    "joint_ply": "${OBJECTX_REPO_VIS_ROOT}/b05fddd1-fca0-2d4f-8ab9-ecffab72e046_joint.ply"
   },
   "segment_inputs": {
     "config": "preprocessing/segmentation/pipeline.yaml",
@@ -19,7 +19,7 @@
     "run_sam2": true,
     "run_registry": true,
     "input_root": "${OBJECTX_BASELINE_ROOT}",
-    "output_root": "${OBJECTX_OVEN_SAM2_MUST3R_RECON_ROOT}",
+    "output_root": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-b05fddd1-hybrid-sam2mask-must3r",
     "mask_dirname": "sam2_projection",
     "objects_filename": "objects_sam2.json",
     "scenes_dirname": "scenes_sam2_must3r",
@@ -34,9 +34,9 @@
       "OBJECTX_SEG_KEYFRAME_STRATEGY": "quality_global",
       "OBJECTX_SEG_N_KEYFRAMES": "4",
       "OBJECTX_SEG_REFINE_KEYFRAMES": "1",
-      "OBJECTX_SEG_AUTO_EXTRA_KEYFRAMES": "2",
+      "OBJECTX_SEG_AUTO_EXTRA_KEYFRAMES": "0",
       "OBJECTX_SEG_KEYFRAME_PREVIEW_CANDIDATES": "8",
-      "OBJECTX_SAM2_POINTS_PER_SIDE": "48",
+      "OBJECTX_SAM2_POINTS_PER_SIDE": "32",
       "OBJECTX_SAM2_KEYFRAME_PREVIEW_POINTS_PER_SIDE": "16",
       "OBJECTX_SAM2_KEYFRAME_PREVIEW_DIVERSITY_WEIGHT": "0.95",
       "OBJECTX_SAM2_KEYFRAME_PREVIEW_MIN_FRAME_GAP": "56",
@@ -76,18 +76,30 @@
       "OBJECTX_SAM2_MERGE_FRAGMENT_CLEANUP_TEMPORAL_CONTAINMENT_THRESHOLD": "0.72",
       "OBJECTX_SAM2_MERGE_FRAGMENT_CLEANUP_TEMPORAL_PEAK_IOU_THRESHOLD": "0.18",
       "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_ENABLED": "1",
-      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_MAX_FRAMES": "5",
-      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_AREA_MEAN_CAP": "5000",
-      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_AREA_MAX_CAP": "12000",
+      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_MAX_FRAMES": "8",
+      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_AREA_MEAN_CAP": "8000",
+      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_AREA_MAX_CAP": "18000",
       "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_MIN_SHARED_FRAMES": "1",
-      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_OVERLAP_FRACTION": "0.50",
-      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_CONTAINMENT_THRESHOLD": "0.94",
-      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_PEAK_CONTAINMENT_THRESHOLD": "0.98",
+      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_OVERLAP_FRACTION": "0.40",
+      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_CONTAINMENT_THRESHOLD": "0.92",
+      "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_PEAK_CONTAINMENT_THRESHOLD": "0.97",
       "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_TARGET_LENGTH_RATIO": "1.5",
       "OBJECTX_SAM2_MERGE_FRAGMENT_PRUNE_TARGET_AREA_RATIO": "1.4",
-      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_ENABLED": "0"
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_ENABLED": "1",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MAX_FRAMES": "4",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MAX_FRAME_SPAN": "40",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_AREA_MEAN_CAP": "5000",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_AREA_MAX_CAP": "12000",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MAX_ORIG_TRACKS": "1",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MAX_KEYFRAME_SUPPORT": "1",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_MIN_SHARED_FRAMES": "1",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_OVERLAP_FRACTION": "0.65",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_CONTAINMENT_THRESHOLD": "0.96",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_PEAK_CONTAINMENT_THRESHOLD": "0.99",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_TARGET_LENGTH_RATIO": "1.4",
+      "OBJECTX_SAM2_MERGE_LOW_SUPPORT_PRUNE_TARGET_AREA_RATIO": "1.4"
     },
-    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_oven_segment_inputs_sam2_must3r.log"
+    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_b05fddd1_segment_inputs_sam2_must3r.log"
   },
   "must3r": {
     "config": "preprocessing/segmentation/pipeline.yaml",
@@ -95,7 +107,7 @@
     "run_sam2": false,
     "run_registry": false,
     "input_root": "${OBJECTX_BASELINE_ROOT}",
-    "output_root": "${OBJECTX_OVEN_SAM2_MUST3R_RECON_ROOT}",
+    "output_root": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-b05fddd1-hybrid-sam2mask-must3r",
     "mask_dirname": "sam2_projection",
     "objects_filename": "objects_sam2.json",
     "scenes_dirname": "scenes_sam2_must3r",
@@ -135,7 +147,7 @@
       "OBJECTX_DUST3R_INIT_LR": "0.01",
       "OBJECTX_DUST3R_INIT_INIT": "mst"
     },
-    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_oven_must3r.log"
+    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_b05fddd1_must3r.log"
   },
   "voxelise": {
     "scene_source_dirname": "scenes_sam2_must3r",
@@ -166,20 +178,25 @@
     },
     "reset_tmp": 1,
     "max_scans": 0,
-    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_oven_2_5_sam2_must3r_hybrid.log"
+    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_b05fddd1_2_5_sam2_must3r_hybrid.log"
   },
   "build_pred_ready": {
     "reconstruction_scenes_dirname": "scenes_sam2_must3r",
     "knn": 4,
     "min_voxels": 32,
-    "point_counts": [64, 128, 256, 512],
+    "point_counts": [
+      64,
+      128,
+      256,
+      512
+    ],
     "overwrite": true
   },
   "validate_pred_ready": {
-    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/pred_ready_validation/oven_legacy_sam2_must3r_hybrid"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/pred_ready_validation/scene_b05fddd1_legacy_sam2_must3r_hybrid"
   },
   "compare_arrangement": {
-    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/arrangement_compare/oven_legacy_sam2_must3r_hybrid_vs_gt"
+    "out_dir": "${OBJECTX_REPO_VIS_ROOT}/arrangement_compare/scene_b05fddd1_legacy_sam2_must3r_hybrid_vs_gt"
   },
   "slat": {
     "env": {
@@ -188,7 +205,7 @@
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
       "RESET_TMP": "1"
     },
-    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_oven_legacy_sam2_must3r_hybrid_slat.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_scene_b05fddd1_legacy_sam2_must3r_hybrid_slat.log"
   },
   "u3dgs": {
     "visualize": true,
@@ -220,11 +237,11 @@
       "OBJECTX_VIS_PRUNE_MAX_POINTS",
       "OBJECTX_VIS_PRUNE_QUANTILE_SAMPLE_MAX"
     ],
-    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_oven_legacy_sam2_must3r_hybrid_u3dgs.log"
+    "log": "${OBJECTX_REPO_DEBUG_ROOT}/debug_scene_b05fddd1_legacy_sam2_must3r_hybrid_u3dgs.log"
   },
   "render_bundle": {
-    "label": "oven_legacy_sam2_must3r_hybrid",
-    "data_root": "${OBJECTX_OVEN_SAM2_MUST3R_RECON_ROOT}",
+    "label": "scene_b05fddd1_legacy_sam2_must3r_hybrid",
+    "data_root": "/work/courses/3dv/team35/pafina/objectx-data-fullscene-b05fddd1-hybrid-sam2mask-must3r",
     "mask_source": "sam2_projection",
     "background_remove_mode": "loaded",
     "pose_mode": "raw",

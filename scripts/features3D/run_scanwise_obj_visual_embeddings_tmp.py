@@ -16,6 +16,8 @@ def parse_args():
     parser.add_argument("--tmp-root", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--split", required=True, choices=["train", "val", "test"])
+    parser.add_argument("--scene-source-dirname", default="scenes")
+    parser.add_argument("--scene-id", default=None)
     parser.add_argument("--max-scans", type=int, default=0)
     parser.add_argument("--override", action="store_true")
     return parser.parse_args()
@@ -26,6 +28,38 @@ def safe_unlink(path: Path):
         path.unlink()
     elif path.exists():
         shutil.rmtree(path)
+
+
+def _clean_pythonpath_for_vlsg(env: dict, repo_root: Path, vlsg_root: Path) -> None:
+    """Ensure VLSG imports resolve to the dependency checkout, not this repo.
+
+    The Object-X activation script prepends the repo root to PYTHONPATH. That
+    causes top-level imports like ``configs`` or ``utils`` inside the VLSG
+    feature-generation scripts to resolve to Object-X modules first. For the
+    subprocess that runs VLSG code we instead want:
+    1. VLSG workspace
+    2. VLSG src
+    3. the remaining non-Object-X paths
+    """
+
+    repo_real = os.path.realpath(str(repo_root))
+    repo_src_real = os.path.realpath(str(repo_root / "src"))
+    existing = [
+        p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p
+    ]
+    cleaned = []
+    seen = set()
+    for path in existing:
+        real = os.path.realpath(path)
+        if real in {repo_real, repo_src_real}:
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        cleaned.append(path)
+
+    preferred = [str(vlsg_root), str(vlsg_root / "src")]
+    env["PYTHONPATH"] = os.pathsep.join(preferred + cleaned)
 
 
 def load_scan_ids(root: Path, split: str) -> list[str]:
@@ -149,9 +183,12 @@ def main():
 
     prepare_tmp_layout(scratch_root, tmp_root)
 
-    scan_ids = load_scan_ids(scratch_root, args.split)
-    if args.max_scans > 0:
-        scan_ids = scan_ids[: args.max_scans]
+    if args.scene_id:
+        scan_ids = [args.scene_id]
+    else:
+        scan_ids = load_scan_ids(scratch_root, args.split)
+        if args.max_scans > 0:
+            scan_ids = scan_ids[: args.max_scans]
 
     total = len(scan_ids)
     for idx, scan_id in enumerate(scan_ids, start=1):
@@ -160,7 +197,7 @@ def main():
                 print(f"[feat3d] {idx}/{total} (skip existing) {scan_id}", flush=True)
             continue
 
-        src_scan_dir = scratch_root / "scenes" / scan_id
+        src_scan_dir = scratch_root / args.scene_source_dirname / scan_id
         tmp_scan_dir = tmp_root / "scenes" / scan_id
         tmp_out_file = (
             tmp_root / "files" / "Features3D" / "obj_dinov2_top10_l3" / f"{scan_id}.pkl"
@@ -173,6 +210,7 @@ def main():
         env = os.environ.copy()
         env["Data_ROOT_DIR"] = str(tmp_root)
         env["VLSG_SPACE"] = str(vlsG_space)
+        _clean_pythonpath_for_vlsg(env, repo_root, vlsG_space)
 
         try:
             subprocess.run(
