@@ -2,17 +2,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VLSG_SPACE="${VLSG_SPACE:-$REPO_ROOT/dependencies/VLSG}"
+VLSG_DEP_SPACE="${VLSG_DEP_SPACE:-$REPO_ROOT/dependencies/VLSG}"
 SCRATCH_ROOT="${Data_ROOT_DIR:-/work/scratch/pafina/objectx-data-baseline}"
 TMP_GT_ROOT="${TMP_GT_ROOT:-/tmp/${USER}-objectx-gt-anno}"
 RESET_TMP="${RESET_TMP:-0}"
-
-if [[ ! -d "$REPO_ROOT/3dv" ]]; then
-  echo "Missing venv at $REPO_ROOT/3dv" >&2
-  exit 1
-fi
-
-source "$REPO_ROOT/3dv/bin/activate"
+source "$REPO_ROOT/scripts/activate_objectx_env.sh"
+export VLSG_SPACE="$VLSG_DEP_SPACE"
 
 if [[ "$RESET_TMP" == "1" ]]; then
   rm -rf "$TMP_GT_ROOT"

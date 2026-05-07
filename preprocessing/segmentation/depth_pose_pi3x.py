@@ -263,7 +263,14 @@ def _run_local_geometry_chunks(
     dtype: torch.dtype,
     pose_priors_c2w: np.ndarray,
     use_intrinsics: bool,
+    global_depth_maps: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    # global_depth_maps: (N, H_global, W_global) camera-frame Z from the fullscene pass.
+    # Passing these anchors Pi3X's internal scale normalization (dep_median) to the same
+    # scene-level scale in every chunk. Without them, each chunk independently normalises
+    # its pose translations by its own RMS inter-frame distance, producing a different
+    # dep_median per chunk and therefore a different absolute depth scale — the root cause
+    # of the scale_ratio > 1 rejection.
     imgs = _load_images_from_paths(frame_paths, pixel_limit=int(pixel_limit))
     if imgs.ndim != 4 or imgs.shape[0] != len(frame_paths):
         raise RuntimeError(
@@ -277,6 +284,21 @@ def _run_local_geometry_chunks(
         else None
     )
     poses = torch.from_numpy(pose_priors_c2w.astype(np.float32)).unsqueeze(0).to(device)
+
+    # Pre-resize global depth maps to local resolution once, reuse per chunk.
+    global_depths_local: Optional[np.ndarray] = None
+    if global_depth_maps is not None and global_depth_maps.shape[0] == n_frames:
+        resized = []
+        for i in range(n_frames):
+            d = cv2.resize(
+                global_depth_maps[i].astype(np.float32),
+                (w_net, h_net),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            resized.append(d)
+        global_depths_local = np.stack(resized, axis=0)  # (N, h_net, w_net)
+        print(f"[Pi3X] local pass: using global depth priors for scale anchoring "
+              f"(resized to {w_net}x{h_net})")
 
     step = max(1, int(chunk_size) - max(0, int(overlap)))
     local_points_out: list[Optional[torch.Tensor]] = [None] * n_frames
@@ -300,6 +322,14 @@ def _run_local_geometry_chunks(
                 )
                 model_kwargs["poses"] = poses[:, start_idx:end_idx]
                 model_kwargs["mask_add_pose"] = torch.ones(
+                    (1, end_idx - start_idx), dtype=torch.bool, device=device
+                )
+            if global_depths_local is not None:
+                chunk_depths = torch.from_numpy(
+                    global_depths_local[start_idx:end_idx]
+                ).unsqueeze(0).to(device)
+                model_kwargs["depths"] = chunk_depths
+                model_kwargs["mask_add_depth"] = torch.ones(
                     (1, end_idx - start_idx), dtype=torch.bool, device=device
                 )
 
@@ -620,6 +650,7 @@ def run_pi3x_on_scene(
             dtype=dtype,
             pose_priors_c2w=poses_c2w_np,
             use_intrinsics=bool(use_intrinsics),
+            global_depth_maps=global_local_pts_all[..., 2],
         )
         local_geometry_source = (
             f"highres_chunks(pixel_limit={int(local_pixel_limit)},"

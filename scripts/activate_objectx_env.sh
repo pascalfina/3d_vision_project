@@ -13,12 +13,14 @@ if command -v module >/dev/null 2>&1; then
     module load cuda/12.8 >/dev/null 2>&1 || true
 fi
 
-if [[ -f "$VLSG_SPACE/3dv/bin/activate" ]]; then
+if [[ -f "$VLSG_SPACE/.venv_objx/bin/activate" ]]; then
+    export VLSG_VENV_PATH="$VLSG_SPACE/.venv_objx"
+elif [[ -f "$VLSG_SPACE/3dv/bin/activate" ]]; then
     export VLSG_VENV_PATH="$VLSG_SPACE/3dv"
 elif [[ -f "$VLSG_SPACE/.venv/bin/activate" ]]; then
     export VLSG_VENV_PATH="$VLSG_SPACE/.venv"
 else
-    echo "Object-X environment not found under $VLSG_SPACE/3dv or $VLSG_SPACE/.venv" >&2
+    echo "Object-X environment not found under $VLSG_SPACE/.venv_objx, $VLSG_SPACE/3dv, or $VLSG_SPACE/.venv" >&2
     return 1 2>/dev/null || exit 1
 fi
 

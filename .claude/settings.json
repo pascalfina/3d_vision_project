@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls -lt)",
+      "Bash(git -C /work/scratch/pafina/object-x ls-files --error-unmatch dependencies/pi3)",
+      "Bash(git -C /work/scratch/pafina/object-x/dependencies/pi3 remote -v)",
+      "Bash(git -C /work/scratch/pafina/object-x/dependencies/pi3 log --oneline -3)",
+      "Bash(git -C /work/scratch/pafina/object-x/dependencies/pi3 status --short)",
+      "Bash(git -C /work/scratch/pafina/object-x status --short dependencies/)",
+      "Bash(rm -rf /work/scratch/pafina/object-x/dependencies/pi3/.git)",
+      "Bash(git -C /work/scratch/pafina/object-x status --short dependencies/pi3/)"
+    ],
+    "additionalDirectories": [
+      "/work/scratch/pafina/object-x/dependencies/pi3/.git"
+    ]
+  }
+}
