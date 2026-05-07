@@ -293,7 +293,7 @@ def _run_local_geometry_chunks(
             d = cv2.resize(
                 global_depth_maps[i].astype(np.float32),
                 (w_net, h_net),
-                interpolation=cv2.INTER_NEAREST,
+                interpolation=cv2.INTER_LINEAR,
             )
             resized.append(d)
         global_depths_local = np.stack(resized, axis=0)  # (N, h_net, w_net)
@@ -395,6 +395,64 @@ def _global_pts_to_cam_frame(
     return cam.astype(np.float32)
 
 
+def _smooth_depth_scale(
+    ref_z: np.ndarray,
+    pred_z: np.ndarray,
+    sigma: float = 20.0,
+) -> np.ndarray:
+    """Per-pixel scale map (ref_z / pred_z) blurred over ~sigma pixels.
+
+    Maps all surface points along their viewing rays to the reference depth
+    (MUSt3R) while preserving Pi3X's local angular geometry structure within
+    each smoothing neighbourhood.  Invalid pixels (zero in either input) are
+    initialised to 1.0 so the Gaussian fill-in from valid neighbours takes over.
+    Result is clipped to [0.25, 4.0].
+    """
+    scale_map = np.ones(pred_z.shape, dtype=np.float32)
+    valid = (pred_z > 0) & (ref_z > 0)
+    if valid.any():
+        scale_map[valid] = np.clip(
+            ref_z[valid] / (pred_z[valid] + 1e-8), 0.25, 4.0
+        )
+    if sigma > 0:
+        scale_map = cv2.GaussianBlur(scale_map, (0, 0), sigmaX=float(sigma))
+    return scale_map
+
+
+def _load_external_poses(frame_paths: List[str], pose_dir: str) -> np.ndarray:
+    """Load c2w pose matrices from .pose.txt files for the given frame paths."""
+    poses = []
+    for i, p in enumerate(frame_paths):
+        fid = _frame_id_from_path(p, i)
+        pose_file = Path(pose_dir) / f"frame-{fid}.pose.txt"
+        if not pose_file.exists():
+            raise FileNotFoundError(f"External pose file not found: {pose_file}")
+        mat = np.loadtxt(str(pose_file), dtype=np.float64).reshape(4, 4)
+        poses.append(mat.astype(np.float32))
+    return np.stack(poses, axis=0)
+
+
+def _load_external_xyz_maps(
+    frame_paths: List[str], xyz_dir: str
+) -> Optional[np.ndarray]:
+    """Load camera-frame xyz maps from .xyz.npy files for the given frame paths.
+
+    Returns None if any file is missing.
+    """
+    maps = []
+    for i, p in enumerate(frame_paths):
+        fid = _frame_id_from_path(p, i)
+        xyz_file = Path(xyz_dir) / f"frame-{fid}.xyz.npy"
+        if not xyz_file.exists():
+            print(
+                f"[Pi3X] external xyz file not found: {xyz_file}, "
+                "skipping external depth priors"
+            )
+            return None
+        maps.append(np.load(str(xyz_file)).astype(np.float32))
+    return np.stack(maps, axis=0)
+
+
 def run_pi3x_on_scene(
     frame_paths: List[str],
     checkpoint: Optional[str],
@@ -424,6 +482,7 @@ def run_pi3x_on_scene(
     local_scale_max_ratio: float = 1.35,
     output_native_resolution: bool = False,
     frame_stride: int = 1,
+    external_pose_dir: Optional[str] = None,
 ):
     """Runs Pi3X over the entire scene with chunked sim3-aligned inference.
 
@@ -543,31 +602,6 @@ def run_pi3x_on_scene(
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    pipe = Pi3XVO(model)
-
-    imgs = _load_images_from_paths(frame_paths, pixel_limit=int(pixel_limit))
-    if imgs.ndim != 4 or imgs.shape[0] != n_frames:
-        raise RuntimeError(
-            f"Pi3X image preprocessing produced unexpected tensor shape "
-            f"{tuple(imgs.shape)}"
-        )
-    imgs = imgs.to(device)
-    _, _, H_net, W_net = imgs.shape
-    print(f"[Pi3X] loaded {n_frames} images at {H_net}x{W_net}")
-    global_intrinsics = (
-        _intrinsics_batch(frame_paths, H_net, W_net, device)
-        if use_intrinsics
-        else None
-    )
-    if global_intrinsics is not None:
-        k0 = global_intrinsics[0, 0].detach().cpu().numpy()
-        print(
-            "[Pi3X] using scaled color intrinsics "
-            f"fx={k0[0,0]:.3f} fy={k0[1,1]:.3f} "
-            f"cx={k0[0,2]:.3f} cy={k0[1,2]:.3f}"
-        )
-
-    imgs_batched = imgs.unsqueeze(0)  # (1, T, 3, H, W)
     dtype = (
         torch.bfloat16
         if (device == "cuda" and torch.cuda.is_available()
@@ -575,68 +609,125 @@ def run_pi3x_on_scene(
         else torch.float16
     )
 
-    print(
-        f"[Pi3X] running chunked Pi3XVO (dtype={dtype}, "
-        f"chunk_size={chunk_size}, overlap={overlap})"
-    )
-    anchor_indices = _select_even_anchor_indices(n_frames, int(anchor_count))
-    if anchor_indices is not None:
-        print(f"[Pi3X] anchor-aligned Pi3XVO anchors={anchor_indices}")
-    with torch.no_grad():
-        out = pipe(
-            imgs=imgs_batched,
-            chunk_size=int(chunk_size),
-            overlap=int(overlap),
-            conf_thre=float(conf_thr),
-            inject_condition=None,
-            dtype=dtype,
-            align_mode=str(align_mode).strip().lower(),
-            anchor_indices=anchor_indices,
-            intrinsics=global_intrinsics,
-        )
-    # out['points']        (1, N, H, W, 3)  global world frame, metric scale
-    # out['local_points']  (1, N, H, W, 3)  camera-frame XYZ, metric scale
-    # out['camera_poses']  (1, N, 4, 4)     rigid c2w, metric translation
-    # out['conf']          (1, N, H, W)     sigmoid'd confidence in [0, 1]
-    global_pts_all = out["points"][0].detach().to("cpu", dtype=torch.float32).numpy()
-    local_pts_all = (
-        out.get("local_points", out["points"])[0]
-        .detach()
-        .to("cpu", dtype=torch.float32)
-        .numpy()
-    )
-    poses_c2w_np = out["camera_poses"][0].detach().to(
-        "cpu", dtype=torch.float32
-    ).numpy()
-    conf_all = out["conf"][0].detach().to("cpu", dtype=torch.float32).numpy()
-    del pipe, out, imgs, imgs_batched
-    if device == "cuda":
-        torch.cuda.empty_cache()
-
-    if poses_c2w_np.shape[0] != n_frames:
-        raise RuntimeError(
-            f"Pi3X returned {poses_c2w_np.shape[0]} poses but expected {n_frames}"
-        )
-    if global_pts_all.shape != (n_frames, H_net, W_net, 3):
-        raise RuntimeError(
-            f"Pi3X global pts shape {global_pts_all.shape} does not match "
-            f"({n_frames}, {H_net}, {W_net}, 3)"
-        )
-    if local_pts_all.shape != (n_frames, H_net, W_net, 3):
-        raise RuntimeError(
-            f"Pi3X local pts shape {local_pts_all.shape} does not match "
-            f"({n_frames}, {H_net}, {W_net}, 3)"
-        )
-
-    global_local_pts_all = local_pts_all
-    global_conf_all = conf_all
-    local_geometry_source = "fullscene"
-    out_h, out_w = (H_net, W_net) if output_native_resolution else (172, 224)
-    if output_native_resolution:
+    if external_pose_dir:
         print(
-            "[Pi3X] writing native-resolution xyz/depth/conf maps "
-            f"({out_w}x{out_h})"
+            f"[Pi3X] external_pose_dir set → skipping Pi3XVO global pass; "
+            f"loading poses from {external_pose_dir}"
         )
+        if int(local_pixel_limit) <= 0:
+            raise ValueError(
+                "external_pose_dir requires local_pixel_limit > 0 "
+                "(no global-pass depth fallback available)"
+            )
+        poses_c2w_np = _load_external_poses(frame_paths, external_pose_dir)
+        if poses_c2w_np.shape[0] != n_frames:
+            raise RuntimeError(
+                f"Loaded {poses_c2w_np.shape[0]} external poses but expected {n_frames}"
+            )
+        print(f"[Pi3X] loaded {n_frames} external c2w poses")
+        global_local_pts_all: Optional[np.ndarray] = _load_external_xyz_maps(
+            frame_paths, external_pose_dir
+        )
+        if global_local_pts_all is not None:
+            print(
+                f"[Pi3X] loaded external xyz maps {global_local_pts_all.shape} "
+                "for local-pass depth anchoring and scale validation"
+            )
+        global_conf_all: Optional[np.ndarray] = None
+        local_geometry_source = "ext_poses"
+        out_h, out_w = (172, 224)
+        if device == "cuda":
+            torch.cuda.empty_cache()
+    else:
+        pipe = Pi3XVO(model)
+
+        imgs = _load_images_from_paths(frame_paths, pixel_limit=int(pixel_limit))
+        if imgs.ndim != 4 or imgs.shape[0] != n_frames:
+            raise RuntimeError(
+                f"Pi3X image preprocessing produced unexpected tensor shape "
+                f"{tuple(imgs.shape)}"
+            )
+        imgs = imgs.to(device)
+        _, _, H_net, W_net = imgs.shape
+        print(f"[Pi3X] loaded {n_frames} images at {H_net}x{W_net}")
+        global_intrinsics = (
+            _intrinsics_batch(frame_paths, H_net, W_net, device)
+            if use_intrinsics
+            else None
+        )
+        if global_intrinsics is not None:
+            k0 = global_intrinsics[0, 0].detach().cpu().numpy()
+            print(
+                "[Pi3X] using scaled color intrinsics "
+                f"fx={k0[0,0]:.3f} fy={k0[1,1]:.3f} "
+                f"cx={k0[0,2]:.3f} cy={k0[1,2]:.3f}"
+            )
+
+        imgs_batched = imgs.unsqueeze(0)  # (1, T, 3, H, W)
+
+        print(
+            f"[Pi3X] running chunked Pi3XVO (dtype={dtype}, "
+            f"chunk_size={chunk_size}, overlap={overlap})"
+        )
+        anchor_indices = _select_even_anchor_indices(n_frames, int(anchor_count))
+        if anchor_indices is not None:
+            print(f"[Pi3X] anchor-aligned Pi3XVO anchors={anchor_indices}")
+        with torch.no_grad():
+            out = pipe(
+                imgs=imgs_batched,
+                chunk_size=int(chunk_size),
+                overlap=int(overlap),
+                conf_thre=float(conf_thr),
+                inject_condition=None,
+                dtype=dtype,
+                align_mode=str(align_mode).strip().lower(),
+                anchor_indices=anchor_indices,
+                intrinsics=global_intrinsics,
+            )
+        # out['points']        (1, N, H, W, 3)  global world frame, metric scale
+        # out['local_points']  (1, N, H, W, 3)  camera-frame XYZ, metric scale
+        # out['camera_poses']  (1, N, 4, 4)     rigid c2w, metric translation
+        # out['conf']          (1, N, H, W)     sigmoid'd confidence in [0, 1]
+        global_pts_all = out["points"][0].detach().to("cpu", dtype=torch.float32).numpy()
+        local_pts_all = (
+            out.get("local_points", out["points"])[0]
+            .detach()
+            .to("cpu", dtype=torch.float32)
+            .numpy()
+        )
+        poses_c2w_np = out["camera_poses"][0].detach().to(
+            "cpu", dtype=torch.float32
+        ).numpy()
+        conf_all = out["conf"][0].detach().to("cpu", dtype=torch.float32).numpy()
+        del pipe, out, imgs, imgs_batched
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+        if poses_c2w_np.shape[0] != n_frames:
+            raise RuntimeError(
+                f"Pi3X returned {poses_c2w_np.shape[0]} poses but expected {n_frames}"
+            )
+        if global_pts_all.shape != (n_frames, H_net, W_net, 3):
+            raise RuntimeError(
+                f"Pi3X global pts shape {global_pts_all.shape} does not match "
+                f"({n_frames}, {H_net}, {W_net}, 3)"
+            )
+        if local_pts_all.shape != (n_frames, H_net, W_net, 3):
+            raise RuntimeError(
+                f"Pi3X local pts shape {local_pts_all.shape} does not match "
+                f"({n_frames}, {H_net}, {W_net}, 3)"
+            )
+
+        global_local_pts_all = local_pts_all
+        global_conf_all = conf_all
+        local_geometry_source = "fullscene"
+        out_h, out_w = (H_net, W_net) if output_native_resolution else (172, 224)
+        if output_native_resolution:
+            print(
+                "[Pi3X] writing native-resolution xyz/depth/conf maps "
+                f"({out_w}x{out_h})"
+            )
+
     precomputed_local_scale_factors: Optional[List[float]] = None
     if int(local_pixel_limit) > 0:
         local_pts_all, conf_all = _run_local_geometry_chunks(
@@ -650,69 +741,110 @@ def run_pi3x_on_scene(
             dtype=dtype,
             pose_priors_c2w=poses_c2w_np,
             use_intrinsics=bool(use_intrinsics),
-            global_depth_maps=global_local_pts_all[..., 2],
+            global_depth_maps=(
+                global_local_pts_all[..., 2] if global_local_pts_all is not None else None
+            ),
         )
         local_geometry_source = (
             f"highres_chunks(pixel_limit={int(local_pixel_limit)},"
             f"chunk_size={int(local_chunk_size)},overlap={int(local_overlap)})"
         )
         candidate_scales: List[float] = []
-        for i in range(n_frames):
-            candidate_xyz = cv2.resize(
-                local_pts_all[i].astype(np.float32),
-                (out_w, out_h),
-                interpolation=cv2.INTER_NEAREST,
-            )
-            candidate_conf = cv2.resize(
-                conf_all[i].astype(np.float32),
-                (out_w, out_h),
-                interpolation=cv2.INTER_LINEAR,
-            )
-            global_xyz = cv2.resize(
-                global_local_pts_all[i].astype(np.float32),
-                (out_w, out_h),
-                interpolation=cv2.INTER_NEAREST,
-            )
-            global_conf = cv2.resize(
-                global_conf_all[i].astype(np.float32),
-                (out_w, out_h),
-                interpolation=cv2.INTER_LINEAR,
-            )
-            valid_scale = (
-                (candidate_xyz[..., 2] > 0.0)
-                & (global_xyz[..., 2] > 0.0)
-                & (candidate_conf >= float(conf_thr))
-                & (global_conf >= float(conf_thr))
-            )
-            if int(valid_scale.sum()) >= 256:
-                ratio = global_xyz[..., 2][valid_scale] / (
-                    candidate_xyz[..., 2][valid_scale] + 1e-8
+        if global_local_pts_all is not None:
+            for i in range(n_frames):
+                candidate_xyz = cv2.resize(
+                    local_pts_all[i].astype(np.float32),
+                    (out_w, out_h),
+                    interpolation=cv2.INTER_NEAREST,
                 )
-                finite_ratio = ratio[np.isfinite(ratio)]
-                if finite_ratio.size:
-                    scale = float(np.median(finite_ratio))
-                    candidate_scales.append(float(np.clip(scale, 0.25, 4.0)))
-                    continue
-            candidate_scales.append(1.0)
+                candidate_conf = cv2.resize(
+                    conf_all[i].astype(np.float32),
+                    (out_w, out_h),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                global_xyz = cv2.resize(
+                    global_local_pts_all[i].astype(np.float32),
+                    (out_w, out_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                if global_conf_all is not None:
+                    global_conf = cv2.resize(
+                        global_conf_all[i].astype(np.float32),
+                        (out_w, out_h),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+                    valid_scale = (
+                        (candidate_xyz[..., 2] > 0.0)
+                        & (global_xyz[..., 2] > 0.0)
+                        & (candidate_conf >= float(conf_thr))
+                        & (global_conf >= float(conf_thr))
+                    )
+                else:
+                    valid_scale = (
+                        (candidate_xyz[..., 2] > 0.0)
+                        & (global_xyz[..., 2] > 0.0)
+                        & (candidate_conf >= float(conf_thr))
+                    )
+                if int(valid_scale.sum()) >= 256:
+                    ratio = global_xyz[..., 2][valid_scale] / (
+                        candidate_xyz[..., 2][valid_scale] + 1e-8
+                    )
+                    finite_ratio = ratio[np.isfinite(ratio)]
+                    if finite_ratio.size:
+                        scale = float(np.median(finite_ratio))
+                        candidate_scales.append(float(np.clip(scale, 0.25, 4.0)))
+                        continue
+                candidate_scales.append(1.0)
 
-        scale_arr = np.asarray(candidate_scales, dtype=np.float32)
-        valid_scales = scale_arr[np.isfinite(scale_arr) & (scale_arr > 0.0)]
-        if valid_scales.size:
-            scale_ratio = float(valid_scales.max() / max(valid_scales.min(), 1e-8))
+            scale_arr = np.asarray(candidate_scales, dtype=np.float32)
+            valid_scales = scale_arr[np.isfinite(scale_arr) & (scale_arr > 0.0)]
+            if valid_scales.size:
+                scale_ratio = float(valid_scales.max() / max(valid_scales.min(), 1e-8))
+            else:
+                scale_ratio = float("inf")
+            if scale_ratio > float(local_scale_max_ratio):
+                print(
+                    "[Pi3X] high-res local geometry rejected: "
+                    f"scale_ratio={scale_ratio:.3f} > "
+                    f"max_ratio={float(local_scale_max_ratio):.3f}; "
+                    + (
+                        "falling back to external xyz maps"
+                        if external_pose_dir
+                        else "falling back to fullscene geometry"
+                    )
+                )
+                local_pts_all = global_local_pts_all
+                conf_all = (
+                    np.ones(
+                        (n_frames,) + global_local_pts_all.shape[1:3],
+                        dtype=np.float32,
+                    )
+                    if external_pose_dir
+                    else global_conf_all
+                )
+                local_geometry_source = (
+                    "ext_xyz_fallback" if external_pose_dir else "fullscene"
+                )
+            else:
+                precomputed_local_scale_factors = candidate_scales
+                if output_native_resolution and local_pts_all[0].shape[:2] != (out_h, out_w):
+                    out_h, out_w = local_pts_all[0].shape[:2]
+                    print(
+                        f"[Pi3X] output resolution updated to local pass resolution "
+                        f"({out_w}x{out_h})"
+                    )
         else:
-            scale_ratio = float("inf")
-        if scale_ratio > float(local_scale_max_ratio):
+            # No global depth reference → accept local pass unconditionally with scale=1.0
             print(
-                "[Pi3X] high-res local geometry rejected: "
-                f"scale_ratio={scale_ratio:.3f} > "
-                f"max_ratio={float(local_scale_max_ratio):.3f}; "
-                "falling back to fullscene geometry"
+                "[Pi3X] no external xyz maps found; accepting local pass without scale validation"
             )
-            local_pts_all = global_local_pts_all
-            conf_all = global_conf_all
-            local_geometry_source = "fullscene"
-        else:
-            precomputed_local_scale_factors = candidate_scales
+            precomputed_local_scale_factors = [1.0] * n_frames
+            if output_native_resolution and local_pts_all[0].shape[:2] != (out_h, out_w):
+                out_h, out_w = local_pts_all[0].shape[:2]
+                print(
+                    f"[Pi3X] output resolution updated to local pass resolution "
+                    f"({out_w}x{out_h})"
+                )
 
     del model
     if device == "cuda":
@@ -780,13 +912,24 @@ def run_pi3x_on_scene(
             xyz_resized[..., 2] > 0.0, xyz_resized[..., 2], 0.0
         )
 
-        if local_geometry_source != "fullscene":
-            if precomputed_local_scale_factors is not None:
+        if local_geometry_source not in ("fullscene", "ext_xyz_fallback"):
+            if global_local_pts_all is not None:
+                # Pixel-wise scale: align each Pi3X surface point to the MUSt3R
+                # depth along the same viewing ray, smoothed over ~20 px to
+                # preserve Pi3X's local angular geometry while removing
+                # inter-chunk scale discontinuities.
+                ref_z = cv2.resize(
+                    global_local_pts_all[i][..., 2].astype(np.float32),
+                    (out_w, out_h),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                scale_map = _smooth_depth_scale(ref_z, xyz_resized[..., 2])
+                xyz_resized *= scale_map[..., None]
+                local_scale_factors.append(float(np.median(scale_map)))
+            elif precomputed_local_scale_factors is not None:
                 scale = float(precomputed_local_scale_factors[i])
-            else:
-                scale = 1.0
-            xyz_resized *= scale
-            local_scale_factors.append(scale)
+                xyz_resized *= scale
+                local_scale_factors.append(scale)
 
         raw_resized = xyz_resized[..., 2].astype(np.float32)
         masked_resized = np.where(
