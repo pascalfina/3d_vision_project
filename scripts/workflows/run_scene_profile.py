@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 DEFAULT_ACTIONS = [
+    "features3d",
     "must3r",
     "mast3r-sfm",
     "fuse",
@@ -615,6 +616,37 @@ def build_pred_ready_action(repo_root: Path, profile: dict):
     return cmd, {}, log_path
 
 
+def build_features3d_action(repo_root: Path, profile: dict):
+    sec = section(profile, "features3d")
+    voxel_sec = section(profile, "voxelise")
+    default_scene_source_dirname = voxel_sec.get("scene_source_dirname", "scenes")
+    env_updates = {
+        "DATA_ROOT_DIR": sec.get("data_root", roots(profile).get("reconstruction")),
+        "SPLIT": sec.get("split", shared_value(profile, "split", "val")),
+        "SCENE_ID": sec.get("scene_id", shared_value(profile, "scene_id")),
+        "MAX_SCANS": str(sec.get("max_scans", 0)),
+        "RESET_TMP": str(sec.get("reset_tmp", 0)),
+        "OBJECTX_SCENE_SOURCE_DIRNAME": sec.get(
+            "scene_source_dirname", default_scene_source_dirname
+        ),
+        "OBJECTX_MASK_SOURCE": sec.get(
+            "mask_source", profile_mask_source(repo_root, profile)
+        ),
+    }
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+    cmd = [
+        "bash",
+        str(repo_root / "scripts" / "features3D" / "obj_visual_embeddings_tmp.sh"),
+    ]
+    log_value = sec.get(
+        "log",
+        f"{os.environ['OBJECTX_REPO_DEBUG_ROOT']}/debug_{profile.get('name', 'scene')}_features3d.log",
+    )
+    log_path = Path(log_value).expanduser() if log_value else None
+    return cmd, env_updates, log_path
+
+
 def build_validate_action(repo_root: Path, profile: dict):
     sec = section(profile, "validate_pred_ready")
     cmd = [
@@ -758,6 +790,7 @@ def build_render_action(repo_root: Path, profile: dict):
 
 
 ACTION_BUILDERS = {
+    "features3d": build_features3d_action,
     "must3r": build_must3r_action,
     "mast3r-sfm": build_mast3r_sfm_action,
     "fuse": build_fuse_action,
