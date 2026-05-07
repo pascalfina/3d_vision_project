@@ -395,6 +395,11 @@ def run_scene(scene_id, scene_dir, cfg):
                     os.environ.get("OBJECTX_PI3X_OUTPUT_NATIVE_RES"),
                     mc.get("output_native_resolution", False),
                 ),
+                "frame_stride": env_or_default(
+                    "OBJECTX_PI3X_FRAME_STRIDE",
+                    mc.get("frame_stride", 1),
+                    int,
+                ),
             }
             _, depths = run_pi3x_on_scene(
                 frame_paths,
