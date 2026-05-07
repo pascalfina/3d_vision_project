@@ -60,4 +60,11 @@ dependencies/**
 !dependencies/must3r/**
 !dependencies/mast3r/
 !dependencies/mast3r/**
+!dependencies/pi3/
+!dependencies/pi3/**
+dependencies/pi3/**/__pycache__/
+dependencies/pi3/**/*.pyc
+dependencies/pi3/**/build/
+dependencies/pi3/**/*.egg-info/
+dependencies/pi3/**/*.so
 vis/rendered
