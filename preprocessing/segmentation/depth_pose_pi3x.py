@@ -393,13 +393,78 @@ def run_pi3x_on_scene(
     local_overlap: int = 8,
     local_scale_max_ratio: float = 1.35,
     output_native_resolution: bool = False,
+    frame_stride: int = 1,
 ):
     """Runs Pi3X over the entire scene with chunked sim3-aligned inference.
 
+    ``frame_stride``: when > 1, Pi3X only processes every ``frame_stride``-th
+    frame (always including the first and last). Skipped frames receive no
+    pose/xyz/depth/conf output, so downstream voxelise / render only see the
+    selected subset. This trades raw point density for higher per-frame
+    spatial resolution at fixed GPU memory budget.
+
     Returns:
-        (poses_c2w_t (N,4,4) torch tensor, depths list of (172, 224) np arrays).
+        (poses_c2w_t (N',4,4) torch tensor for selected frames,
+         depths list of (172, 224) np arrays for selected frames).
     """
     _ensure_pi3_on_path()
+
+    # Optional frame subsampling to trade temporal density for spatial
+    # resolution under a fixed GPU memory budget. Always include the last
+    # frame so the trajectory endpoint is covered. Stale outputs from prior
+    # full-stride runs are removed so downstream voxelise sees only the new
+    # selected subset.
+    stride = max(1, int(frame_stride))
+    if stride > 1 and len(frame_paths) > 1:
+        original_total = len(frame_paths)
+        keep_indices = list(range(0, original_total, stride))
+        if keep_indices[-1] != original_total - 1:
+            keep_indices.append(original_total - 1)
+        kept_set = set(keep_indices)
+        kept_frame_ids = {
+            _frame_id_from_path(p, i) for i, p in enumerate(frame_paths)
+            if i in kept_set
+        }
+        sampled_paths = [frame_paths[i] for i in keep_indices]
+        print(
+            f"[Pi3X] frame_stride={stride}: subsampling {len(sampled_paths)} of "
+            f"{original_total} frames for inference (dropping "
+            f"{original_total - len(sampled_paths)} frames). Skipped frames "
+            "will have no Pi3X pose/xyz/depth/conf output."
+        )
+        # Remove stale per-frame outputs for frames that won't be processed
+        # this run. Color/_info.txt are preserved (they live in the same dir
+        # but are extracted from the baseline zip, not written by Pi3X).
+        skipped_frame_ids = [
+            _frame_id_from_path(p, i) for i, p in enumerate(frame_paths)
+            if i not in kept_set
+        ]
+        stale_suffixes = (
+            ".pose.txt",
+            ".depth.pgm",
+            ".depth_raw.npy",
+            ".conf.npy",
+            ".xyz.npy",
+        )
+        n_removed = 0
+        for stale_dir in {output_depth_dir, output_poses_dir}:
+            if not stale_dir:
+                continue
+            for fid in skipped_frame_ids:
+                for suffix in stale_suffixes:
+                    p = Path(stale_dir) / f"frame-{fid}{suffix}"
+                    if p.exists():
+                        try:
+                            p.unlink()
+                            n_removed += 1
+                        except Exception:
+                            pass
+        if n_removed:
+            print(
+                f"[Pi3X] removed {n_removed} stale per-frame output files for "
+                "subsampled-out frames"
+            )
+        frame_paths = sampled_paths
 
     weights_path = checkpoint
     if not weights_path:

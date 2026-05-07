@@ -1403,6 +1403,22 @@ def voxelise_features(
 
     scenes_dir = osp.join(root_dir, "scenes")
     frame_idxs = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
+    # Filter out frames that have no pose file: this happens when Pi3X (or
+    # any other backend) runs with a frame_stride > 1, leaving the original
+    # color.jpg from the zip but writing pose/xyz only for the kept subset.
+    sequence_dir = osp.join(scenes_dir, scan_id, "sequence")
+    pose_present_idxs = [
+        fid
+        for fid in frame_idxs
+        if osp.exists(osp.join(sequence_dir, f"frame-{fid}.pose.txt"))
+    ]
+    if len(pose_present_idxs) < len(frame_idxs):
+        _LOGGER.info(
+            "[2.5] subsampled backend detected: keeping %d/%d frames with pose.txt",
+            len(pose_present_idxs),
+            len(frame_idxs),
+        )
+        frame_idxs = pose_present_idxs
     extrinsics = scan3r.load_frame_poses(
         data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
@@ -1770,8 +1786,17 @@ def voxelise_features(
                 )
                 _log_rss(f"[2.5] saved voxel {scan_id}/{obj_id}")
         except (FileNotFoundError, RuntimeError, ValueError) as e:
-            _LOGGER.exception(f"Error processing {scan_id} ({obj_id}): {e}")
-            if _env_flag("OBJECTX_VOXEL_REQUIRE_XYZ"):
+            low_lift_error = _is_low_lift_points_error(e)
+            if low_lift_error:
+                _LOGGER.warning(
+                    "Skipping %s (%s) due to object quality threshold: %s",
+                    scan_id,
+                    obj_id,
+                    e,
+                )
+            else:
+                _LOGGER.exception(f"Error processing {scan_id} ({obj_id}): {e}")
+            if _env_flag("OBJECTX_VOXEL_REQUIRE_XYZ") and not low_lift_error:
                 raise
         finally:
             for name in [

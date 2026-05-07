@@ -342,6 +342,22 @@ def build_background_from_depth(
         mask_data_root = mask_root if mask_root is not None else data_root
 
         frame_ids = scan3r.load_frame_idxs(data_dir=str(scenes_dir), scan_id=scan_id)
+        # Subsampled backends (e.g. Pi3X with frame_stride > 1) leave the
+        # original color.jpg files but only emit pose.txt for the kept
+        # subset. Drop frames that have no pose so the loader does not
+        # crash on missing files.
+        sequence_dir_str = str(scenes_dir / scan_id / "sequence")
+        pose_present_ids = [
+            fid
+            for fid in frame_ids
+            if (scenes_dir / scan_id / "sequence" / f"frame-{fid}.pose.txt").exists()
+        ]
+        if len(pose_present_ids) < len(frame_ids):
+            print(
+                f"[depthbg] subsampled backend: keeping {len(pose_present_ids)}/"
+                f"{len(frame_ids)} frames with pose.txt"
+            )
+            frame_ids = pose_present_ids
         extrinsics = scan3r.load_frame_poses(
             data_dir=str(scene_root), scan_id=scan_id, frame_idxs=frame_ids
         )
