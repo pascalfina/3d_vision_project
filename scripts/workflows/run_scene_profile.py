@@ -37,7 +37,7 @@ def parse_args():
     parser.add_argument(
         "action",
         nargs="?",
-        choices=DEFAULT_ACTIONS,
+        choices=list(ACTION_BUILDERS.keys()),
         help="Workflow step to execute.",
     )
     parser.add_argument("--repo-root", required=True)
@@ -963,6 +963,61 @@ def build_render_action(repo_root: Path, profile: dict):
     return cmd, env_updates, log_path
 
 
+def build_plot_voxelised_action(repo_root: Path, profile: dict):
+    sec = section(profile, "plot_voxelised")
+    render_sec = section(profile, "render_bundle")
+
+    scan_id = sec.get("scan_id", sec.get("scene_id", shared_value(profile, "scene_id")))
+    data_root = sec.get("data_root", render_sec.get("data_root", roots(profile).get("reconstruction")))
+    pred_ready_root = sec.get("replacement_root", roots(profile).get("pred_ready"))
+
+    label = sec.get("label", f"{profile.get('name', 'scene')}_voxelised")
+    out_dir = sec.get(
+        "out_dir",
+        f"{os.environ['OBJECTX_REPO_VIS_ROOT']}/interactive_depth_views/{label}",
+    )
+
+    render_env = {key: str(value) for key, value in render_sec.get("env", {}).items()}
+    env_updates = dict(render_env)
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+
+    # Load obj_ids from pred-ready objects.json; fall back to manifest
+    obj_ids = sec.get("obj_ids", [])
+    if not obj_ids and pred_ready_root:
+        objects_json = Path(pred_ready_root) / "files" / "objects.json"
+        if objects_json.exists():
+            d = json.loads(objects_json.read_text())
+            scans = d.get("scans", [])
+            scan = scans[0] if isinstance(scans, list) else next(iter(scans.values()), {})
+            obj_ids = [o["id"] for o in scan.get("objects", [])]
+
+    manifest = sec.get("manifest", artifacts(profile).get("manifest")) if not obj_ids else None
+
+    cmd = [
+        sys.executable,
+        str(repo_root / "scripts" / "segmentation" / "visualization" / "export_depth_background_interactive.py"),
+    ]
+    add_cli_arg(cmd, "--data-root", data_root)
+    add_cli_arg(cmd, "--mask-root", sec.get("mask_root", data_root))
+    add_cli_arg(cmd, "--replacement-root", pred_ready_root)
+    add_cli_arg(cmd, "--scan-id", scan_id)
+    add_cli_arg(cmd, "--obj-id", obj_ids)
+    add_cli_arg(cmd, "--manifest", manifest)
+    add_cli_arg(cmd, "--mask-source", sec.get("mask_source", render_sec.get("mask_source", "sam2_projection")))
+    add_cli_arg(cmd, "--background-remove-mode", sec.get("background_remove_mode", render_sec.get("background_remove_mode", "loaded")))
+    add_cli_arg(cmd, "--pose-mode", sec.get("pose_mode", render_sec.get("pose_mode", "raw")))
+    add_cli_arg(cmd, "--lift-coord-system", sec.get("lift_coord_system", render_sec.get("lift_coord_system", "pinhole")))
+    add_cli_arg(cmd, "--frame-selection", sec.get("frame_selection", render_sec.get("frame_selection", "diverse_area")))
+    add_cli_arg(cmd, "--max-views", sec.get("max_views", render_sec.get("max_views", 277)))
+    add_cli_arg(cmd, "--max-bg-points", sec.get("max_bg_points", render_sec.get("bg_max_points", 3000000)))
+    add_cli_arg(cmd, "--max-obj-points", sec.get("max_obj_points", render_sec.get("joint_max_points", 3000000)))
+    add_cli_arg(cmd, "--label", label)
+    add_cli_arg(cmd, "--out-dir", out_dir)
+    log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
+    return cmd, env_updates, log_path
+
+
 ACTION_BUILDERS = {
     "features3d": build_features3d_action,
     "must3r": build_must3r_action,
@@ -978,6 +1033,7 @@ ACTION_BUILDERS = {
     "u3dgs": build_u3dgs_action,
     "geom-debug": build_geom_debug_action,
     "render": build_render_action,
+    "plot-voxelised": build_plot_voxelised_action,
 }
 
 
