@@ -327,8 +327,8 @@ def build_background_from_depth(
     data_root: Path,
     mask_root: Optional[Path],
     scan_id: str,
-    remove_obj_ids: list[int],
-    mask_source: str,
+    remove_obj_ids: Optional[list[int]],
+    mask_source: Optional[str],
     pose_mode: str,
     lift_coord_system: str,
     frame_selection: str,
@@ -363,15 +363,29 @@ def build_background_from_depth(
         )
         depth_intrinsics = scan3r.load_intrinsics(data_dir=str(scenes_dir), scan_id=scan_id, type="depth")
         depth_shift = vf._load_depth_shift(str(scenes_dir), scan_id)
-        masks = scan3r.load_masks(str(mask_data_root), scan_id, mask_source=mask_source)
+        remove_obj_ids = list(remove_obj_ids or [])
+        use_masks = bool(remove_obj_ids) and (mask_source or "").strip().lower() not in {
+            "",
+            "none",
+            "off",
+            "disabled",
+        }
+        masks = (
+            scan3r.load_masks(str(mask_data_root), scan_id, mask_source=mask_source)
+            if use_masks
+            else None
+        )
 
         vis_frame_ids = []
         vis_masks = []
         for frame_id in frame_ids:
-            union_mask = np.isin(
-                masks[frame_id], np.array(remove_obj_ids, dtype=np.int32)
-            ).astype(np.uint8)
-            union_mask = erode_mask(union_mask, mask_erode_px)
+            if masks is None:
+                union_mask = np.zeros((1, 1), dtype=np.uint8)
+            else:
+                union_mask = np.isin(
+                    masks[frame_id], np.array(remove_obj_ids, dtype=np.int32)
+                ).astype(np.uint8)
+                union_mask = erode_mask(union_mask, mask_erode_px)
             # We want background, so keep frames that contain at least some non-object pixels.
             if union_mask.size > 0:
                 vis_frame_ids.append(frame_id)

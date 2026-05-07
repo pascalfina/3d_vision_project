@@ -21,6 +21,7 @@ DEFAULT_ACTIONS = [
     "compare-arrangement",
     "slat",
     "u3dgs",
+    "geom-debug",
     "render",
 ]
 
@@ -785,6 +786,127 @@ def build_u3dgs_action(repo_root: Path, profile: dict):
     return cmd, env_updates, log_path
 
 
+def build_geom_debug_action(repo_root: Path, profile: dict):
+    sec = section(profile, "geom_debug")
+    render_sec = section(profile, "render_bundle")
+    voxel_sec = section(profile, "voxelise")
+    pred_ready_sec = section(profile, "build_pred_ready")
+
+    data_root = sec.get("data_root", render_sec.get("data_root", roots(profile).get("reconstruction")))
+    if not data_root:
+        raise ValueError(
+            "geom-debug action requires a reconstruction root via geom_debug.data_root, "
+            "render_bundle.data_root, or roots.reconstruction."
+        )
+
+    scan_id = sec.get("scan_id", sec.get("scene_id", shared_value(profile, "scene_id")))
+    if not scan_id:
+        raise ValueError(
+            "geom-debug action requires a scan/scene id via geom_debug.scan_id, "
+            "geom_debug.scene_id, or profile.scene_id."
+        )
+
+    label = sec.get("label", f"{profile.get('name', 'scene')}_geom_debug")
+    out_dir = sec.get(
+        "out_dir",
+        f"{os.environ['OBJECTX_REPO_VIS_ROOT']}/interactive_reconstruction_geometry/{label}",
+    )
+
+    render_env = {key: str(value) for key, value in render_sec.get("env", {}).items()}
+    voxel_env = voxel_sec.get("env", {})
+    env_updates = dict(render_env)
+
+    scenes_dirname = sec.get(
+        "scenes_dirname",
+        render_env.get("OBJECTX_VIS_SCENES_DIRNAME")
+        or voxel_sec.get("scene_source_dirname")
+        or pred_ready_sec.get("reconstruction_scenes_dirname"),
+    )
+    if scenes_dirname:
+        env_updates["OBJECTX_VIS_SCENES_DIRNAME"] = str(scenes_dirname)
+
+    depth_source = sec.get(
+        "depth_source",
+        render_env.get("OBJECTX_VIS_DEPTH_SOURCE")
+        or voxel_env.get("OBJECTX_VOXEL_DEPTH_SOURCE"),
+    )
+    if depth_source:
+        env_updates["OBJECTX_VIS_DEPTH_SOURCE"] = str(depth_source)
+
+    raw_depth_conf_thr = sec.get(
+        "raw_depth_conf_thr",
+        render_env.get("OBJECTX_VIS_RAW_DEPTH_CONF_THR")
+        or voxel_env.get("OBJECTX_VOXEL_RAW_DEPTH_CONF_THR"),
+    )
+    if raw_depth_conf_thr is not None:
+        env_updates["OBJECTX_VIS_RAW_DEPTH_CONF_THR"] = str(raw_depth_conf_thr)
+
+    raw_depth_max = sec.get(
+        "raw_depth_max",
+        render_env.get("OBJECTX_VIS_RAW_DEPTH_MAX"),
+    )
+    if raw_depth_max is not None:
+        env_updates["OBJECTX_VIS_RAW_DEPTH_MAX"] = str(raw_depth_max)
+
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+    for key in sec.get("unset_env", []):
+        env_updates[key] = None
+
+    remove_obj_ids = sec.get("remove_obj_ids", [])
+    mask_source = sec.get("mask_source")
+    if mask_source is None:
+        mask_source = profile_mask_source(repo_root, profile) if remove_obj_ids else "none"
+
+    cmd = [
+        sys.executable,
+        str(
+            repo_root
+            / "scripts"
+            / "segmentation"
+            / "visualization"
+            / "export_reconstruction_geometry_interactive.py"
+        ),
+    ]
+    add_cli_arg(cmd, "--data-root", data_root)
+    add_cli_arg(cmd, "--scan-id", scan_id)
+    if remove_obj_ids:
+        add_cli_arg(
+            cmd,
+            "--mask-root",
+            sec.get("mask_root", roots(profile).get("reconstruction")),
+        )
+    add_cli_arg(cmd, "--mask-source", mask_source)
+    add_cli_arg(cmd, "--remove-obj-id", remove_obj_ids)
+    add_cli_arg(cmd, "--pose-mode", sec.get("pose_mode", render_sec.get("pose_mode", "raw")))
+    add_cli_arg(
+        cmd,
+        "--lift-coord-system",
+        sec.get("lift_coord_system", render_sec.get("lift_coord_system", "pinhole")),
+    )
+    add_cli_arg(
+        cmd,
+        "--frame-selection",
+        sec.get("frame_selection", render_sec.get("frame_selection", "diverse_area")),
+    )
+    add_cli_arg(cmd, "--max-views", sec.get("max_views", render_sec.get("max_views", 96)))
+    add_cli_arg(cmd, "--mask-erode-px", sec.get("mask_erode_px", 2))
+    add_cli_arg(
+        cmd,
+        "--max-points",
+        sec.get("max_points", render_sec.get("bg_max_points", 250000)),
+    )
+    add_cli_arg(cmd, "--label", label)
+    add_cli_arg(cmd, "--out-dir", out_dir)
+    add_cli_arg(cmd, "--skip-cameras", sec.get("skip_cameras", False))
+    log_value = sec.get(
+        "log",
+        f"{os.environ['OBJECTX_WORKFLOW_LOG_ROOT']}/debug_{profile.get('name', 'scene')}_geom_debug.log",
+    )
+    log_path = Path(log_value).expanduser() if log_value else None
+    return cmd, env_updates, log_path
+
+
 def build_render_action(repo_root: Path, profile: dict):
     sec = section(profile, "render_bundle")
     mask_source = sec.get("mask_source", profile_mask_source(repo_root, profile))
@@ -854,6 +976,7 @@ ACTION_BUILDERS = {
     "compare-arrangement": build_compare_action,
     "slat": build_slat_action,
     "u3dgs": build_u3dgs_action,
+    "geom-debug": build_geom_debug_action,
     "render": build_render_action,
 }
 
