@@ -400,6 +400,10 @@ def run_scene(scene_id, scene_dir, cfg):
                     mc.get("frame_stride", 1),
                     int,
                 ),
+                "external_pose_dir": os.environ.get(
+                    "OBJECTX_PI3X_EXTERNAL_POSE_DIR",
+                    mc.get("external_pose_dir"),
+                ) or None,
             }
             _, depths = run_pi3x_on_scene(
                 frame_paths,
