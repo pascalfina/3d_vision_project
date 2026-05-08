@@ -1,4 +1,6 @@
-### SAM2Object Set Up
+#####################################
+### SAM2Object Create Environment ###
+#####################################
 
 # Prepare environment
 module purge
@@ -18,3 +20,22 @@ pip install open3d natsort matplotlib tqdm opencv-python scipy plyfile
 # Install SAM2
 cd segtrack
 pip install -e .
+
+
+
+#################################
+### Project Directory Set Up ####
+#################################
+
+cd /cluster/home/ealegret/3d_vision_project
+source /cluster/scratch/ealegret/.sam2object/bin/activate
+
+
+### For Pseudo-Mask Creation 
+#### SAM directory
+cd /cluster/home/ealegret/3d_vision_project/dependencies/SAM2Object
+
+#### Follow README.md instructions. 
+
+
+#### 
