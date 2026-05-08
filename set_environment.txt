@@ -16,6 +16,8 @@ python --version
 
 pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
 pip install open3d natsort matplotlib tqdm opencv-python scipy plyfile
+pip install "git+https://github.com/EasternJournalist/utils3d.git"
+pip install "numpy==1.26.4" "open3d==0.18.0"
 
 # Install SAM2
 cd segtrack
@@ -30,12 +32,32 @@ pip install -e .
 cd /cluster/home/ealegret/3d_vision_project
 source /cluster/scratch/ealegret/.sam2object/bin/activate
 
+### Clone SAM2Object
+cd dependencies
+git clone git@github.com:jihuaizhaohd/SAM2Object.git
 
-### For Pseudo-Mask Creation 
-#### SAM directory
 cd /cluster/home/ealegret/3d_vision_project/dependencies/SAM2Object
 
-#### Follow README.md instructions. 
+#### [From Official Readme]: Download pretrained SAM2 Checkpoints: 
+
+cd segtrack/checkpoints
+bash download_ckpts.sh
+
+#### Data preparation:
+
+cd segtrack
+python dataprocess/extract_only_jpg.py
+python dataprocess/get_posed_images.py
 
 
-#### 
+
+#### Segmentation and Mask Creation
+python seg_tracking.py
+python mask_convert.py
+
+
+
+#### 3D MultiView Consistency
+
+cd graphclustering
+bash scripts/seg_scannet.sh
