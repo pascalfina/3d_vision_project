@@ -279,7 +279,7 @@ def _project_to_image(
     extrinsics: torch.Tensor,
     intrinsics: torch.Tensor,
     grid_size: tuple[int] = (64, 64, 64),
-):
+):  
     voxel_size = 1.0 / grid_size[0]
     voxel = voxel.float() * voxel_size
     assert voxel.min() >= 0.0 and voxel.max() <= 1.0
@@ -288,7 +288,7 @@ def _project_to_image(
     assert voxel.min() >= -1.0 and voxel.max() <= 1.0
     voxel = voxel * scale + mean
     uv, linear_depth = utils3d.torch.project_cv(
-        voxel.float(), extrinsics.float(), intrinsics.float()
+        voxel.float(), extrinsics=extrinsics.float(), intrinsics=intrinsics.float()
     )
     return uv, linear_depth
 
@@ -362,6 +362,7 @@ def _compute_voxel_observations(
 def _segment_mesh(
     mesh: o3d.geometry.TriangleMesh, annos: np.ndarray, obj_id: int, scan_id: str
 ):
+    
     faces = np.asarray(mesh.triangles)
     vertices = np.asarray(mesh.vertices)
     vertex_mask = annos == obj_id
@@ -1421,6 +1422,7 @@ def voxelise_features(
         frame_idxs = pose_present_idxs
     extrinsics = scan3r.load_frame_poses(
         data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
+        data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
     pose_jump_dropped_ids = _compute_scene_pose_jump_dropped(frame_idxs, extrinsics)
     intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
@@ -1461,7 +1463,7 @@ def voxelise_features(
         mesh = scan3r.load_ply_mesh(
             data_dir=scenes_dir,
             scan_id=scan_id,
-            label_file_name="labels.instances.annotated.v2.ply",
+            label_file_name="mesh.refined.v2.obj",
         )
         annos = scan3r.load_ply_data(
             data_dir=scenes_dir,
@@ -1510,7 +1512,7 @@ def voxelise_features(
             ):
                 _LOGGER.info(f"Skipping {scan_id} ({obj['id']})")
                 continue
-
+            
             obj_id = int(obj["id"])
             # STEP 1: Select frames where the current object is visible according to the
             # current mask source.
@@ -1668,6 +1670,8 @@ def voxelise_features(
                 voxel_grid = _dilate_voxels(voxel_grid)
 
             # STEP 4: Save mean and scale (Scene composition)
+            os.makedirs(osp.dirname(voxel_path), exist_ok=True)
+            os.makedirs(osp.dirname(mean_scale_path), exist_ok=True)
             if not args.dry_run:
                 np.savez(mean_scale_path, mean=mean, scale=scale)
                 _LOGGER.info(f"Saved mean and scale to {mean_scale_path}")
@@ -1840,11 +1844,13 @@ def process_data(
 
     scan_type = cfg.autoencoder.encoder.scan_type
     resplit = "resplit_" if cfg.data.resplit else ""
+
     scan_ids_filename = (
         f"{split}_{resplit}scans.txt"
         if scan_type == "scan"
         else f"{split}_scans_subscenes.txt"
     )
+
     objects_info_file = osp.join(root_dir, "files", "objects.json")
     all_obj_info = common.load_json(objects_info_file)
 
@@ -1852,27 +1858,6 @@ def process_data(
         osp.join(root_dir, "files", scan_ids_filename), dtype=str
     )
     subscan_ids_processed = []
-
-    subRescan_ids_generated = {}
-    scans_dir = cfg.data.root_dir
-    scans_files_dir = osp.join(scans_dir, "files")
-
-    all_scan_data = common.load_json(osp.join(scans_files_dir, "3RScan.json"))
-
-    for scan_data in all_scan_data:
-        ref_scan_id = scan_data["reference"]
-        if ref_scan_id in subscan_ids_generated:
-            rescan_ids = [scan["reference"] for scan in scan_data["scans"]]
-            subRescan_ids_generated[ref_scan_id] = [ref_scan_id] + rescan_ids
-
-    subscan_ids_generated = subRescan_ids_generated
-
-    all_subscan_ids = [
-        subscan_id
-        for scan_id in subscan_ids_generated
-        for subscan_id in subscan_ids_generated[scan_id]
-    ]
-
     for subscan_id in tqdm(all_subscan_ids):
         obj_data = next(
             obj_data
