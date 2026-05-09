@@ -1422,7 +1422,6 @@ def voxelise_features(
         frame_idxs = pose_present_idxs
     extrinsics = scan3r.load_frame_poses(
         data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
-        data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
     pose_jump_dropped_ids = _compute_scene_pose_jump_dropped(frame_idxs, extrinsics)
     intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
@@ -1463,7 +1462,7 @@ def voxelise_features(
         mesh = scan3r.load_ply_mesh(
             data_dir=scenes_dir,
             scan_id=scan_id,
-            label_file_name="mesh.refined.v2.obj",
+            label_file_name="labels.instances.annotated.v2.ply",
         )
         annos = scan3r.load_ply_data(
             data_dir=scenes_dir,
@@ -1858,6 +1857,7 @@ def process_data(
         osp.join(root_dir, "files", scan_ids_filename), dtype=str
     )
     subscan_ids_processed = []
+    all_subscan_ids = subscan_ids_generated
     for subscan_id in tqdm(all_subscan_ids):
         obj_data = next(
             obj_data
