@@ -1,0 +1,15 @@
+Metadata-Version: 2.1
+Name: SAM-2
+Version: 1.0
+Summary: SAM 2: Segment Anything in Images and Videos
+Home-page: https://github.com/facebookresearch/sam2
+Author: Meta AI
+Author-email: segment-anything@meta.com
+License: Apache 2.0
+Requires-Python: >=3.10.0
+Description-Content-Type: text/markdown
+Provides-Extra: notebooks
+Provides-Extra: interactive-demo
+Provides-Extra: dev
+
+# segtrack
