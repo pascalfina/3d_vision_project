@@ -11,7 +11,7 @@ from sam2object_base import *
 from linetimer import CodeTimer
 
 DATASET   = '3RScan'
-DATA_PATH = '/cluster/project/cvg/data/3RScan/scenes' # if scannet scans
+DATA_PATH = os.environ.get("SAMOBJECT_3RSCAN_SCENES_DIR", '/cluster/project/cvg/data/3RScan/scenes')
 
 class ScanNet_SAM2OBJECT(SAM2OBJECTBase):
     def __init__(self, points, args):

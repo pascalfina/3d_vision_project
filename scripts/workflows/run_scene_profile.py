@@ -1028,7 +1028,7 @@ def build_samobject_action(repo_root: Path, profile: dict):
         f"{baseline_root}/scenes/{scan_id}/mesh.refined.v2.obj" if baseline_root and scan_id else None,
     )
 
-    images_dir = sec.get("images_dir", f"{root_dir}/color_images_cluster" if root_dir else None)
+    reconstruction_root = sec.get("output_root_dir", roots(profile).get("reconstruction"))
     source_sequence_dir = sec.get("source_sequence_dir")
 
     env_updates = {
@@ -1037,9 +1037,10 @@ def build_samobject_action(repo_root: Path, profile: dict):
         ),
         "SAMOBJECT_VENV": sec.get("samobject_venv"),
         "SAMOBJECT_DATA_ROOT": root_dir,
+        "SAMOBJECT_OUTPUT_ROOT": reconstruction_root,
         "SAMOBJECT_SCAN_ID": scan_id,
         "SAMOBJECT_MESH_PATH": mesh_path,
-        "SAMOBJECT_IMAGES_DIR": images_dir,
+        "SAMOBJECT_BASELINE_ROOT": baseline_root,
         "SAMOBJECT_SOURCE_SEQUENCE_DIR": source_sequence_dir,
         "OBJECTX_REPO_ROOT": str(repo_root),
         "SAMOBJECT_PROJECTION_DILATION": str(sec.get("projection_dilation", 2)),

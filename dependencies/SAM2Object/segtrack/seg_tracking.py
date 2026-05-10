@@ -92,8 +92,8 @@ def normalize_keyframes(keyframes, last_idx):
         clean.append(last_idx)
     return clean
 
-sam2_checkpoint = f"{PROJECT_DIR}/segtrack/checkpoints/sam2_hiera_large.pt"
-model_cfg = "sam2_hiera_l.yaml"
+sam2_checkpoint = os.environ.get("SAMOBJECT_CHECKPOINT", f"{PROJECT_DIR}/segtrack/checkpoints/sam2_hiera_large.pt")
+model_cfg = os.environ.get("SAMOBJECT_MODEL_CFG", "sam2_hiera_l.yaml")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("device", device)
 
@@ -121,7 +121,11 @@ if DATASET == 'ScanNet':
         data_list = [line.strip() for line in file.readlines()]
     video_dir_scene_ids = data_list
 elif DATASET == '3RScan':
-    video_dir_scene_ids = ['5341b7e3-8a66-2cdd-8709-66a2159f0017']
+    scan_ids_env = os.environ.get("SCAN_IDS", "")
+    if scan_ids_env:
+        video_dir_scene_ids = [s.strip() for s in scan_ids_env.split(",") if s.strip()]
+    else:
+        video_dir_scene_ids = ['5341b7e3-8a66-2cdd-8709-66a2159f0017']
 else:
     raise ValueError(f"Unknown DATASET: {DATASET}")
 

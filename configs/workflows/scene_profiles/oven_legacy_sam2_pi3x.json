@@ -204,8 +204,9 @@
   "samobject": {
     "samobject_venv": "/work/courses/3dv/team35/pafina/.venv_sam2object/bin/activate",
     "root_dir": "/work/scratch/pafina/sam2object",
-    "images_dir": "/work/scratch/pafina/sam2object/color_images_cluster",
+    "baseline_root": "${OBJECTX_BASELINE_ROOT}",
+    "source_sequence_dir": "/work/scratch/pafina/objectx-data-fullscene-oven-pi3x/scenes_sam2_pi3x/5341b7e3-8a66-2cdd-8709-66a2159f0017/sequence",
     "projection_dilation": 2,
-    "log": "~/samobject_pipeline.log"
+    "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/samobject_pipeline.log"
   }
 }

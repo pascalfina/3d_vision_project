@@ -399,9 +399,20 @@ def main():
         help="Pixel dilation radius for projected point masks.",
     )
 
+    parser.add_argument(
+        "--output_root_dir",
+        default=None,
+        help=(
+            "Root dir for writing outputs (objects.json, gt_projection pkl, PLY). "
+            "Defaults to --root_dir. Use this to write masks into a different "
+            "reconstruction root while reading sequence data from root_dir."
+        ),
+    )
+
     args = parser.parse_args()
 
     root_dir = args.root_dir
+    out_root_dir = args.output_root_dir if args.output_root_dir else root_dir
     scan_id = args.scan_id
 
     sam_points = load_points(args.sam_points)
@@ -428,7 +439,7 @@ def main():
     )
 
     out_ply = osp.join(
-        root_dir,
+        out_root_dir,
         "scenes",
         scan_id,
         "labels.instances.annotated.v2.ply",
@@ -443,13 +454,13 @@ def main():
     )
 
     update_objects_json(
-        root_dir=root_dir,
+        root_dir=out_root_dir,
         scan_id=scan_id,
         object_ids=vertex_object_ids,
     )
 
     create_gt_projection_pkl(
-        root_dir=root_dir,
+        root_dir=out_root_dir,
         scan_id=scan_id,
         points_world=mesh_vertices,
         point_object_ids=vertex_object_ids,
