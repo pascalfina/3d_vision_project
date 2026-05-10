@@ -382,10 +382,14 @@ def build_background_from_depth(
             if masks is None:
                 union_mask = np.zeros((1, 1), dtype=np.uint8)
             else:
-                union_mask = np.isin(
-                    masks[frame_id], np.array(remove_obj_ids, dtype=np.int32)
-                ).astype(np.uint8)
-                union_mask = erode_mask(union_mask, mask_erode_px)
+                frame_mask = masks.get(frame_id)
+                if frame_mask is None:
+                    union_mask = np.zeros((1, 1), dtype=np.uint8)
+                else:
+                    union_mask = np.isin(
+                        frame_mask, np.array(remove_obj_ids, dtype=np.int32)
+                    ).astype(np.uint8)
+                    union_mask = erode_mask(union_mask, mask_erode_px)
             # We want background, so keep frames that contain at least some non-object pixels.
             if union_mask.size > 0:
                 vis_frame_ids.append(frame_id)

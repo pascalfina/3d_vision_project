@@ -26,6 +26,7 @@ import os
 import os.path as osp
 import pickle
 from glob import glob
+from typing import Optional
 
 import numpy as np
 import open3d as o3d
@@ -42,13 +43,13 @@ def load_points(path: str) -> np.ndarray:
 
 def remap_labels_to_objectx_ids(labels: np.ndarray):
     """
-    SAM2Object labels may be arbitrary and may include -1.
+    SAM2Object labels may be arbitrary and may include 0 (background) or -1.
     Object-X should use:
       0 = background / unlabeled
       1..K = valid object ids
     """
     labels = labels.astype(np.int64)
-    valid = labels >= 0
+    valid = labels > 0  # exclude 0 (background) and -1
     unique = np.unique(labels[valid])
 
     mapping = {int(old): int(new_id) for new_id, old in enumerate(unique, start=1)}
@@ -107,7 +108,7 @@ def write_annotated_ply(
     vertices: np.ndarray,
     faces: np.ndarray,
     object_ids: np.ndarray,
-    colors: np.ndarray | None = None,
+    colors: Optional[np.ndarray] = None,
 ):
     os.makedirs(osp.dirname(out_ply), exist_ok=True)
 
@@ -168,7 +169,7 @@ def update_objects_json(root_dir: str, scan_id: str, object_ids: np.ndarray):
             {
                 "id": int(obj_id),
                 "label": "object",
-                "global_id": f"{scan_id}_{obj_id}",
+                "global_id": int(obj_id),
             }
             for obj_id in valid_ids
         ],
@@ -218,7 +219,7 @@ def load_intrinsics_from_3rscan_info(root_dir: str, scan_id: str):
     return K, width, height
 
 
-def load_frame_ids(root_dir: str, scan_id: str, skip: int | None = None):
+def load_frame_ids(root_dir: str, scan_id: str, skip: Optional[int] = None):
     pattern = osp.join(root_dir, "scenes", scan_id, "sequence", "frame-*.color.jpg")
     paths = sorted(glob(pattern))
 
@@ -319,14 +320,157 @@ def project_labeled_points_to_frame(
     return obj_map
 
 
+def create_2d_mask_pkl(
+    sam_root: str,
+    scan_id: str,
+    sam_points: np.ndarray,
+    sam_labels: np.ndarray,
+    objectx_ids: np.ndarray,
+    out_root_dir: str,
+    skip: Optional[int] = None,
+    min_proj_points: int = 5,
+):
+    """
+    Convert SAM2Object 2D tracking masks directly to ObjectX pkl format.
+
+    Per-frame strategy: for each frame, project 3D cluster points to find which
+    2D track ID corresponds to which cluster IN THAT FRAME. This handles SAM2's
+    track ID restarts across video batches (e.g. IDs 2-31 in frames 0-47, then
+    IDs 100+ in later frames). The dense 2D masks give correct pixel-surface
+    correspondence for Pi3X depth lifting.
+    """
+    posed_dir = osp.join(sam_root, "posed_images", scan_id)
+    mask_dir = osp.join(sam_root, "2D_masks", scan_id, "semantic-sam")
+
+    if not osp.isdir(posed_dir):
+        raise FileNotFoundError(f"posed_images not found: {posed_dir}")
+    if not osp.isdir(mask_dir):
+        raise FileNotFoundError(f"2D_masks not found: {mask_dir}")
+
+    # Load intrinsics (K_color is 4x4)
+    K4 = np.loadtxt(osp.join(posed_dir, "intrinsics_color.txt"))
+    K = K4[:3, :3].astype(np.float32)
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+
+    # Frame list from posed_images
+    jpg_files = sorted(glob(osp.join(posed_dir, "*.jpg")))
+    frame_ids = [osp.basename(f).replace(".jpg", "") for f in jpg_files]
+    if skip is not None and skip > 1:
+        frame_ids = frame_ids[::skip]
+
+    # Pre-compute: cluster raw_label -> objectx_id (1-to-1 mapping)
+    cluster_to_oid = {}
+    for cl in np.unique(sam_labels[sam_labels > 0]):
+        cl = int(cl)
+        oid = int(objectx_ids[sam_labels == cl][0])
+        if oid > 0:
+            cluster_to_oid[cl] = oid
+
+    # Homogeneous coordinates for all points (computed once)
+    pts_h = np.hstack([sam_points, np.ones((len(sam_points), 1), dtype=np.float32)])
+
+    out = {}
+    frames_with_content = 0
+
+    for fid in frame_ids:
+        pose_path = osp.join(posed_dir, f"{fid}.txt")
+        mask_path = osp.join(mask_dir, f"maskraw_{fid}.png")
+        if not osp.exists(pose_path) or not osp.exists(mask_path):
+            continue
+
+        pose_c2w = np.loadtxt(pose_path).reshape(4, 4).astype(np.float32)
+        w2c = np.linalg.inv(pose_c2w)
+
+        # Project all PLY points into this frame
+        pts_cam = (w2c @ pts_h.T).T[:, :3]
+        in_front = pts_cam[:, 2] > 0.1
+
+        u_all = np.empty(len(pts_cam), dtype=np.int32)
+        v_all = np.empty(len(pts_cam), dtype=np.int32)
+        np.divide(pts_cam[:, 0], pts_cam[:, 2], out=u_all.astype(np.float32))
+        u_all = (fx * pts_cam[:, 0] / pts_cam[:, 2] + cx).astype(np.int32)
+        v_all = (fy * pts_cam[:, 1] / pts_cam[:, 2] + cy).astype(np.int32)
+
+        mask2d = np.array(Image.open(mask_path))
+        H, W = mask2d.shape
+
+        in_image = in_front & (u_all >= 0) & (u_all < W) & (v_all >= 0) & (v_all < H)
+        if in_image.sum() < min_proj_points:
+            continue
+
+        u_in = u_all[in_image]
+        v_in = v_all[in_image]
+        labels_in = sam_labels[in_image]
+
+        # Per-frame vote: cluster -> {track_id: count}
+        frame_votes = {}
+        for uu, vv, cl in zip(u_in, v_in, labels_in):
+            if cl <= 0:
+                continue
+            tid = int(mask2d[vv, uu])
+            if tid == 0:
+                continue
+            cl = int(cl)
+            if cl not in frame_votes:
+                frame_votes[cl] = {}
+            frame_votes[cl][tid] = frame_votes[cl].get(tid, 0) + 1
+
+        if not frame_votes:
+            continue
+
+        # Winner track per cluster in this frame
+        cluster_to_track_frame = {
+            cl: max(tvotes, key=tvotes.get)
+            for cl, tvotes in frame_votes.items()
+            if tvotes
+        }
+
+        # Resolve collisions: if multiple clusters claim the same track_id,
+        # the one with the highest vote count for that track wins.
+        track_winner_votes = {}  # track_id -> (winning_cluster, vote_count)
+        for cl, tid in cluster_to_track_frame.items():
+            vote_count = frame_votes[cl][tid]
+            if tid not in track_winner_votes or vote_count > track_winner_votes[tid][1]:
+                track_winner_votes[tid] = (cl, vote_count)
+
+        # Build track_id -> objectx_id for this frame
+        track_to_oid_frame = {}
+        for tid, (cl, _) in track_winner_votes.items():
+            oid = cluster_to_oid.get(cl, 0)
+            if oid > 0:
+                track_to_oid_frame[tid] = oid
+
+        if not track_to_oid_frame:
+            continue
+
+        # Apply dense 2D mask
+        obj_map = np.zeros(mask2d.shape, dtype=np.int32)
+        for tid, oid in track_to_oid_frame.items():
+            obj_map[mask2d == tid] = oid
+
+        if (obj_map > 0).any():
+            out[fid] = obj_map
+            frames_with_content += 1
+
+    print(f"[INFO] Built per-frame 2D mask pkl: {frames_with_content}/{len(frame_ids)} frames with content")
+
+    save_dir = osp.join(out_root_dir, "files", "gt_projection", "obj_id_pkl")
+    os.makedirs(save_dir, exist_ok=True)
+    out_path = osp.join(save_dir, f"{scan_id}.pkl")
+    with open(out_path, "wb") as f:
+        pickle.dump(out, f)
+
+    print(f"[OK] Wrote 2D-mask pkl with {len(out)} frames: {out_path}")
+
+
 def create_gt_projection_pkl(
     root_dir: str,
     scan_id: str,
     points_world: np.ndarray,
     point_object_ids: np.ndarray,
-    skip: int | None,
+    skip: Optional[int],
     dilation: int,
-    seq_root_dir: str | None = None,
+    seq_root_dir: Optional[str] = None,
 ):
     _seq = seq_root_dir if seq_root_dir else root_dir
     K, width, height = load_intrinsics_from_3rscan_info(_seq, scan_id)
@@ -410,6 +554,14 @@ def main():
             "reconstruction root while reading sequence data from root_dir."
         ),
     )
+    parser.add_argument(
+        "--use_2d_masks",
+        action="store_true",
+        help=(
+            "Use SAM2Object 2D tracking masks (2D_masks/) directly instead of "
+            "projecting the 3D mesh. Produces denser masks with no depth ambiguity."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -461,15 +613,26 @@ def main():
         object_ids=vertex_object_ids,
     )
 
-    create_gt_projection_pkl(
-        root_dir=out_root_dir,
-        scan_id=scan_id,
-        points_world=mesh_vertices,
-        point_object_ids=vertex_object_ids,
-        skip=args.frame_skip,
-        dilation=args.projection_dilation,
-        seq_root_dir=root_dir,
-    )
+    if args.use_2d_masks:
+        create_2d_mask_pkl(
+            sam_root=root_dir,
+            scan_id=scan_id,
+            sam_points=sam_points,
+            sam_labels=raw_labels,
+            objectx_ids=sam_object_ids,
+            out_root_dir=out_root_dir,
+            skip=args.frame_skip,
+        )
+    else:
+        create_gt_projection_pkl(
+            root_dir=out_root_dir,
+            scan_id=scan_id,
+            points_world=mesh_vertices,
+            point_object_ids=vertex_object_ids,
+            skip=args.frame_skip,
+            dilation=args.projection_dilation,
+            seq_root_dir=root_dir,
+        )
 
 
 if __name__ == "__main__":

@@ -164,6 +164,10 @@ def _env_flag(name: str, default: str = "0") -> bool:
     }
 
 
+def _is_low_lift_points_error(e: Exception) -> bool:
+    return isinstance(e, ValueError) and "Too few lifted points" in str(e)
+
+
 def _load_object_depth_map(
     root_dir: str,
     scan_id: str,
