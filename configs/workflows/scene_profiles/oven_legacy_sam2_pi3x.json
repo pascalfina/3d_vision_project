@@ -200,5 +200,12 @@
       "OBJECTX_VIS_BG_MIN_VIEWS_PER_VOXEL": "3",
       "OBJECTX_VIS_BG_MIN_KEEP_FRACTION": "0.05"
     }
+  },
+  "samobject": {
+    "samobject_venv": "/work/courses/3dv/team35/pafina/.venv_sam2object/bin/activate",
+    "root_dir": "/work/scratch/pafina/sam2object",
+    "images_dir": "/work/scratch/pafina/sam2object/color_images_cluster",
+    "projection_dilation": 2,
+    "log": "~/samobject_pipeline.log"
   }
 }

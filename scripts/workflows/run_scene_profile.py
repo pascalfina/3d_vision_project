@@ -1018,6 +1018,42 @@ def build_plot_voxelised_action(repo_root: Path, profile: dict):
     return cmd, env_updates, log_path
 
 
+def build_samobject_action(repo_root: Path, profile: dict):
+    sec = section(profile, "samobject")
+    scan_id = sec.get("scan_id", sec.get("scene_id", shared_value(profile, "scene_id")))
+    root_dir = sec.get("root_dir", roots(profile).get("reconstruction"))
+    baseline_root = sec.get("baseline_root", roots(profile).get("baseline"))
+    mesh_path = sec.get(
+        "mesh_path",
+        f"{baseline_root}/scenes/{scan_id}/mesh.refined.v2.obj" if baseline_root and scan_id else None,
+    )
+
+    images_dir = sec.get("images_dir", f"{root_dir}/color_images_cluster" if root_dir else None)
+    source_sequence_dir = sec.get("source_sequence_dir")
+
+    env_updates = {
+        "SAMOBJECT_DIR": sec.get(
+            "samobject_dir", str(repo_root / "dependencies" / "SAM2Object")
+        ),
+        "SAMOBJECT_VENV": sec.get("samobject_venv"),
+        "SAMOBJECT_DATA_ROOT": root_dir,
+        "SAMOBJECT_SCAN_ID": scan_id,
+        "SAMOBJECT_MESH_PATH": mesh_path,
+        "SAMOBJECT_IMAGES_DIR": images_dir,
+        "SAMOBJECT_SOURCE_SEQUENCE_DIR": source_sequence_dir,
+        "OBJECTX_REPO_ROOT": str(repo_root),
+        "SAMOBJECT_PROJECTION_DILATION": str(sec.get("projection_dilation", 2)),
+    }
+    if sec.get("frame_skip") is not None:
+        env_updates["SAMOBJECT_FRAME_SKIP"] = str(sec["frame_skip"])
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+
+    cmd = ["bash", str(repo_root / "scripts" / "segmentation" / "run_samobject_pipeline.sh")]
+    log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
+    return cmd, env_updates, log_path
+
+
 ACTION_BUILDERS = {
     "features3d": build_features3d_action,
     "must3r": build_must3r_action,
@@ -1034,6 +1070,7 @@ ACTION_BUILDERS = {
     "geom-debug": build_geom_debug_action,
     "render": build_render_action,
     "plot-voxelised": build_plot_voxelised_action,
+    "samobject": build_samobject_action,
 }
 
 
