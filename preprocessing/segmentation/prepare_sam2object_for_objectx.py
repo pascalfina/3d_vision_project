@@ -326,15 +326,17 @@ def create_gt_projection_pkl(
     point_object_ids: np.ndarray,
     skip: int | None,
     dilation: int,
+    seq_root_dir: str | None = None,
 ):
-    K, width, height = load_intrinsics_from_3rscan_info(root_dir, scan_id)
-    frame_ids = load_frame_ids(root_dir, scan_id, skip=skip)
+    _seq = seq_root_dir if seq_root_dir else root_dir
+    K, width, height = load_intrinsics_from_3rscan_info(_seq, scan_id)
+    frame_ids = load_frame_ids(_seq, scan_id, skip=skip)
 
     out = {}
 
     for frame_id in frame_ids:
         pose_path = osp.join(
-            root_dir,
+            _seq,
             "scenes",
             scan_id,
             "sequence",
@@ -466,6 +468,7 @@ def main():
         point_object_ids=vertex_object_ids,
         skip=args.frame_skip,
         dilation=args.projection_dilation,
+        seq_root_dir=root_dir,
     )
 
 

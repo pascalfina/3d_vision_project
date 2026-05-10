@@ -67,6 +67,8 @@ export SAMOBJECT_MODEL_CFG="${SAMOBJECT_MODEL_CFG:-sam2_hiera_l.yaml}"
 # Where sam2object.py should look for 3RScan PLY and labels
 export SAMOBJECT_3RSCAN_SCENES_DIR="$SAMOBJECT_BASELINE_ROOT/scenes"
 
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 mkdir -p "$SAMOBJECT_DATA_ROOT/files"
 
 # ── STEP 0a: Symlink sequence so SAM2Object scripts can find it ───────────────

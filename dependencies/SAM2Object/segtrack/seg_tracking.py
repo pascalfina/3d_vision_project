@@ -104,14 +104,14 @@ sam2_image_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
 
 mask_generator = SAM2AutomaticMaskGenerator(
     model=sam2_image_model,
-    points_per_side=32, # changed
-    pred_iou_thresh=0.7,
-    stability_score_thresh=0.92,
+    points_per_side=int(os.environ.get("SAMOBJECT_POINTS_PER_SIDE", "16")),
+    pred_iou_thresh=float(os.environ.get("SAMOBJECT_PRED_IOU_THRESH", "0.75")),
+    stability_score_thresh=float(os.environ.get("SAMOBJECT_STABILITY_SCORE_THRESH", "0.92")),
     stability_score_offset=0.7,
-    crop_n_layers=1,
+    crop_n_layers=int(os.environ.get("SAMOBJECT_CROP_N_LAYERS", "0")),
     box_nms_thresh=0.7,
     crop_n_points_downscale_factor=2,
-    min_mask_region_area=25.0,
+    min_mask_region_area=float(os.environ.get("SAMOBJECT_MIN_MASK_AREA", "500")),
     use_m2m=True,
     multimask_output=False,
 )

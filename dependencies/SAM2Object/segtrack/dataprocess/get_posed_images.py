@@ -88,7 +88,9 @@ for path in path_list:
                 )
 
                 np.savetxt(opj(out_scene_path, "intrinsic_color.txt"), K_color)
+                np.savetxt(opj(out_scene_path, "intrinsics_color.txt"), K_color)
                 np.savetxt(opj(out_scene_path, "intrinsic_depth.txt"), K_depth)
+                np.savetxt(opj(out_scene_path, "intrinsics_depth.txt"), K_depth)
             else:
                 print(f"[WARNING] No _info.txt found for {scene_dir}")
 
