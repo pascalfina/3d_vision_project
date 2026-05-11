@@ -1602,7 +1602,7 @@ def voxelise_features(
             )
 
             xyz_maps_arg = selected_xyz_maps if xyz_mode else None
-            if xyz_mode:
+            if xyz_mode and requires_depth:
                 xyz_loaded = sum(xyz is not None for xyz in selected_xyz_maps)
                 xyz_shapes = sorted(
                     {
@@ -1662,15 +1662,31 @@ def voxelise_features(
                     selected_xyz_maps=xyz_maps_arg,
                 )
             else:
-                segmented_mesh = _segment_mesh(mesh, annos, obj_id, scan_id)
-                mean, scale = _normalize_segmented_mesh(segmented_mesh)
-                voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh_within_bounds(
-                    segmented_mesh,
-                    1 / 64,
-                    min_bound=(-0.5, -0.5, -0.5),
-                    max_bound=(0.5, 0.5, 0.5),
-                )
-                voxel_grid = _dilate_voxels(voxel_grid)
+                if len(mesh.triangles) == 0:
+                    # Point-cloud PLY (e.g. Pi3X mesh): extract vertices for this object and voxelize
+                    all_vertices = np.asarray(mesh.vertices, dtype=np.float32)
+                    obj_pts = all_vertices[annos == obj_id]
+                    if len(obj_pts) == 0:
+                        _LOGGER.info("Skipping %s (%s): no vertices in point cloud PLY", scan_id, obj_id)
+                        continue
+                    mean = obj_pts.mean(axis=0)
+                    obj_pts = obj_pts - mean
+                    scale = float(np.max(np.abs(obj_pts)))
+                    if scale < 1e-8:
+                        _LOGGER.info("Skipping %s (%s): degenerate scale in point cloud PLY", scan_id, obj_id)
+                        continue
+                    normalized_points = np.clip(obj_pts / (2 * scale), -0.5 + 1e-6, 0.5 - 1e-6)
+                    voxel_grid = _voxelize_normalized_points(normalized_points, dilate_iters=1)
+                else:
+                    segmented_mesh = _segment_mesh(mesh, annos, obj_id, scan_id)
+                    mean, scale = _normalize_segmented_mesh(segmented_mesh)
+                    voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh_within_bounds(
+                        segmented_mesh,
+                        1 / 64,
+                        min_bound=(-0.5, -0.5, -0.5),
+                        max_bound=(0.5, 0.5, 0.5),
+                    )
+                    voxel_grid = _dilate_voxels(voxel_grid)
 
             # STEP 4: Save mean and scale (Scene composition)
             os.makedirs(osp.dirname(voxel_path), exist_ok=True)

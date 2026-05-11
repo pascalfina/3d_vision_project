@@ -64,7 +64,8 @@ export DATA_ROOT_DIR="$SAMOBJECT_DATA_ROOT"
 export SAMOBJECT_CHECKPOINT="${SAMOBJECT_CHECKPOINT:-$OBJECTX_REPO_ROOT/models/sam2ckpt/sam2_hiera_large.pt}"
 export SAMOBJECT_MODEL_CFG="${SAMOBJECT_MODEL_CFG:-sam2_hiera_l.yaml}"
 
-# Where sam2object.py should look for 3RScan PLY and labels
+# Where sam2object.py should look for its 3D scene points.
+# Default: baseline/GT 3RScan scene files. Pi3X path below can override this.
 export SAMOBJECT_3RSCAN_SCENES_DIR="$SAMOBJECT_BASELINE_ROOT/scenes"
 
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -123,16 +124,39 @@ SUPERPOINTS_DIR="$SAMOBJECT_DATA_ROOT/superpoints/$SAMOBJECT_SCAN_ID"
 SUPERPOINTS_FILE="$SUPERPOINTS_DIR/superpoint.pts"
 SEGS_JSON="$BASELINE_SCENE_DIR/mesh.refined.0.010000.segs.v2.json"
 
-if [[ ! -f "$SUPERPOINTS_FILE" ]]; then
-  if [[ ! -f "$SEGS_JSON" ]]; then
-    echo "ERROR: segs.json not found at $SEGS_JSON"
+if [[ -n "${SAMOBJECT_USE_PI3X_MESH:-}" && "${SAMOBJECT_USE_PI3X_MESH}" != "0" ]]; then
+  echo "  Pi3X mode active: building Pi3X scene point cloud for SAM2Object."
+  _PI3X_SEQ_DIR="${SAMOBJECT_PI3X_SEQ_DIR:-${SAMOBJECT_SOURCE_SEQUENCE_DIR:-}}"
+  if [[ -z "$_PI3X_SEQ_DIR" ]]; then
+    echo "ERROR: SAMOBJECT_PI3X_SEQ_DIR or SAMOBJECT_SOURCE_SEQUENCE_DIR must be set for Pi3X SAMObject mode."
     exit 1
   fi
-  python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/create_3rscan_superpoints.py" \
-    --segs_json "$SEGS_JSON" \
-    --out_dir   "$SUPERPOINTS_DIR"
+  PI3X_SCENE_DIR="$SAMOBJECT_DATA_ROOT/scenes/$SAMOBJECT_SCAN_ID"
+  mkdir -p "$PI3X_SCENE_DIR"
+  python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/create_pi3x_scene_ply_for_samobject.py" \
+    --sequence-dir "$_PI3X_SEQ_DIR" \
+    --out-ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \
+    --conf-thr "${SAMOBJECT_PI3X_CONF_THR:-0.10}" \
+    --pixel-stride "${SAMOBJECT_PI3X_PIXEL_STRIDE:-2}" \
+    --voxel-dedup-size "${SAMOBJECT_PI3X_VOXEL_DEDUP_SIZE:-0.10}" \
+    --superpoint-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+    --superpoint-voxel-size "${SAMOBJECT_PI3X_SUPERPOINT_VOXEL_SIZE:-0.25}"
+  export SAMOBJECT_3RSCAN_SCENES_DIR="$SAMOBJECT_DATA_ROOT/scenes"
+  rm -f "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/points.pts"
+  rm -f "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/results/${SAMOBJECT_SCAN_ID}_points.npy"
+  rm -f "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/results/${SAMOBJECT_SCAN_ID}_labels_fine_global.npy"
 else
-  echo "  superpoints already exist, skipping."
+  if [[ ! -f "$SUPERPOINTS_FILE" ]]; then
+    if [[ ! -f "$SEGS_JSON" ]]; then
+      echo "ERROR: segs.json not found at $SEGS_JSON"
+      exit 1
+    fi
+    python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/create_3rscan_superpoints.py" \
+      --segs_json "$SEGS_JSON" \
+      --out_dir   "$SUPERPOINTS_DIR"
+  else
+    echo "  superpoints already exist, skipping."
+  fi
 fi
 
 # ── STEP 1: 2D tracking ──────────────────────────────────────────────────────
@@ -158,16 +182,27 @@ python mask_convert.py
 echo "========== STEP 3: Graph Clustering 3D =========="
 cd "$SAMOBJECT_DIR/graphclustering"
 
-python sam2object.py \
-  --base_dir  "$SAMOBJECT_DATA_ROOT" \
-  --scene_id  "$SAMOBJECT_SCAN_ID" \
-  --mask_name "semantic-sam" \
-  --view_freq 3 \
-  --thres_merge 200 \
-  --thres_connect "0.9,0.3,5" \
-  --max_neighbor_distance 2 \
-  --similar_metric "2-norm" \
+GRAPH_ARGS=(
+  sam2object.py
+  --base_dir "$SAMOBJECT_DATA_ROOT"
+  --scene_id "$SAMOBJECT_SCAN_ID"
+  --mask_name "semantic-sam"
+  --view_freq 3
+  --thres_merge 200
+  --thres_connect "0.9,0.3,5"
+  --max_neighbor_distance 2
+  --similar_metric "2-norm"
   --dis_decay 0.5
+)
+if [[ -n "${SAMOBJECT_FROM_POINTS_THR:-}" && ( -z "${SAMOBJECT_USE_PI3X_MESH:-}" || "${SAMOBJECT_USE_PI3X_MESH}" == "0" ) ]]; then
+  GRAPH_ARGS+=(--from_points_thres "$SAMOBJECT_FROM_POINTS_THR")
+fi
+if [[ -n "${SAMOBJECT_GRAPH_PROCESS_NUM:-}" ]]; then
+  GRAPH_ARGS+=(--process_num "$SAMOBJECT_GRAPH_PROCESS_NUM")
+elif [[ -n "${SAMOBJECT_USE_PI3X_MESH:-}" && "${SAMOBJECT_USE_PI3X_MESH}" != "0" ]]; then
+  GRAPH_ARGS+=(--process_num 1)
+fi
+python "${GRAPH_ARGS[@]}"
 
 # ── STEP 4: Prepare for ObjectX ──────────────────────────────────────────────
 echo "========== STEP 4: Prepare SAM2Object output for ObjectX =========="
@@ -177,11 +212,29 @@ PREPARE_ARGS=(
   --root_dir        "$SAMOBJECT_DATA_ROOT"
   --output_root_dir "$SAMOBJECT_OUTPUT_ROOT"
   --scan_id         "$SAMOBJECT_SCAN_ID"
-  --mesh_path       "$SAMOBJECT_MESH_PATH"
   --sam_points      "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_points.npy"
   --sam_labels      "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_labels_fine_global.npy"
   --projection_dilation "$PROJECTION_DILATION"
 )
+if [[ -n "${SAMOBJECT_USE_PI3X_MESH:-}" && "${SAMOBJECT_USE_PI3X_MESH}" != "0" ]]; then
+  _PI3X_SEQ_DIR="${SAMOBJECT_PI3X_SEQ_DIR:-${SAMOBJECT_SOURCE_SEQUENCE_DIR:-}}"
+  if [[ -z "$_PI3X_SEQ_DIR" ]]; then
+    echo "ERROR: SAMOBJECT_PI3X_SEQ_DIR or SAMOBJECT_SOURCE_SEQUENCE_DIR must be set for --use_pi3x_mesh"
+    exit 1
+  fi
+  PREPARE_ARGS+=(--use_pi3x_mesh --pi3x_seq_dir "$_PI3X_SEQ_DIR")
+  if [[ -n "${SAMOBJECT_PI3X_CONF_THR:-}" ]]; then
+    PREPARE_ARGS+=(--pi3x_conf_thr "$SAMOBJECT_PI3X_CONF_THR")
+  fi
+  if [[ -n "${SAMOBJECT_PI3X_PIXEL_STRIDE:-}" ]]; then
+    PREPARE_ARGS+=(--pi3x_pixel_stride "$SAMOBJECT_PI3X_PIXEL_STRIDE")
+  fi
+  if [[ -n "${SAMOBJECT_PI3X_VOXEL_DEDUP_SIZE:-}" ]]; then
+    PREPARE_ARGS+=(--pi3x_voxel_dedup_size "$SAMOBJECT_PI3X_VOXEL_DEDUP_SIZE")
+  fi
+else
+  PREPARE_ARGS+=(--mesh_path "$SAMOBJECT_MESH_PATH")
+fi
 if [[ -n "${SAMOBJECT_FRAME_SKIP:-}" ]]; then
   PREPARE_ARGS+=(--frame_skip "$SAMOBJECT_FRAME_SKIP")
 fi

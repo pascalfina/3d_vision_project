@@ -106,7 +106,7 @@ def transfer_point_labels_to_mesh_vertices(
 def write_annotated_ply(
     out_ply: str,
     vertices: np.ndarray,
-    faces: np.ndarray,
+    faces: Optional[np.ndarray],
     object_ids: np.ndarray,
     colors: Optional[np.ndarray] = None,
 ):
@@ -143,24 +143,18 @@ def write_annotated_ply(
         vertex_data["z"] = vertices[:, 2]
         vertex_data["objectId"] = object_ids
 
-    face_data = np.empty(len(faces), dtype=[("vertex_indices", "i4", (3,))])
-    face_data["vertex_indices"] = faces
+    elements = [PlyElement.describe(vertex_data, "vertex")]
+    if faces is not None and len(faces) > 0:
+        face_data = np.empty(len(faces), dtype=[("vertex_indices", "i4", (3,))])
+        face_data["vertex_indices"] = faces
+        elements.append(PlyElement.describe(face_data, "face"))
 
-    PlyData(
-        [
-            PlyElement.describe(vertex_data, "vertex"),
-            PlyElement.describe(face_data, "face"),
-        ],
-        text=False,
-    ).write(out_ply)
+    PlyData(elements, text=False).write(out_ply)
 
-    print(f"[OK] Wrote annotated mesh: {out_ply}")
+    print(f"[OK] Wrote annotated PLY ({len(vertices)} vertices, {len(faces) if faces is not None else 0} faces): {out_ply}")
 
 
-def update_objects_json(root_dir: str, scan_id: str, object_ids: np.ndarray):
-    objects_path = osp.join(root_dir, "files", "objects.json")
-    os.makedirs(osp.dirname(objects_path), exist_ok=True)
-
+def _update_single_objects_json(objects_path: str, scan_id: str, object_ids: np.ndarray):
     valid_ids = sorted(int(i) for i in np.unique(object_ids) if int(i) > 0)
 
     new_scan_entry = {
@@ -187,7 +181,23 @@ def update_objects_json(root_dir: str, scan_id: str, object_ids: np.ndarray):
     with open(objects_path, "w") as f:
         json.dump(data, f, indent=2)
 
-    print(f"[OK] Updated objects.json with {len(valid_ids)} objects: {objects_path}")
+    return len(valid_ids)
+
+
+def update_objects_json(root_dir: str, scan_id: str, object_ids: np.ndarray):
+    files_dir = osp.join(root_dir, "files")
+    os.makedirs(files_dir, exist_ok=True)
+    filenames = ["objects.json", "objects_sam2.json"]
+    updated = []
+    object_count = None
+    for filename in filenames:
+        objects_path = osp.join(files_dir, filename)
+        object_count = _update_single_objects_json(objects_path, scan_id, object_ids)
+        updated.append(objects_path)
+    print(
+        f"[OK] Updated object registries with {object_count} objects: "
+        + ", ".join(updated)
+    )
 
 
 def load_intrinsics_from_3rscan_info(root_dir: str, scan_id: str):
@@ -320,6 +330,64 @@ def project_labeled_points_to_frame(
     return obj_map
 
 
+def _visible_projected_samples(
+    pts_cam: np.ndarray,
+    point_labels: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    width: int,
+    height: int,
+    min_depth: float = 0.1,
+):
+    """Project labeled 3D points and keep only the front-most sample per pixel."""
+    z = pts_cam[:, 2]
+    valid = np.isfinite(pts_cam).all(axis=1)
+    valid &= z > float(min_depth)
+    valid &= point_labels > 0
+    if not np.any(valid):
+        return (
+            np.zeros((0,), dtype=np.int32),
+            np.zeros((0,), dtype=np.int32),
+            np.zeros((0,), dtype=np.int32),
+            np.zeros((0,), dtype=np.float32),
+        )
+
+    pts_cam_valid = pts_cam[valid]
+    labels_valid = point_labels[valid].astype(np.int32, copy=False)
+    z_valid = pts_cam_valid[:, 2]
+    x = pts_cam_valid[:, 0]
+    y = pts_cam_valid[:, 1]
+
+    u = np.round(fx * (x / z_valid) + cx).astype(np.int32)
+    v = np.round(fy * (y / z_valid) + cy).astype(np.int32)
+
+    in_image = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    if not np.any(in_image):
+        return (
+            np.zeros((0,), dtype=np.int32),
+            np.zeros((0,), dtype=np.int32),
+            np.zeros((0,), dtype=np.int32),
+            np.zeros((0,), dtype=np.float32),
+        )
+
+    u = u[in_image]
+    v = v[in_image]
+    z_valid = z_valid[in_image]
+    labels_valid = labels_valid[in_image]
+
+    pixel_index = v.astype(np.int64) * int(width) + u.astype(np.int64)
+    order = np.argsort(z_valid, kind="stable")
+    pixel_sorted = pixel_index[order]
+    keep = np.empty(len(pixel_sorted), dtype=bool)
+    keep[0] = True
+    keep[1:] = pixel_sorted[1:] != pixel_sorted[:-1]
+    visible_idx = order[keep]
+
+    return u[visible_idx], v[visible_idx], labels_valid[visible_idx], z_valid[visible_idx]
+
+
 def create_2d_mask_pkl(
     sam_root: str,
     scan_id: str,
@@ -381,26 +449,22 @@ def create_2d_mask_pkl(
         pose_c2w = np.loadtxt(pose_path).reshape(4, 4).astype(np.float32)
         w2c = np.linalg.inv(pose_c2w)
 
-        # Project all PLY points into this frame
         pts_cam = (w2c @ pts_h.T).T[:, :3]
-        in_front = pts_cam[:, 2] > 0.1
-
-        u_all = np.empty(len(pts_cam), dtype=np.int32)
-        v_all = np.empty(len(pts_cam), dtype=np.int32)
-        np.divide(pts_cam[:, 0], pts_cam[:, 2], out=u_all.astype(np.float32))
-        u_all = (fx * pts_cam[:, 0] / pts_cam[:, 2] + cx).astype(np.int32)
-        v_all = (fy * pts_cam[:, 1] / pts_cam[:, 2] + cy).astype(np.int32)
-
         mask2d = np.array(Image.open(mask_path))
         H, W = mask2d.shape
-
-        in_image = in_front & (u_all >= 0) & (u_all < W) & (v_all >= 0) & (v_all < H)
-        if in_image.sum() < min_proj_points:
+        u_in, v_in, labels_in, _ = _visible_projected_samples(
+            pts_cam=pts_cam,
+            point_labels=sam_labels,
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
+            width=W,
+            height=H,
+            min_depth=0.1,
+        )
+        if len(u_in) < min_proj_points:
             continue
-
-        u_in = u_all[in_image]
-        v_in = v_all[in_image]
-        labels_in = sam_labels[in_image]
 
         # Per-frame vote: cluster -> {track_id: count}
         frame_votes = {}
@@ -510,6 +574,258 @@ def create_gt_projection_pkl(
     print(f"[OK] Wrote gt_projection pkl with {len(out)} frames: {out_path}")
 
 
+def _camera_points_to_world(points_cam: np.ndarray, pose_c2w: np.ndarray) -> np.ndarray:
+    rotation = pose_c2w[:3, :3].astype(np.float32)
+    translation = pose_c2w[:3, 3].astype(np.float32)
+    return (rotation @ points_cam.T).T + translation[None, :]
+
+
+def create_pi3x_mesh_from_2d_masks(
+    sam_root: str,
+    scan_id: str,
+    sam_points: np.ndarray,
+    sam_labels: np.ndarray,
+    objectx_ids: np.ndarray,
+    pi3x_seq_dir: str,
+    out_root_dir: str,
+    conf_threshold: float = 0.10,
+    pixel_stride: int = 2,
+    skip: Optional[int] = None,
+    min_proj_points: int = 5,
+    voxel_dedup_size: float = 0.025,
+    projection_dilation: int = 2,
+) -> np.ndarray:
+    """
+    Build a Pi3X-geometry labeled point cloud for use with voxelise gt_mesh mode.
+
+    For each frame:
+    1. Project SAM cluster PLY points → per-frame cluster→track→objectx_id voting
+    2. Apply mapping to SAM 2D mask (H_orig×W_orig) → per-frame obj_map at original res
+    3. Save obj_map to gt_projection PKL (for voxelise frame selection)
+    4. Resize obj_map to Pi3X resolution; load Pi3X xyz+conf
+    5. Collect Pi3X surface points labeled with objectx_ids
+
+    Final: voxel-deduplicate, write labels.instances.annotated.v2.ply (no triangles).
+    Returns the final object_ids array for update_objects_json.
+    """
+    posed_dir = osp.join(sam_root, "posed_images", scan_id)
+    mask_dir = osp.join(sam_root, "2D_masks", scan_id, "semantic-sam")
+
+    if not osp.isdir(posed_dir):
+        raise FileNotFoundError(f"posed_images not found: {posed_dir}")
+    if not osp.isdir(mask_dir):
+        raise FileNotFoundError(f"2D_masks not found: {mask_dir}")
+
+    K4 = np.loadtxt(osp.join(posed_dir, "intrinsics_color.txt"))
+    K = K4[:3, :3].astype(np.float32)
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+
+    jpg_files = sorted(glob(osp.join(posed_dir, "*.jpg")))
+    frame_ids = [osp.basename(f).replace(".jpg", "") for f in jpg_files]
+    if skip is not None and skip > 1:
+        frame_ids = frame_ids[::skip]
+
+    cluster_to_oid = {}
+    for cl in np.unique(sam_labels[sam_labels > 0]):
+        cl = int(cl)
+        oid = int(objectx_ids[sam_labels == cl][0])
+        if oid > 0:
+            cluster_to_oid[cl] = oid
+
+    pts_h = np.hstack([sam_points, np.ones((len(sam_points), 1), dtype=np.float32)])
+
+    all_points: list[np.ndarray] = []
+    all_obj_ids: list[np.ndarray] = []
+    frame_height = None
+    frame_width = None
+
+    for fid in frame_ids:
+        pose_path = osp.join(posed_dir, f"{fid}.txt")
+        mask_path = osp.join(mask_dir, f"maskraw_{fid}.png")
+        pi3x_xyz_path = osp.join(pi3x_seq_dir, f"frame-{fid}.xyz.npy")
+        pi3x_conf_path = osp.join(pi3x_seq_dir, f"frame-{fid}.conf.npy")
+
+        if not all(osp.exists(p) for p in [pose_path, mask_path, pi3x_xyz_path, pi3x_conf_path]):
+            continue
+
+        pose_c2w = np.loadtxt(pose_path).reshape(4, 4).astype(np.float32)
+        w2c = np.linalg.inv(pose_c2w)
+
+        pts_cam = (w2c @ pts_h.T).T[:, :3]
+        mask2d = np.array(Image.open(mask_path))
+        H, W = mask2d.shape
+        if frame_height is None or frame_width is None:
+            frame_height, frame_width = H, W
+        u_in, v_in, labels_in, _ = _visible_projected_samples(
+            pts_cam=pts_cam,
+            point_labels=sam_labels,
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
+            width=W,
+            height=H,
+            min_depth=0.1,
+        )
+        if len(u_in) < min_proj_points:
+            continue
+
+        frame_votes: dict = {}
+        for uu, vv, cl in zip(u_in, v_in, labels_in):
+            if cl <= 0:
+                continue
+            tid = int(mask2d[vv, uu])
+            if tid == 0:
+                continue
+            cl = int(cl)
+            if cl not in frame_votes:
+                frame_votes[cl] = {}
+            frame_votes[cl][tid] = frame_votes[cl].get(tid, 0) + 1
+
+        if not frame_votes:
+            continue
+
+        cluster_to_track_frame = {
+            cl: max(tvotes, key=tvotes.get)
+            for cl, tvotes in frame_votes.items()
+            if tvotes
+        }
+
+        track_winner_votes: dict = {}
+        for cl, tid in cluster_to_track_frame.items():
+            vote_count = frame_votes[cl][tid]
+            if tid not in track_winner_votes or vote_count > track_winner_votes[tid][1]:
+                track_winner_votes[tid] = (cl, vote_count)
+
+        track_to_oid_frame = {}
+        for tid, (cl, _) in track_winner_votes.items():
+            oid = cluster_to_oid.get(cl, 0)
+            if oid > 0:
+                track_to_oid_frame[tid] = oid
+
+        if not track_to_oid_frame:
+            continue
+
+        obj_map_960 = np.zeros(mask2d.shape, dtype=np.int32)
+        for tid, oid in track_to_oid_frame.items():
+            obj_map_960[mask2d == tid] = oid
+
+        xyz = np.load(pi3x_xyz_path)    # (H_pi3x, W_pi3x, 3)
+        conf = np.load(pi3x_conf_path)  # (H_pi3x, W_pi3x)
+        H_pi3x, W_pi3x = conf.shape
+
+        # Nearest-neighbor resize of obj_map to Pi3X output resolution
+        v_idx = np.minimum((np.arange(H_pi3x) * H / H_pi3x).astype(np.int32), H - 1)
+        u_idx = np.minimum((np.arange(W_pi3x) * W / W_pi3x).astype(np.int32), W - 1)
+        obj_map_pi3x = obj_map_960[np.ix_(v_idx, u_idx)]
+
+        xyz_finite = np.all(np.isfinite(xyz), axis=-1)
+        valid = (
+            (conf > conf_threshold)
+            & (obj_map_pi3x > 0)
+            & xyz_finite
+            & (xyz[..., 2] > 0.0)
+            & (np.abs(xyz).sum(axis=-1) > 0.0)
+        )
+
+        if pixel_stride > 1:
+            stride_mask = np.zeros_like(valid, dtype=bool)
+            stride_mask[::pixel_stride, ::pixel_stride] = True
+            valid = valid & stride_mask
+
+        if not valid.any():
+            continue
+
+        pts_frame_cam = xyz[valid].astype(np.float32)
+        pts_frame = _camera_points_to_world(pts_frame_cam, pose_c2w)
+        oids_frame = obj_map_pi3x[valid].astype(np.int32)
+
+        all_points.append(pts_frame)
+        all_obj_ids.append(oids_frame)
+
+    if not all_points:
+        raise RuntimeError("No valid Pi3X points found across all frames!")
+
+    pts_all = np.concatenate(all_points, axis=0)
+    oids_all = np.concatenate(all_obj_ids, axis=0)
+    bbox_min = pts_all.min(axis=0)
+    bbox_max = pts_all.max(axis=0)
+    print(
+        f"[INFO] Total Pi3X world points before dedup: {len(pts_all)} "
+        f"bbox_min={bbox_min.tolist()} bbox_max={bbox_max.tolist()}"
+    )
+
+    # Voxel deduplication using numpy sort
+    vk = np.floor(pts_all / voxel_dedup_size).astype(np.int64)
+    RANGE = 2000
+    STRIDE = np.int64(2 * RANGE + 1)
+    vk_enc = (vk[:, 0] + RANGE) * STRIDE * STRIDE + (vk[:, 1] + RANGE) * STRIDE + (vk[:, 2] + RANGE)
+
+    order = np.argsort(vk_enc, kind="stable")
+    vk_s = vk[order]
+    vk_enc_s = vk_enc[order]
+    oids_s = oids_all[order]
+
+    unique_mask = np.empty(len(vk_enc_s), dtype=bool)
+    unique_mask[0] = True
+    unique_mask[1:] = vk_enc_s[1:] != vk_enc_s[:-1]
+
+    pts_final = (vk_s[unique_mask].astype(np.float32) + 0.5) * voxel_dedup_size
+    oids_final = oids_s[unique_mask]
+    print(f"[INFO] After voxel dedup ({voxel_dedup_size * 100:.1f}cm): {len(pts_final)} points, "
+          f"{len(np.unique(oids_final[oids_final > 0]))} objects")
+
+    out_ply = osp.join(out_root_dir, "scenes", scan_id, "labels.instances.annotated.v2.ply")
+    write_annotated_ply(
+        out_ply=out_ply,
+        vertices=pts_final,
+        faces=None,
+        object_ids=oids_final,
+    )
+
+    # Symlink PLY into the Pi3X scene dir so voxelise staging (which reads from
+    # scene_source_dirname, not "scenes/") picks it up.
+    pi3x_scene_dir = osp.dirname(osp.abspath(pi3x_seq_dir))
+    alt_ply = osp.join(pi3x_scene_dir, "labels.instances.annotated.v2.ply")
+    if osp.islink(alt_ply) or osp.exists(alt_ply):
+        os.unlink(alt_ply)
+    os.symlink(osp.abspath(out_ply), alt_ply)
+    print(f"[OK] Symlinked PLY into Pi3X scene dir: {alt_ply}")
+
+    if frame_height is None or frame_width is None:
+        raise RuntimeError("Could not infer frame size from SAMObject masks.")
+
+    geom_pkl_out = {}
+    for fid in frame_ids:
+        pose_path = osp.join(posed_dir, f"{fid}.txt")
+        if not osp.exists(pose_path):
+            continue
+        pose_c2w = np.loadtxt(pose_path).reshape(4, 4).astype(np.float32)
+        obj_map = project_labeled_points_to_frame(
+            points_world=pts_final,
+            point_object_ids=oids_final,
+            pose_c2w=pose_c2w,
+            K=K,
+            width=frame_width,
+            height=frame_height,
+            dilation=projection_dilation,
+        )
+        if (obj_map > 0).any():
+            geom_pkl_out[fid] = obj_map
+
+    save_dir = osp.join(out_root_dir, "files", "gt_projection", "obj_id_pkl")
+    os.makedirs(save_dir, exist_ok=True)
+    out_pkl_path = osp.join(save_dir, f"{scan_id}.pkl")
+    with open(out_pkl_path, "wb") as f:
+        pickle.dump(geom_pkl_out, f)
+    print(
+        f"[OK] Wrote geometry-consistent gt_projection pkl with "
+        f"{len(geom_pkl_out)}/{len(frame_ids)} frames: {out_pkl_path}"
+    )
+
+    return oids_final
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -518,7 +834,8 @@ def main():
 
     parser.add_argument(
         "--mesh_path",
-        required=True,
+        required=False,
+        default=None,
         help="Original mesh without annotations, e.g. mesh.refined.v2.obj or .ply",
     )
     parser.add_argument(
@@ -562,6 +879,37 @@ def main():
             "projecting the 3D mesh. Produces denser masks with no depth ambiguity."
         ),
     )
+    parser.add_argument(
+        "--use_pi3x_mesh",
+        action="store_true",
+        help=(
+            "Build the output PLY from Pi3X xyz.npy surface points labeled via "
+            "SAM2Object 2D masks. Use with voxelise OBJECTX_VOXEL_OBJECT_SOURCE=gt_mesh."
+        ),
+    )
+    parser.add_argument(
+        "--pi3x_seq_dir",
+        default=None,
+        help="Path to Pi3X sequence dir containing frame-XXXXXX.xyz.npy / .conf.npy files.",
+    )
+    parser.add_argument(
+        "--pi3x_conf_thr",
+        type=float,
+        default=0.10,
+        help="Pi3X confidence threshold for including a pixel (default: 0.10).",
+    )
+    parser.add_argument(
+        "--pi3x_pixel_stride",
+        type=int,
+        default=2,
+        help="Pixel stride when sampling Pi3X points (default: 2 = every other pixel).",
+    )
+    parser.add_argument(
+        "--pi3x_voxel_dedup_size",
+        type=float,
+        default=0.025,
+        help="Voxel deduplication size in meters for Pi3X mesh (default: 0.025 = 2.5cm).",
+    )
 
     args = parser.parse_args()
 
@@ -583,6 +931,33 @@ def main():
     print(f"[INFO] SAM2Object → Object-X id mapping:")
     for old, new in old_to_new.items():
         print(f"  SAM label {old} -> Object-X objectId {new}")
+
+    if args.use_pi3x_mesh:
+        if not args.pi3x_seq_dir:
+            raise ValueError("--pi3x_seq_dir is required when --use_pi3x_mesh is set.")
+        oids_final = create_pi3x_mesh_from_2d_masks(
+            sam_root=root_dir,
+            scan_id=scan_id,
+            sam_points=sam_points,
+            sam_labels=raw_labels,
+            objectx_ids=sam_object_ids,
+            pi3x_seq_dir=args.pi3x_seq_dir,
+            out_root_dir=out_root_dir,
+            conf_threshold=args.pi3x_conf_thr,
+            pixel_stride=args.pi3x_pixel_stride,
+            skip=args.frame_skip,
+            voxel_dedup_size=args.pi3x_voxel_dedup_size,
+            projection_dilation=args.projection_dilation,
+        )
+        update_objects_json(
+            root_dir=out_root_dir,
+            scan_id=scan_id,
+            object_ids=oids_final,
+        )
+        return
+
+    if not args.mesh_path:
+        raise ValueError("--mesh_path is required unless --use_pi3x_mesh is set.")
 
     mesh_vertices, faces, colors = read_mesh_vertices_faces(args.mesh_path)
 

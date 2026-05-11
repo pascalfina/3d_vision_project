@@ -143,6 +143,7 @@ class SAM2OBJECTBase:
         self.view_freq = args.view_freq
         self.dis_decay = args.dis_decay
         self.key_path = args.key_path
+        self.point_level_region_growing = False
 
 
     def query_2d_point(self, seg_id, frame_idx, color_pixes, vis_img_path, save_path):
@@ -297,6 +298,7 @@ class SAM2OBJECTBase:
                 max_neighbor_distance=1,
                 seg_ids=initial_labels,
                 point_level=True)
+            self.point_level_region_growing = True
 
             seg_adj = self.get_seg_dok_adjacency(
                 points_label=points_label,
@@ -316,6 +318,7 @@ class SAM2OBJECTBase:
         for i in range(len(thres_connect)):
             stage_tmp_time = time.time()
             stage_pre_time.append(stage_tmp_time)
+            self.point_level_region_growing = False
             self.seg_ids, self.seg_num, self.seg_members, self.seg_indirect_neighbors = self.get_seg_data(
                 base_dir=self.base_dir,
                 scene_id=self.scene_id,
@@ -703,6 +706,30 @@ class SAM2OBJECTBase:
         seg_members = self.seg_members  # dict {seg_id: point_array}
         seg_ids = self.seg_ids
         label_num = int(points_label.max()) + 1
+        seg_num = int(self.seg_num)
+        requested_process_num = int(
+            getattr(self.args, "process_num", process_num) or process_num
+        )
+        requested_process_num = max(1, requested_process_num)
+        dense_matrix_mb = (seg_num * seg_num * 4) / (1024.0 * 1024.0)
+        if (
+            getattr(self.args, "from_points_thres", 0) > 0
+            and not self.args.use_torch
+            and requested_process_num > 1
+            and dense_matrix_mb >= 64.0
+        ):
+            print(
+                f"[SAM2Object] forcing process_num=1 for Pi3X point-mode "
+                f"(seg_num={seg_num}, dense_matrix_mb={dense_matrix_mb:.1f}, "
+                f"requested={requested_process_num})"
+            )
+            requested_process_num = 1
+        else:
+            print(
+                f"[SAM2Object] adjacency setup seg_num={seg_num} "
+                f"dense_matrix_mb={dense_matrix_mb:.1f} process_num={requested_process_num} "
+                f"use_torch={self.args.use_torch}"
+            )
 
         # first get visible ratio of each seg in every view
         seg_seen0 = np.zeros([self.seg_num, self.M], dtype=np.float32)  # (s,m)
@@ -738,11 +765,28 @@ class SAM2OBJECTBase:
                     multi_view=multi_view
                     )
         else:
-
-            similar_sum, confidence_sum = utils.multiview_multiprocess_get_similar_confidence_matrix(
-                seg_seen0, seg_neighbors, seg_ids,seg_distance0,
-                points_label, similar_metric,
-                thres_trunc, process_num)
+            if requested_process_num <= 1:
+                similar_sum, confidence_sum = utils.multiview_get_similar_confidence_matrix_handle(
+                    seg_neighbors,
+                    seg_ids,
+                    seg_seen0,
+                    seg_distance0,
+                    points_label,
+                    similar_metric,
+                    thres_trunc,
+                    False,
+                )
+            else:
+                similar_sum, confidence_sum = utils.multiview_multiprocess_get_similar_confidence_matrix(
+                    seg_seen0,
+                    seg_neighbors,
+                    seg_ids,
+                    seg_distance0,
+                    points_label,
+                    similar_metric,
+                    thres_trunc,
+                    requested_process_num,
+                )
         if multi_view:
             return similar_sum, confidence_sum, None
         else:
@@ -819,6 +863,22 @@ class SAM2OBJECTBase:
         weight = 1
 
         seg_id = p2_id #j
+        if self.point_level_region_growing:
+            neighbor_ids = self.seg_direct_neighbors[seg_id]
+            neighbor_ids = neighbor_ids[neighbor_ids != seg_id]
+            neighbor_ids = neighbor_ids[seg_labels[neighbor_ids] == region_label]
+            if neighbor_ids.size == 0:
+                return False
+            adj_sum = (
+                adj[seg_id, neighbor_ids]
+                * self.seg_member_count[neighbor_ids]
+            ).sum(0)
+            weight_sum = self.seg_member_count[neighbor_ids].sum(0)
+            if weight_sum <= 0:
+                return False
+            score = adj_sum / weight_sum
+            return score >= thres_connect
+
         for i in range(max_neighbor_distance):
             neighbor_ids = self.seg_indirect_neighbors[i][seg_id]  # (s.)
             if i > 0:

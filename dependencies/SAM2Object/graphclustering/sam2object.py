@@ -439,6 +439,8 @@ if __name__ == '__main__':
                         help="trunc similarity that is under thres to 0")
     parser.add_argument('--from_points_thres', type=float, default=0,
                         help="if > 0, use points as primitives for region growing in the first stage")
+    parser.add_argument('--process_num', type=int, default=12,
+                        help='CPU worker count for similarity/confidence aggregation')
     parser.add_argument('--use_torch', action='store_true',
                         help='use torch version or numpy version')
     parser.add_argument('--scannetpp', default=False,

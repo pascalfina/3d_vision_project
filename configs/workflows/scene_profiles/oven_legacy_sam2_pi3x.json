@@ -131,7 +131,7 @@
     "override": true,
     "env": {
       "OBJECTX_MASK_SOURCE": "gt_projection",
-      "OBJECTX_VOXEL_OBJECT_SOURCE": "lifted_masks",
+      "OBJECTX_VOXEL_OBJECT_SOURCE": "gt_mesh",
       "OBJECTX_VOXEL_TSDF_FALLBACK_TO_LIFTED": "0",
       "OBJECTX_VOXEL_REQUIRE_XYZ": "1",
       "OBJECTX_VOXEL_DEPTH_SOURCE": "must3r_xyz_if_available",
@@ -207,13 +207,17 @@
     "root_dir": "/work/scratch/pafina/sam2object",
     "baseline_root": "${OBJECTX_BASELINE_ROOT}",
     "source_sequence_dir": "/work/scratch/pafina/objectx-data-fullscene-oven-pi3x/scenes_sam2_pi3x/5341b7e3-8a66-2cdd-8709-66a2159f0017/sequence",
-    "projection_dilation": 10,
+    "projection_dilation": 2,
     "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/samobject_pipeline.log",
     "env": {
       "SAMOBJECT_POINTS_PER_SIDE": "32",
       "SAMOBJECT_MIN_MASK_AREA": "200",
       "SAMOBJECT_PRED_IOU_THRESH": "0.70",
-      "SAMOBJECT_STABILITY_SCORE_THRESH": "0.88"
+      "SAMOBJECT_STABILITY_SCORE_THRESH": "0.88",
+      "SAMOBJECT_USE_PI3X_MESH": "1",
+      "SAMOBJECT_GRAPH_PROCESS_NUM": "1",
+      "SAMOBJECT_PI3X_VOXEL_DEDUP_SIZE": "0.10",
+      "SAMOBJECT_PI3X_SUPERPOINT_VOXEL_SIZE": "0.25"
     }
   }
 }
