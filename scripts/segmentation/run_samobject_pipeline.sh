@@ -32,6 +32,12 @@ set -euo pipefail
 SAMOBJECT_OUTPUT_ROOT="${SAMOBJECT_OUTPUT_ROOT:-$SAMOBJECT_DATA_ROOT}"
 
 PROJECTION_DILATION="${SAMOBJECT_PROJECTION_DILATION:-2}"
+GRAPH_VIEW_FREQ="${SAMOBJECT_VIEW_FREQ:-3}"
+GRAPH_THRES_MERGE="${SAMOBJECT_THRES_MERGE:-200}"
+GRAPH_THRES_CONNECT="${SAMOBJECT_THRES_CONNECT:-0.9,0.3,5}"
+GRAPH_MAX_NEIGHBOR_DISTANCE="${SAMOBJECT_MAX_NEIGHBOR_DISTANCE:-2}"
+GRAPH_SIMILAR_METRIC="${SAMOBJECT_SIMILAR_METRIC:-2-norm}"
+GRAPH_DIS_DECAY="${SAMOBJECT_DIS_DECAY:-0.5}"
 
 # Paths used across all steps
 BASELINE_SCENE_DIR="$SAMOBJECT_BASELINE_ROOT/scenes/$SAMOBJECT_SCAN_ID"
@@ -42,6 +48,8 @@ echo "  scan_id      : $SAMOBJECT_SCAN_ID"
 echo "  data_root    : $SAMOBJECT_DATA_ROOT"
 echo "  baseline     : $SAMOBJECT_BASELINE_ROOT"
 echo "  sam2obj repo : $SAMOBJECT_DIR"
+echo "  checkpoint   : ${SAMOBJECT_CHECKPOINT:-$OBJECTX_REPO_ROOT/models/sam2ckpt/sam2_hiera_large.pt}"
+echo "  model_cfg    : ${SAMOBJECT_MODEL_CFG:-sam2_hiera_l.yaml}"
 echo "========================================="
 
 # Activate SAM2Object venv
@@ -92,31 +100,55 @@ if [[ ! -e "$SCENE_DATA_DIR/sequence" ]]; then
   ln -s "$_SEQ_SRC" "$SCENE_DATA_DIR/sequence"
   echo "  Linked sequence: $_SEQ_SRC"
 else
-  echo "  sequence dir already present."
+  if [[ -L "$SCENE_DATA_DIR/sequence" ]]; then
+    _CUR_SEQ_TARGET="$(readlink -f "$SCENE_DATA_DIR/sequence")"
+    _DESIRED_SEQ_TARGET="$(readlink -f "$_SEQ_SRC")"
+    if [[ "$_CUR_SEQ_TARGET" != "$_DESIRED_SEQ_TARGET" ]]; then
+      rm -f "$SCENE_DATA_DIR/sequence"
+      ln -s "$_SEQ_SRC" "$SCENE_DATA_DIR/sequence"
+      echo "  Relinked sequence: $_SEQ_SRC"
+    else
+      echo "  sequence dir already present."
+    fi
+  else
+    echo "  sequence dir already present."
+  fi
 fi
 
 # Write scene ID list file for scripts that need it
 SCENE_IDS_FILE="$SAMOBJECT_DATA_ROOT/files/sam2object_resplit_scans.txt"
 echo "$SAMOBJECT_SCAN_ID" > "$SCENE_IDS_FILE"
 
+# ── STEP 0b-clean: Reset stale segtrack outputs for this scene ────────────────
+SEGTRACK_OUTPUT_SCENE_DIR="$SAMOBJECT_DIR/segtrack/outputs/$SAMOBJECT_SCAN_ID"
+if [[ "${SAMOBJECT_CLEAN_SEGTRACK_OUTPUTS:-1}" != "0" && -d "$SEGTRACK_OUTPUT_SCENE_DIR" ]]; then
+  echo "========== STEP 0b-clean: Reset segtrack outputs =========="
+  echo "  Removing stale segtrack outputs: $SEGTRACK_OUTPUT_SCENE_DIR"
+  rm -rf "$SEGTRACK_OUTPUT_SCENE_DIR"
+fi
+
 # ── STEP 0b: Prepare posed_images and color_images_cluster ────────────────────
 echo "========== STEP 0b: Prepare image data =========="
 
 cd "$SAMOBJECT_DIR/segtrack"
 
-if [[ ! -d "$SAMOBJECT_DATA_ROOT/posed_images/$SAMOBJECT_SCAN_ID" ]]; then
-  echo "  Running get_posed_images.py..."
-  python dataprocess/get_posed_images.py
-else
-  echo "  posed_images already exist, skipping."
-fi
+POSED_SCENE_DIR="$SAMOBJECT_DATA_ROOT/posed_images/$SAMOBJECT_SCAN_ID"
+COLOR_CLUSTER_SCENE_DIR="$SAMOBJECT_DATA_ROOT/color_images_cluster/$SAMOBJECT_SCAN_ID"
+MASK2D_SCENE_DIR="$SAMOBJECT_DATA_ROOT/2D_masks/$SAMOBJECT_SCAN_ID/semantic-sam"
 
-if [[ ! -d "$SAMOBJECT_DATA_ROOT/color_images_cluster/$SAMOBJECT_SCAN_ID" ]]; then
-  echo "  Running extract_only_jpg.py..."
-  python dataprocess/extract_only_jpg.py
-else
-  echo "  color_images_cluster already exists, skipping."
+if [[ "${SAMOBJECT_REFRESH_POSED_IMAGES:-1}" != "0" && -d "$POSED_SCENE_DIR" ]]; then
+  echo "  Refreshing posed_images scene dir: $POSED_SCENE_DIR"
+  rm -rf "$POSED_SCENE_DIR"
 fi
+echo "  Running get_posed_images.py..."
+python dataprocess/get_posed_images.py
+
+if [[ "${SAMOBJECT_REFRESH_COLOR_CLUSTER:-1}" != "0" && -d "$COLOR_CLUSTER_SCENE_DIR" ]]; then
+  echo "  Refreshing color_images_cluster scene dir: $COLOR_CLUSTER_SCENE_DIR"
+  rm -rf "$COLOR_CLUSTER_SCENE_DIR"
+fi
+echo "  Running extract_only_jpg.py..."
+python dataprocess/extract_only_jpg.py
 
 # ── STEP 0c: Create superpoints from 3RScan segs.json ─────────────────────────
 echo "========== STEP 0c: Create superpoints =========="
@@ -176,23 +208,35 @@ echo "========== STEP 2: mask_convert =========="
 #   DATA_ROOT_DIR -> DATA_PATH (destination for 2D_masks)
 export SAM2OBJECT_DIR="$SAMOBJECT_DIR/segtrack/outputs"
 cd "$SAMOBJECT_DIR/segtrack"
+if [[ "${SAMOBJECT_REFRESH_2D_MASKS:-1}" != "0" && -d "$MASK2D_SCENE_DIR" ]]; then
+  echo "  Refreshing 2D mask dir: $MASK2D_SCENE_DIR"
+  rm -rf "$MASK2D_SCENE_DIR"
+fi
 python mask_convert.py
 
 # ── STEP 3: Graph clustering 3D ──────────────────────────────────────────────
 echo "========== STEP 3: Graph Clustering 3D =========="
 cd "$SAMOBJECT_DIR/graphclustering"
 
+if [[ -d "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_pred_mask" ]]; then
+  rm -rf "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_pred_mask"
+fi
+rm -f \
+  "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}.txt" \
+  "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_points.npy" \
+  "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_labels_fine_global.npy"
+
 GRAPH_ARGS=(
   sam2object.py
   --base_dir "$SAMOBJECT_DATA_ROOT"
   --scene_id "$SAMOBJECT_SCAN_ID"
   --mask_name "semantic-sam"
-  --view_freq 3
-  --thres_merge 200
-  --thres_connect "0.9,0.3,5"
-  --max_neighbor_distance 2
-  --similar_metric "2-norm"
-  --dis_decay 0.5
+  --view_freq "$GRAPH_VIEW_FREQ"
+  --thres_merge "$GRAPH_THRES_MERGE"
+  --thres_connect "$GRAPH_THRES_CONNECT"
+  --max_neighbor_distance "$GRAPH_MAX_NEIGHBOR_DISTANCE"
+  --similar_metric "$GRAPH_SIMILAR_METRIC"
+  --dis_decay "$GRAPH_DIS_DECAY"
 )
 if [[ -n "${SAMOBJECT_FROM_POINTS_THR:-}" && ( -z "${SAMOBJECT_USE_PI3X_MESH:-}" || "${SAMOBJECT_USE_PI3X_MESH}" == "0" ) ]]; then
   GRAPH_ARGS+=(--from_points_thres "$SAMOBJECT_FROM_POINTS_THR")

@@ -41,8 +41,17 @@ class MaskDictionaryModel:
 
     def add_new_frame_annotation_sort(self, image, mask_list, background_value = 0):
         # import pdb; pdb.set_trace()
-        # sorted_masks = sorted(mask_list, key=lambda x: x['area'],reverse=True)
-        sorted_masks = sorted(mask_list, key=(lambda x: x["predicted_iou"]))
+        # Composite large masks first so smaller object masks can overwrite them
+        # later. Sorting primarily by area is much more stable for overlapping
+        # automatic masks than letting one high-confidence coarse region dominate
+        # the final label image.
+        sorted_masks = sorted(
+            mask_list,
+            key=lambda x: (
+                -float(x.get("area", np.asarray(x["segmentation"]).sum())),
+                -float(x.get("predicted_iou", x.get("stability_score", 0.0))),
+            ),
+        )
         mask_img = torch.zeros(image.shape[:2])
         anno_2d = {}
         # import pdb; pdb.set_trace()
@@ -54,7 +63,16 @@ class MaskDictionaryModel:
             # mask = mask
             mask_img[mask == True] = final_index
             # print("label", label)
-            new_annotation = ObjectInfo(instance_id = final_index, mask = mask, predicted_iou=maskitem['area'])
+            new_annotation = ObjectInfo(
+                instance_id=final_index,
+                mask=mask,
+                predicted_iou=float(
+                    maskitem.get(
+                        "predicted_iou",
+                        maskitem.get("stability_score", maskitem.get("area", 0.0)),
+                    )
+                ),
+            )
             anno_2d[final_index] = new_annotation
 
         # np.save(os.path.join(output_dir, output_file_name), mask_img.numpy().astype(np.uint16))
@@ -65,17 +83,19 @@ class MaskDictionaryModel:
 
     def add_new_frame_annotation_rev(self, sorted_mask, mask_list, background_value = 0):
         anno_2d = {}
-        max_idx = int(mask_list.max())
-        # import pdb; pdb.set_trace()
+        # Reconstruct per-instance binary masks from a merged label image.
+        # Downstream code (IoU matching, SAM2 prompting, box extraction) expects
+        # object masks to be boolean occupancy maps, not label-valued images.
         v,counts = torch.unique(mask_list, return_counts=True)
         for i in v:
             if i==0:
                 continue
-            # i = int(i)
             mask = (mask_list == i)
-            result_array = torch.zeros_like(mask_list)
-            result_array[mask] = i
-            new_annotation = ObjectInfo(instance_id = i, mask = result_array, predicted_iou=sorted_mask[int(i)]['predicted_iou'])
+            new_annotation = ObjectInfo(
+                instance_id=int(i),
+                mask=mask,
+                predicted_iou=sorted_mask[int(i)]['predicted_iou'],
+            )
             anno_2d[int(i)] = new_annotation
 
         # np.save(os.path.join(output_dir, output_file_name), mask_list.numpy().astype(np.uint16))
@@ -175,13 +195,37 @@ class MaskDictionaryModel:
             if seg_mask.mask.sum() == 0:
                 continue
 
-            objects_count += 1
-            flag = objects_count
-            new_mask_copy.instance_id = objects_count
-            new_mask_copy.mask = seg_mask.mask
-            new_mask_copy.predicted_iou = seg_mask.predicted_iou
+            for object_id, object_info in tracking_annotation_dict.labels.items():
+                iou = self.calculate_iou(seg_mask.mask, object_info.mask)
+                iou_o = self.calculate_iou_object(seg_mask.mask, object_info.mask)
+                iou_t = self.calculate_iou_track(seg_mask.mask, object_info.mask)
 
-                # new_mask_copy.class_name = seg_mask.class_name
+                if iou > iou_threshold:
+                    flag = object_info.instance_id
+                    new_mask_copy.mask = object_info.mask
+                    new_mask_copy.instance_id = object_info.instance_id
+                    new_mask_copy.predicted_iou = object_info.predicted_iou
+                    break
+                if iou_o > 0.8 and iou_t < 0.4:
+                    flag = object_info.instance_id
+                    new_mask_copy.mask = object_info.mask
+                    new_mask_copy.instance_id = object_info.instance_id
+                    new_mask_copy.predicted_iou = object_info.predicted_iou
+                    break
+                if iou_t > 0.8 and iou_o < 0.4:
+                    flag = object_info.instance_id
+                    new_mask_copy.mask = seg_mask.mask
+                    new_mask_copy.instance_id = object_info.instance_id
+                    new_mask_copy.predicted_iou = seg_mask.predicted_iou
+                    break
+
+            if not flag:
+                objects_count += 1
+                flag = objects_count
+                new_mask_copy.instance_id = objects_count
+                new_mask_copy.mask = seg_mask.mask
+                new_mask_copy.predicted_iou = seg_mask.predicted_iou
+
             updated_masks[flag] = new_mask_copy
         self.labels = updated_masks
         return objects_count

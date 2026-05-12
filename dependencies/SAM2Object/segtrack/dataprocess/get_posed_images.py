@@ -49,6 +49,30 @@ def parse_3rscan_intrinsics(info_path, key):
     raise FileNotFoundError(f"Could not find {key} in {info_path}")
 
 
+def parse_3rscan_dimensions(info_path):
+    color_w = color_h = depth_w = depth_h = None
+    with open(info_path, "r") as f:
+        for line in f:
+            if line.startswith("m_colorWidth"):
+                color_w = int(float(line.split("=")[1]))
+            elif line.startswith("m_colorHeight"):
+                color_h = int(float(line.split("=")[1]))
+            elif line.startswith("m_depthWidth"):
+                depth_w = int(float(line.split("=")[1]))
+            elif line.startswith("m_depthHeight"):
+                depth_h = int(float(line.split("=")[1]))
+    return color_w, color_h, depth_w, depth_h
+
+
+def scale_intrinsics(mat, src_w, src_h, dst_w, dst_h):
+    scaled = mat.copy().astype(np.float32)
+    scaled[0, 0] *= float(dst_w) / float(src_w)
+    scaled[0, 2] *= float(dst_w) / float(src_w)
+    scaled[1, 1] *= float(dst_h) / float(src_h)
+    scaled[1, 2] *= float(dst_h) / float(src_h)
+    return scaled
+
+
 for path in path_list:
     if DATASET == 'ScanNet':
         for scene_dir in ol(path):
@@ -86,11 +110,47 @@ for path in path_list:
                     info_path,
                     "m_calibrationDepthIntrinsic",
                 )
+                color_w, color_h, depth_w, depth_h = parse_3rscan_dimensions(info_path)
+
+                K_depth_out = K_depth
+
+                files = ol(seq_path)
+                color_files = sorted([f for f in files if f.endswith(".color.jpg")])
+                if color_files and color_w and color_h:
+                    first_frame_id = (
+                        color_files[0].replace("frame-", "").replace(".color.jpg", "")
+                    )
+                    first_depth = opj(seq_path, f"frame-{first_frame_id}.depth.pgm")
+                    if os.path.exists(first_depth):
+                        with Image.open(first_depth) as depth_img:
+                            actual_depth_w, actual_depth_h = depth_img.size
+                        if (
+                            depth_w is not None
+                            and depth_h is not None
+                            and (actual_depth_w != depth_w or actual_depth_h != depth_h)
+                        ):
+                            # Predicted Pi3X/MUSt3R depths live on a resized color-image grid
+                            # rather than the original 3RScan depth sensor grid. Use the
+                            # color intrinsics scaled to the actual stored depth resolution
+                            # so visibility checks in graph clustering stay geometrically
+                            # consistent with the predicted depth map.
+                            K_depth_out = scale_intrinsics(
+                                K_color,
+                                color_w,
+                                color_h,
+                                actual_depth_w,
+                                actual_depth_h,
+                            )
+                            print(
+                                f"[INFO] Depth size mismatch for {scene_dir}: "
+                                f"_info depth={depth_w}x{depth_h}, actual={actual_depth_w}x{actual_depth_h}. "
+                                "Using scaled color intrinsics for depth."
+                            )
 
                 np.savetxt(opj(out_scene_path, "intrinsic_color.txt"), K_color)
                 np.savetxt(opj(out_scene_path, "intrinsics_color.txt"), K_color)
-                np.savetxt(opj(out_scene_path, "intrinsic_depth.txt"), K_depth)
-                np.savetxt(opj(out_scene_path, "intrinsics_depth.txt"), K_depth)
+                np.savetxt(opj(out_scene_path, "intrinsic_depth.txt"), K_depth_out)
+                np.savetxt(opj(out_scene_path, "intrinsics_depth.txt"), K_depth_out)
             else:
                 print(f"[WARNING] No _info.txt found for {scene_dir}")
 
@@ -100,7 +160,6 @@ for path in path_list:
             #   000000.png
             #   000000.txt
             files = ol(seq_path)
-
             color_files = sorted([f for f in files if f.endswith(".color.jpg")])
 
             for color_file in color_files:
