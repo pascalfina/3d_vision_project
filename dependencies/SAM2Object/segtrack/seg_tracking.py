@@ -103,8 +103,8 @@ def prune_tracking_labels(mask_dict, max_prompts):
     ranked = sorted(
         items,
         key=lambda kv: (
-            -int(kv[1].mask.sum().item() if hasattr(kv[1].mask.sum(), "item") else kv[1].mask.sum()),
             -float(kv[1].predicted_iou),
+            -int(kv[1].mask.sum().item() if hasattr(kv[1].mask.sum(), "item") else kv[1].mask.sum()),
         ),
     )
     kept = dict(ranked[:max_prompts])
@@ -138,8 +138,9 @@ mask_generator = SAM2AutomaticMaskGenerator(
     stability_score_thresh=float(os.environ.get("SAMOBJECT_STABILITY_SCORE_THRESH", "0.92")),
     stability_score_offset=0.7,
     crop_n_layers=int(os.environ.get("SAMOBJECT_CROP_N_LAYERS", "0")),
-    box_nms_thresh=0.7,
-    crop_n_points_downscale_factor=2,
+    box_nms_thresh=float(os.environ.get("SAMOBJECT_BOX_NMS_THRESH", "0.7")),
+    crop_nms_thresh=float(os.environ.get("SAMOBJECT_CROP_NMS_THRESH", "0.7")),
+    crop_n_points_downscale_factor=int(os.environ.get("SAMOBJECT_CROP_POINTS_DOWNSCALE", "2")),
     min_mask_region_area=float(os.environ.get("SAMOBJECT_MIN_MASK_AREA", "500")),
     use_m2m=True,
     multimask_output=False,

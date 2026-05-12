@@ -83,6 +83,45 @@ def write_pkl_gz(path: Path, payload) -> None:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+def load_current_reconstruction_object_ids(
+    reconstruction_root: Path,
+    scene_id: str,
+) -> Optional[set[int]]:
+    files_dir = reconstruction_root / "files"
+    candidates = [
+        files_dir / "objects_sam2.json",
+        files_dir / "objects.json",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            payload = load_json(path)
+        except Exception as exc:
+            print(f"[pred-ready] warning: failed to parse {path}: {exc}")
+            continue
+
+        scans = payload.get("scans", [])
+        if isinstance(scans, dict):
+            scans = list(scans.values())
+        for scan in scans:
+            scan_name = scan.get("scan") or scan.get("reference")
+            if scan_name != scene_id:
+                continue
+            object_ids = {
+                int(obj["id"])
+                for obj in scan.get("objects", [])
+                if "id" in obj
+            }
+            if object_ids:
+                print(
+                    f"[pred-ready] using current reconstruction registry "
+                    f"{path.name} with {len(object_ids)} ids"
+                )
+                return object_ids
+    return None
+
+
 def read_scene_graph(root: Path, scene_id: str, name: str = "data") -> dict:
     files_dir = root / "files" / "orig" / name
     gz_path = files_dir / f"{scene_id}.pkl.gz"
@@ -247,6 +286,7 @@ def discover_reconstructed_objects(
     max_extent: float = 0.0,
     max_center_norm: float = 0.0,
     allow_stale_geometry: bool = False,
+    valid_object_ids: Optional[set[int]] = None,
 ) -> list[dict]:
     scene_root = reconstruction_root / "files" / "gs_annotations" / scene_id
     if not scene_root.exists():
@@ -255,6 +295,13 @@ def discover_reconstructed_objects(
     objects = []
     for obj_dir in sorted(scene_root.iterdir(), key=lambda p: int(p.name)):
         if not obj_dir.is_dir():
+            continue
+        obj_id = int(obj_dir.name)
+        if valid_object_ids is not None and obj_id not in valid_object_ids:
+            print(
+                f"[pred-ready] skipping stale object dir {scene_id}/{obj_id}: "
+                "not present in current reconstruction registry"
+            )
             continue
         voxel_path = obj_dir / "voxel_output_dense.npz"
         mean_scale_path = obj_dir / "mean_scale_dense.npz"
@@ -304,7 +351,7 @@ def discover_reconstructed_objects(
 
         objects.append(
             {
-                "obj_id": int(obj_dir.name),
+                "obj_id": obj_id,
                 "obj_dir": obj_dir,
                 "voxel_count": int(voxels.shape[0]),
                 "voxels": voxels,
@@ -588,6 +635,11 @@ def main():
         reconstruction_scenes_dirname=args.reconstruction_scenes_dirname,
     )
 
+    current_object_ids = load_current_reconstruction_object_ids(
+        reconstruction_root=reconstruction_root,
+        scene_id=scene_id,
+    )
+
     ordered_objects = discover_reconstructed_objects(
         reconstruction_root=reconstruction_root,
         scene_id=scene_id,
@@ -596,6 +648,7 @@ def main():
         max_extent=args.max_extent,
         max_center_norm=args.max_center_norm,
         allow_stale_geometry=args.allow_stale_geometry,
+        valid_object_ids=current_object_ids,
     )
     objects_payload, baseline_objects_by_id, copied_semantic_fields = build_objects_json(
         baseline_root=baseline_root,
