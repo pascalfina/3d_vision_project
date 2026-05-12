@@ -1092,6 +1092,11 @@ def _prepare_lifted_geometry(
         normalized_points, mean, scale = normalized_with_reference
     return lifted_points, normalized_points, mean, scale
 
+def _is_low_lift_points_error(e: Exception) -> bool:
+    if not isinstance(e, (ValueError, RuntimeError)):
+        return False
+    msg = str(e)
+    return "Too few lifted points" in msg or "No valid 3D points" in msg
 
 def _finalize_object_voxel_grid(
     voxel_grid: np.ndarray,
