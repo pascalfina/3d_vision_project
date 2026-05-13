@@ -92,35 +92,6 @@ def normalize_keyframes(keyframes, last_idx):
         clean.append(last_idx)
     return clean
 
-
-def prune_tracking_labels(mask_dict, max_prompts):
-    if max_prompts <= 0:
-        return mask_dict, 0
-    items = list(mask_dict.labels.items())
-    if len(items) <= max_prompts:
-        return mask_dict, 0
-
-    ranked = sorted(
-        items,
-        key=lambda kv: (
-            -float(kv[1].predicted_iou),
-            -int(kv[1].mask.sum().item() if hasattr(kv[1].mask.sum(), "item") else kv[1].mask.sum()),
-        ),
-    )
-    kept = dict(ranked[:max_prompts])
-    dropped = len(items) - len(kept)
-    mask_dict.labels = kept
-    return mask_dict, dropped
-
-
-def log_prompt_budget(direction, frame_idx, mask_dict, dropped, max_prompts):
-    kept = len(mask_dict.labels)
-    total = kept + dropped
-    print(
-        f"[SAM2Object] {direction} prompts at frame {frame_idx}: "
-        f"kept={kept} total={total} max_prompts={max_prompts}"
-    )
-
 sam2_checkpoint = os.environ.get("SAMOBJECT_CHECKPOINT", f"{PROJECT_DIR}/segtrack/checkpoints/sam2_hiera_large.pt")
 model_cfg = os.environ.get("SAMOBJECT_MODEL_CFG", "sam2_hiera_l.yaml")
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -133,15 +104,14 @@ sam2_image_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
 
 mask_generator = SAM2AutomaticMaskGenerator(
     model=sam2_image_model,
-    points_per_side=int(os.environ.get("SAMOBJECT_POINTS_PER_SIDE", "16")),
-    pred_iou_thresh=float(os.environ.get("SAMOBJECT_PRED_IOU_THRESH", "0.75")),
+    points_per_side=int(os.environ.get("SAMOBJECT_POINTS_PER_SIDE", "32")),
+    pred_iou_thresh=float(os.environ.get("SAMOBJECT_PRED_IOU_THRESH", "0.7")),
     stability_score_thresh=float(os.environ.get("SAMOBJECT_STABILITY_SCORE_THRESH", "0.92")),
     stability_score_offset=0.7,
-    crop_n_layers=int(os.environ.get("SAMOBJECT_CROP_N_LAYERS", "0")),
+    crop_n_layers=int(os.environ.get("SAMOBJECT_CROP_N_LAYERS", "1")),
     box_nms_thresh=float(os.environ.get("SAMOBJECT_BOX_NMS_THRESH", "0.7")),
-    crop_nms_thresh=float(os.environ.get("SAMOBJECT_CROP_NMS_THRESH", "0.7")),
     crop_n_points_downscale_factor=int(os.environ.get("SAMOBJECT_CROP_POINTS_DOWNSCALE", "2")),
-    min_mask_region_area=float(os.environ.get("SAMOBJECT_MIN_MASK_AREA", "500")),
+    min_mask_region_area=float(os.environ.get("SAMOBJECT_MIN_MASK_AREA", "25")),
     use_m2m=True,
     multimask_output=False,
 )
@@ -191,7 +161,6 @@ for scene_id in video_dir_scene_ids:
     sam2_masks = MaskDictionaryModel()
     PROMPT_TYPE_FOR_VIDEO = "mask" # box, mask or point
     objects_count = 0
-    max_tracking_prompts = int(os.environ.get("SAMOBJECT_MAX_PROMPTS_PER_KEYFRAME", "0"))
 
     """
     Step 2.0: Get key frames idx
@@ -241,8 +210,6 @@ for scene_id in video_dir_scene_ids:
             mask_dict.add_new_frame_annotation_sort(imagergb,mask_list=masks)
         else:
             raise NotImplementedError("SAM 2 video predictor only support mask prompts")
-        mask_dict, dropped = prune_tracking_labels(mask_dict, max_tracking_prompts)
-        log_prompt_budget("forward", start_frame_idx, mask_dict, dropped, max_tracking_prompts)
         """
         Step 4: One Stage : Propagate the video predictor to get the segmentation results for each frame
         """
@@ -301,16 +268,7 @@ for scene_id in video_dir_scene_ids:
                 sorted_iou_dict[obj_id]['predicted_iou'] = obj_info.predicted_iou
                 sorted_iou_dict[obj_id]['mask'] = obj_info.mask
 
-            sorted_mask = {
-                k: v
-                for k, v in sorted(
-                    sorted_iou_dict.items(),
-                    key=lambda x: (
-                        -int(x[1]["mask"].sum().item() if hasattr(x[1]["mask"].sum(), "item") else x[1]["mask"].sum()),
-                        -float(x[1]["predicted_iou"]),
-                    ),
-                )
-            }
+            sorted_mask = {k: v for k, v in sorted(sorted_iou_dict.items(), key=lambda x: x[1]['predicted_iou'])}
             for obj_id, obj_info in sorted_mask.items():
                 mask_img[obj_info['mask'] == True] = obj_id
             mask_img = mask_img.numpy().astype(np.uint16)
@@ -401,8 +359,6 @@ for scene_id in video_dir_scene_ids:
                 # mask_dict.add_new_frame_annotation(mask_list=torch.tensor(masks).to(device), box_list=torch.tensor(input_boxes), label_list=OBJECTS)
             else:
                 raise NotImplementedError("SAM 2 video predictor only support mask prompts")
-            mask_dict, dropped = prune_tracking_labels(mask_dict, max_tracking_prompts)
-            log_prompt_budget("reverse", start_frame_idx, mask_dict, dropped, max_tracking_prompts)
             objects_count = mask_dict.update_masks(tracking_annotation_dict=sam2_masks_rev, iou_threshold=0.7, objects_count=objects_count)
             video_predictor_rev.reset_state(inference_state_rev)
             
@@ -413,18 +369,16 @@ for scene_id in video_dir_scene_ids:
             for object_id, object_info in mask_dict.labels.items():
                 frame_idx, out_obj_ids, out_mask_logits = video_predictor_rev.add_new_mask(
                         inference_state_rev,
-                        start_frame_idx,
+                        len(frame_names_rev)-1-start_frame_idx,
                         object_id,
                         object_info.mask,
                     )
             
 
             video_segments = {}  # output the following {step} frames tracking masks
-            for out_frame_idx, out_obj_ids, out_mask_logits in video_predictor_rev.propagate_in_video(
-                                                                                                    inference_state_rev,
-                                                                                                    max_frame_num_to_track=differences_rev[diff_idx],
-                                                                                                    start_frame_idx=start_frame_idx,
-                                                                                                    reverse=True,
+            for out_frame_idx, out_obj_ids, out_mask_logits in video_predictor_rev.propagate_in_video(inference_state_rev, 
+                                                                                                    max_frame_num_to_track=differences_rev[diff_idx], 
+                                                                                                    start_frame_idx=len(frame_names_rev)-1-start_frame_idx
                                                                                                 ):
                 frame_masks = MaskDictionaryModel()
                 
@@ -433,7 +387,7 @@ for scene_id in video_dir_scene_ids:
                     object_info = ObjectInfo(instance_id = out_obj_id, mask = out_mask[0], predicted_iou=mask_dict.labels[out_obj_id].predicted_iou)
                     object_info.update_box()
                     frame_masks.labels[out_obj_id] = object_info
-                    image_base_name = frame_names[out_frame_idx].split(".")[0]
+                    image_base_name = frame_names_rev[out_frame_idx].split(".")[0]
                     frame_masks.mask_name = f"mask_{image_base_name}.npy"
                     frame_masks.mask_height = out_mask.shape[-2]
                     frame_masks.mask_width = out_mask.shape[-1]
@@ -452,16 +406,7 @@ for scene_id in video_dir_scene_ids:
                     sorted_iou_dict[obj_id]['predicted_iou'] = obj_info.predicted_iou
                     sorted_iou_dict[obj_id]['mask'] = obj_info.mask
 
-                sorted_mask = {
-                    k: v
-                    for k, v in sorted(
-                        sorted_iou_dict.items(),
-                        key=lambda x: (
-                            -int(x[1]["mask"].sum().item() if hasattr(x[1]["mask"].sum(), "item") else x[1]["mask"].sum()),
-                            -float(x[1]["predicted_iou"]),
-                        ),
-                    )
-                }
+                sorted_mask = {k: v for k, v in sorted(sorted_iou_dict.items(), key=lambda x: x[1]['predicted_iou'])}
                 for obj_id, obj_info in sorted_mask.items():
                     mask_img[obj_info['mask'] == True] = obj_id
 
