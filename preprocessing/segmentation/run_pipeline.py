@@ -8,7 +8,7 @@ from utils.io_utils import load_frames_from_scene, select_keyframes, select_keyf
 from segment_sam2 import ensure_sam2_postprocess_ready, segment_keyframes, propagate_masks
 from keyframe_selection import refine_keyframes_with_mask_preview
 from depth_pose_must3r import run_must3r_on_scene
-from depth_pose_mast3r_sfm import run_mast3r_sfm_on_scene
+#from depth_pose_mast3r_sfm import run_mast3r_sfm_on_scene
 from depth_pose_pi3x import run_pi3x_on_scene
 from utils.object_registry import build_objects_predicted, save_objects_predicted
 
