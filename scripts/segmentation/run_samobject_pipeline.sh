@@ -25,11 +25,15 @@ set -euo pipefail
 : "${SAMOBJECT_VENV:?Need SAMOBJECT_VENV}"
 : "${SAMOBJECT_DATA_ROOT:?Need SAMOBJECT_DATA_ROOT}"
 : "${SAMOBJECT_SCAN_ID:?Need SAMOBJECT_SCAN_ID}"
-: "${SAMOBJECT_MESH_PATH:?Need SAMOBJECT_MESH_PATH}"
 : "${SAMOBJECT_BASELINE_ROOT:?Need SAMOBJECT_BASELINE_ROOT}"
 : "${OBJECTX_REPO_ROOT:?Need OBJECTX_REPO_ROOT}"
 # SAMOBJECT_OUTPUT_ROOT: where prepare writes masks/objects.json (defaults to SAMOBJECT_DATA_ROOT)
 SAMOBJECT_OUTPUT_ROOT="${SAMOBJECT_OUTPUT_ROOT:-$SAMOBJECT_DATA_ROOT}"
+SAMOBJECT_ADAPTER="${SAMOBJECT_ADAPTER:-samobject_graph}"
+
+if [[ "$SAMOBJECT_ADAPTER" != "pi3x_2d_fusion" && ( -z "${SAMOBJECT_USE_PI3X_MESH:-}" || "${SAMOBJECT_USE_PI3X_MESH}" == "0" ) ]]; then
+  : "${SAMOBJECT_MESH_PATH:?Need SAMOBJECT_MESH_PATH unless SAMOBJECT_ADAPTER=pi3x_2d_fusion or SAMOBJECT_USE_PI3X_MESH=1}"
+fi
 
 PROJECTION_DILATION="${SAMOBJECT_PROJECTION_DILATION:-2}"
 GRAPH_VIEW_FREQ="${SAMOBJECT_VIEW_FREQ:-3}"
@@ -48,6 +52,7 @@ echo "  scan_id      : $SAMOBJECT_SCAN_ID"
 echo "  data_root    : $SAMOBJECT_DATA_ROOT"
 echo "  baseline     : $SAMOBJECT_BASELINE_ROOT"
 echo "  sam2obj repo : $SAMOBJECT_DIR"
+echo "  adapter      : $SAMOBJECT_ADAPTER"
 echo "  checkpoint   : ${SAMOBJECT_CHECKPOINT:-$OBJECTX_REPO_ROOT/models/sam2ckpt/sam2_hiera_large.pt}"
 echo "  model_cfg    : ${SAMOBJECT_MODEL_CFG:-sam2_hiera_l.yaml}"
 echo "========================================="
@@ -156,7 +161,9 @@ SUPERPOINTS_DIR="$SAMOBJECT_DATA_ROOT/superpoints/$SAMOBJECT_SCAN_ID"
 SUPERPOINTS_FILE="$SUPERPOINTS_DIR/superpoint.pts"
 SEGS_JSON="$BASELINE_SCENE_DIR/mesh.refined.0.010000.segs.v2.json"
 
-if [[ -n "${SAMOBJECT_USE_PI3X_MESH:-}" && "${SAMOBJECT_USE_PI3X_MESH}" != "0" ]]; then
+if [[ "$SAMOBJECT_ADAPTER" == "pi3x_2d_fusion" ]]; then
+  echo "  SAMOBJECT_ADAPTER=pi3x_2d_fusion: skipping SAMObject 3D superpoints."
+elif [[ -n "${SAMOBJECT_USE_PI3X_MESH:-}" && "${SAMOBJECT_USE_PI3X_MESH}" != "0" ]]; then
   echo "  Pi3X mode active: building Pi3X scene point cloud for SAM2Object."
   _PI3X_SEQ_DIR="${SAMOBJECT_PI3X_SEQ_DIR:-${SAMOBJECT_SOURCE_SEQUENCE_DIR:-}}"
   if [[ -z "$_PI3X_SEQ_DIR" ]]; then
@@ -171,6 +178,7 @@ if [[ -n "${SAMOBJECT_USE_PI3X_MESH:-}" && "${SAMOBJECT_USE_PI3X_MESH}" != "0" ]
     --conf-thr "${SAMOBJECT_PI3X_CONF_THR:-0.10}" \
     --pixel-stride "${SAMOBJECT_PI3X_PIXEL_STRIDE:-2}" \
     --voxel-dedup-size "${SAMOBJECT_PI3X_VOXEL_DEDUP_SIZE:-0.10}" \
+    --min-views-per-voxel "${SAMOBJECT_PI3X_MIN_VIEWS_PER_VOXEL:-1}" \
     --superpoint-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
     --superpoint-voxel-size "${SAMOBJECT_PI3X_SUPERPOINT_VOXEL_SIZE:-0.25}"
   export SAMOBJECT_3RSCAN_SCENES_DIR="$SAMOBJECT_DATA_ROOT/scenes"
@@ -213,6 +221,44 @@ if [[ "${SAMOBJECT_REFRESH_2D_MASKS:-1}" != "0" && -d "$MASK2D_SCENE_DIR" ]]; th
   rm -rf "$MASK2D_SCENE_DIR"
 fi
 python mask_convert.py
+
+if [[ "$SAMOBJECT_ADAPTER" == "pi3x_2d_fusion" ]]; then
+  echo "========== STEP 3: Pi3X 2D-track fusion adapter =========="
+  cd "$OBJECTX_REPO_ROOT"
+  _PI3X_SEQ_DIR="${SAMOBJECT_PI3X_SEQ_DIR:-${SAMOBJECT_SOURCE_SEQUENCE_DIR:-}}"
+  if [[ -z "$_PI3X_SEQ_DIR" ]]; then
+    echo "ERROR: SAMOBJECT_PI3X_SEQ_DIR or SAMOBJECT_SOURCE_SEQUENCE_DIR must be set for SAMOBJECT_ADAPTER=pi3x_2d_fusion"
+    exit 1
+  fi
+
+  FUSION_ARGS=(
+    preprocessing/segmentation/fuse_samobject_tracks_with_pi3x.py
+    --sam-root "$SAMOBJECT_DATA_ROOT"
+    --output-root "$SAMOBJECT_OUTPUT_ROOT"
+    --scan-id "$SAMOBJECT_SCAN_ID"
+    --pi3x-seq-dir "$_PI3X_SEQ_DIR"
+    --mask-dir "$MASK2D_SCENE_DIR"
+    --conf-thr "${SAMOBJECT_PI3X_CONF_THR:-0.10}"
+    --pixel-stride "${SAMOBJECT_PI3X_PIXEL_STRIDE:-2}"
+    --merge-voxel-size "${SAMOBJECT_PI3X_FUSION_MERGE_VOXEL_SIZE:-0.05}"
+    --merge-voxel-overlap "${SAMOBJECT_PI3X_FUSION_MERGE_VOXEL_OVERLAP:-0.12}"
+    --near-merge-min-voxel-overlap "${SAMOBJECT_PI3X_FUSION_NEAR_MIN_VOXEL_OVERLAP:-0.02}"
+    --near-fraction-thr "${SAMOBJECT_PI3X_FUSION_NEAR_FRACTION_THR:-0.65}"
+    --near-distance "${SAMOBJECT_PI3X_FUSION_NEAR_DISTANCE:-0.075}"
+    --min-track-frames "${SAMOBJECT_PI3X_FUSION_MIN_TRACK_FRAMES:-2}"
+    --min-track-points "${SAMOBJECT_PI3X_FUSION_MIN_TRACK_POINTS:-128}"
+    --min-object-points "${SAMOBJECT_PI3X_FUSION_MIN_OBJECT_POINTS:-0}"
+    --max-sample-points-per-frame "${SAMOBJECT_PI3X_FUSION_MAX_SAMPLE_POINTS_PER_FRAME:-2048}"
+    --max-merge-sample-points "${SAMOBJECT_PI3X_FUSION_MAX_MERGE_SAMPLE_POINTS:-20000}"
+    --debug-points-per-object "${SAMOBJECT_PI3X_FUSION_DEBUG_POINTS_PER_OBJECT:-5000}"
+  )
+  if [[ "${SAMOBJECT_PI3X_FUSION_ALLOW_COVISIBLE_MERGE:-0}" != "0" ]]; then
+    FUSION_ARGS+=(--allow-covisible-merge)
+  fi
+  python "${FUSION_ARGS[@]}"
+  echo "========== DONE =========="
+  exit 0
+fi
 
 # ── STEP 3: Graph clustering 3D ──────────────────────────────────────────────
 echo "========== STEP 3: Graph Clustering 3D =========="

@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--conf-thr", type=float, default=0.10)
     parser.add_argument("--pixel-stride", type=int, default=2)
     parser.add_argument("--voxel-dedup-size", type=float, default=0.025)
+    parser.add_argument("--min-views-per-voxel", type=int, default=1)
     parser.add_argument("--superpoint-json-out", default=None)
     parser.add_argument("--superpoint-voxel-size", type=float, default=0.25)
     args = parser.parse_args()
@@ -50,7 +51,8 @@ def main():
         raise FileNotFoundError(f"No Pi3X xyz maps found in {sequence_dir}")
 
     all_points = []
-    for xyz_path in xyz_paths:
+    all_view_ids = []
+    for frame_idx, xyz_path in enumerate(xyz_paths):
         fid = osp.basename(xyz_path).replace("frame-", "").replace(".xyz.npy", "")
         pose_path = osp.join(sequence_dir, f"frame-{fid}.pose.txt")
         conf_path = osp.join(sequence_dir, f"frame-{fid}.conf.npy")
@@ -82,11 +84,13 @@ def main():
         pts_cam = xyz[valid].astype(np.float32)
         pts_world = _camera_points_to_world(pts_cam, pose_c2w)
         all_points.append(pts_world)
+        all_view_ids.append(np.full(len(pts_world), frame_idx, dtype=np.int32))
 
     if not all_points:
         raise RuntimeError("No valid Pi3X world points found for scene PLY export")
 
     pts_all = np.concatenate(all_points, axis=0)
+    view_ids_all = np.concatenate(all_view_ids, axis=0)
     bbox_min = pts_all.min(axis=0)
     bbox_max = pts_all.max(axis=0)
     print(
@@ -95,14 +99,42 @@ def main():
     )
 
     voxel = np.floor(pts_all / float(args.voxel_dedup_size)).astype(np.int64)
-    unique_voxel, unique_idx = np.unique(voxel, axis=0, return_index=True)
-    pts_final = pts_all[unique_idx]
-    print(
-        f"[Pi3X scene ply] points after dedup={len(pts_final)} "
-        f"voxel_dedup_size={float(args.voxel_dedup_size):.4f} unique_voxels={len(unique_voxel)}"
+    unique_voxel, inverse, counts = np.unique(
+        voxel, axis=0, return_inverse=True, return_counts=True
     )
 
-    write_point_ply(args.out_ply, pts_final.astype(np.float32))
+    pts_sum = np.zeros((len(unique_voxel), 3), dtype=np.float64)
+    np.add.at(pts_sum, inverse, pts_all)
+    pts_centroid = pts_sum / counts[:, None]
+
+    voxel_view_pairs = np.stack([inverse, view_ids_all], axis=1)
+    unique_voxel_view_pairs = np.unique(voxel_view_pairs, axis=0)
+    voxel_view_counts = np.bincount(
+        unique_voxel_view_pairs[:, 0], minlength=len(unique_voxel)
+    )
+    keep_mask = voxel_view_counts >= int(args.min_views_per_voxel)
+    if not np.any(keep_mask):
+        raise RuntimeError(
+            "All Pi3X voxels were filtered out. "
+            "Lower --min-views-per-voxel or --voxel-dedup-size."
+        )
+
+    pts_final = pts_centroid[keep_mask].astype(np.float32)
+    print(
+        f"[Pi3X scene ply] points after dedup={len(pts_final)} "
+        f"voxel_dedup_size={float(args.voxel_dedup_size):.4f} "
+        f"unique_voxels={len(unique_voxel)} "
+        f"min_views_per_voxel={int(args.min_views_per_voxel)}"
+    )
+    print(
+        f"[Pi3X scene ply] supporting views per voxel: "
+        f"mean={float(voxel_view_counts.mean()):.2f} "
+        f"median={float(np.median(voxel_view_counts)):.2f} "
+        f"p90={float(np.percentile(voxel_view_counts, 90)):.2f} "
+        f"kept_fraction={float(keep_mask.mean()):.4f}"
+    )
+
+    write_point_ply(args.out_ply, pts_final)
     if args.superpoint_json_out:
         super_voxel = np.floor(pts_final / float(args.superpoint_voxel_size)).astype(np.int64)
         _, inverse = np.unique(super_voxel, axis=0, return_inverse=True)
