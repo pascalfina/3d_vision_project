@@ -60,6 +60,18 @@ def ensure_symlink(src: Path, dst: Path) -> None:
     os.symlink(src, dst)
 
 
+def ensure_copy_file(src: Path, dst: Path) -> None:
+    safe_remove(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+
+
+def ensure_copy_tree(src: Path, dst: Path) -> None:
+    safe_remove(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst)
+
+
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
@@ -192,6 +204,26 @@ def pick_existing_dir(*candidates: Path) -> Optional[Path]:
     return None
 
 
+def stage_scene_mask_snapshot(
+    source_root: Path,
+    target_files_dir: Path,
+    scene_id: str,
+    name: str,
+) -> None:
+    src_base = source_root / "files" / name / "obj_id_pkl"
+    if not src_base.exists():
+        return
+    candidates = [
+        src_base / f"{scene_id}.pkl",
+        src_base / f"{scene_id}.pkl.gz",
+    ]
+    src_file = next((path for path in candidates if path.exists()), None)
+    if src_file is None:
+        return
+    dst_file = target_files_dir / name / "obj_id_pkl" / src_file.name
+    ensure_copy_file(src_file, dst_file)
+
+
 def stage_scene(src_scan_dir: Path, dst_scan_dir: Path) -> None:
     safe_remove(dst_scan_dir)
     dst_scan_dir.mkdir(parents=True, exist_ok=True)
@@ -265,12 +297,12 @@ def link_compatibility_inputs(
         ensure_symlink(features_dir, files_dir / "Features3D")
 
     for name in ["gt_projection", "pred_projection", "pred_projection_clean"]:
-        src = pick_existing_dir(
-            reconstruction_root / "files" / name,
-            baseline_root / "files" / name,
+        src_root = (
+            reconstruction_root
+            if (reconstruction_root / "files" / name).exists()
+            else baseline_root
         )
-        if src is not None:
-            ensure_symlink(src, files_dir / name)
+        stage_scene_mask_snapshot(src_root, files_dir, scene_id, name)
 
     scan_data = load_json(baseline_root / "files" / "3RScan.json")
     write_json(files_dir / "3RScan.json", build_target_3rscan(scan_data, scene_id))
@@ -574,7 +606,7 @@ def link_reconstructed_gs_annotations(
     for item in ordered_objects:
         obj_id = int(item["obj_id"])
         src = reconstruction_root / "files" / "gs_annotations" / scene_id / str(obj_id)
-        ensure_symlink(src, target_scene_root / str(obj_id))
+        ensure_copy_tree(src, target_scene_root / str(obj_id))
 
 
 def build_manifest(

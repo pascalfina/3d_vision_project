@@ -968,8 +968,12 @@ def build_plot_voxelised_action(repo_root: Path, profile: dict):
     render_sec = section(profile, "render_bundle")
 
     scan_id = sec.get("scan_id", sec.get("scene_id", shared_value(profile, "scene_id")))
-    data_root = sec.get("data_root", render_sec.get("data_root", roots(profile).get("reconstruction")))
     pred_ready_root = sec.get("replacement_root", roots(profile).get("pred_ready"))
+    data_root = sec.get(
+        "data_root",
+        pred_ready_root or render_sec.get("data_root", roots(profile).get("reconstruction")),
+    )
+    mask_root = sec.get("mask_root", data_root)
 
     label = sec.get("label", f"{profile.get('name', 'scene')}_voxelised")
     out_dir = sec.get(
@@ -999,7 +1003,7 @@ def build_plot_voxelised_action(repo_root: Path, profile: dict):
         str(repo_root / "scripts" / "segmentation" / "visualization" / "export_depth_background_interactive.py"),
     ]
     add_cli_arg(cmd, "--data-root", data_root)
-    add_cli_arg(cmd, "--mask-root", sec.get("mask_root", data_root))
+    add_cli_arg(cmd, "--mask-root", mask_root)
     add_cli_arg(cmd, "--replacement-root", pred_ready_root)
     add_cli_arg(cmd, "--scan-id", scan_id)
     add_cli_arg(cmd, "--obj-id", obj_ids)

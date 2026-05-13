@@ -178,7 +178,7 @@
   "render_bundle": {
     "label": "oven_legacy_sam2_pi3x",
     "data_root": "/work/scratch/pafina/objectx-data-fullscene-oven-pi3x",
-    "mask_source": "sam2_projection",
+    "mask_source": "gt_projection",
     "background_remove_mode": "loaded",
     "pose_mode": "raw",
     "lift_coord_system": "pinhole",
