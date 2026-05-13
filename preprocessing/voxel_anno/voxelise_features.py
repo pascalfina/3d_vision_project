@@ -165,7 +165,10 @@ def _env_flag(name: str, default: str = "0") -> bool:
 
 
 def _is_low_lift_points_error(e: Exception) -> bool:
-    return isinstance(e, ValueError) and "Too few lifted points" in str(e)
+    return isinstance(e, ValueError) and (
+        "Too few lifted points" in str(e)
+        or "No valid 3D points after lifting masked depth" in str(e)
+    )
 
 
 def _load_object_depth_map(
@@ -791,8 +794,10 @@ def _filter_lifted_points_by_support(
     min_keep_fraction = float(os.getenv("OBJECTX_VOXEL_LIFT_SUPPORT_MIN_KEEP_FRACTION", "0.05"))
     min_keep = max(32, int(points.shape[0] * min_keep_fraction))
     if keep.sum() < min_keep:
+        strict_filter = _env_flag("OBJECTX_VOXEL_LIFT_STRICT_SUPPORT_FILTER")
         _LOGGER.info(
-            "[2.5] lifted support filter skipped keep=%s/%s min_keep=%s voxel_size=%.4f min_points=%s min_views=%s",
+            "[2.5] lifted support filter %s keep=%s/%s min_keep=%s voxel_size=%.4f min_points=%s min_views=%s",
+            "strict-kept" if strict_filter else "skipped",
             int(keep.sum()),
             int(points.shape[0]),
             int(min_keep),
@@ -800,6 +805,10 @@ def _filter_lifted_points_by_support(
             int(min_points),
             int(min_views),
         )
+        if strict_filter:
+            filtered_points = points[keep]
+            filtered_views = view_indices[keep] if view_indices is not None else None
+            return filtered_points, filtered_views
         return points, view_indices
 
     filtered_points = points[keep]
