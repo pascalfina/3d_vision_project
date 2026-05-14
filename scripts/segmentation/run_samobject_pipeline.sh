@@ -361,6 +361,15 @@ if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" ]]; then
     exit 1
   fi
   PREPARE_ARGS+=(--use_pi3x_surface --pi3x_seq_dir "$_PI3X_SEQ_DIR")
+  if [[ "${SAMOBJECT_EXPORT_CLEAN_COMPONENTS:-0}" != "0" ]]; then
+    PREPARE_ARGS+=(
+      --clean_components
+      --component_radius "${SAMOBJECT_EXPORT_COMPONENT_RADIUS:-0.10}"
+      --component_min_points "${SAMOBJECT_EXPORT_COMPONENT_MIN_POINTS:-24}"
+      --component_min_fraction "${SAMOBJECT_EXPORT_COMPONENT_MIN_FRACTION:-0.03}"
+      --component_max_removed_fraction "${SAMOBJECT_EXPORT_COMPONENT_MAX_REMOVED_FRACTION:-0.20}"
+    )
+  fi
 else
   PREPARE_ARGS+=(--mesh_path "$SAMOBJECT_MESH_PATH")
 fi

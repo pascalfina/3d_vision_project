@@ -1685,7 +1685,20 @@ def voxelise_features(
                         _LOGGER.info("Skipping %s (%s): degenerate scale in point cloud PLY", scan_id, obj_id)
                         continue
                     normalized_points = np.clip(obj_pts / (2 * scale), -0.5 + 1e-6, 0.5 - 1e-6)
-                    voxel_grid = _voxelize_normalized_points(normalized_points, dilate_iters=1)
+                    point_cloud_dilate_iters = int(
+                        os.getenv("OBJECTX_VOXEL_POINT_CLOUD_DILATE_ITERS", "1")
+                    )
+                    voxel_grid = _voxelize_normalized_points(
+                        normalized_points,
+                        dilate_iters=point_cloud_dilate_iters,
+                    )
+                    _LOGGER.info(
+                        "[2.5] object %s/%s point_cloud_voxels=%s dilate_iters=%s",
+                        scan_id,
+                        obj_id,
+                        int(voxel_grid.shape[0]),
+                        point_cloud_dilate_iters,
+                    )
                 else:
                     segmented_mesh = _segment_mesh(mesh, annos, obj_id, scan_id)
                     mean, scale = _normalize_segmented_mesh(segmented_mesh)

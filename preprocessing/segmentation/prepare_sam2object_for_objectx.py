@@ -300,6 +300,15 @@ def project_labeled_points_to_frame(
     z = z[valid_img]
     obj = obj_valid[valid_img]
 
+    # Float coordinates can be inside the image but round exactly onto the
+    # exclusive width/height border.  Filter after rounding so edge samples do
+    # not get splatted back onto the image boundary.
+    valid_rounded = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    u = u[valid_rounded]
+    v = v[valid_rounded]
+    z = z[valid_rounded]
+    obj = obj[valid_rounded]
+
     obj_map = np.zeros((height, width), dtype=np.int32)
     depth_map = np.full((height, width), np.inf, dtype=np.float32)
 
@@ -607,6 +616,116 @@ def _link_scene_ply_for_voxelise(out_ply: str, pi3x_seq_dir: str) -> None:
         print(f"[OK] Copied SAMObject-segmented Pi3X PLY into scene dir: {alt_ply}")
 
 
+def _component_labels(points: np.ndarray, radius: float) -> np.ndarray:
+    if len(points) == 0:
+        return np.zeros((0,), dtype=np.int32)
+    tree = cKDTree(points)
+    parent = np.arange(len(points), dtype=np.int32)
+
+    def find(idx: int) -> int:
+        while parent[idx] != idx:
+            parent[idx] = parent[parent[idx]]
+            idx = int(parent[idx])
+        return idx
+
+    def union(left: int, right: int) -> None:
+        root_left = find(left)
+        root_right = find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    for left, right in tree.query_pairs(float(radius)):
+        union(int(left), int(right))
+
+    roots = np.asarray([find(i) for i in range(len(points))], dtype=np.int32)
+    _, inverse = np.unique(roots, return_inverse=True)
+    return inverse.astype(np.int32)
+
+
+def clean_small_object_components(
+    points: np.ndarray,
+    object_ids: np.ndarray,
+    *,
+    radius: float,
+    min_points: int,
+    min_fraction_of_largest: float,
+    max_removed_fraction: float,
+) -> tuple[np.ndarray, dict]:
+    """Remove only small detached 3D islands from each object label."""
+    cleaned = object_ids.astype(np.int32, copy=True)
+    object_stats = []
+    total_removed = 0
+    processed = 0
+    skipped_by_safety = 0
+
+    for obj_id in sorted(int(i) for i in np.unique(object_ids) if int(i) > 0):
+        indices = np.flatnonzero(cleaned == obj_id)
+        if indices.size < max(2, int(min_points)):
+            continue
+
+        component_ids = _component_labels(points[indices], radius=float(radius))
+        counts = np.bincount(component_ids)
+        if counts.size <= 1:
+            continue
+
+        largest = int(counts.max())
+        keep_threshold = max(int(min_points), int(np.ceil(float(min_fraction_of_largest) * largest)))
+        keep_components = np.flatnonzero(counts >= keep_threshold)
+        keep_mask = np.isin(component_ids, keep_components)
+        remove_count = int((~keep_mask).sum())
+        if remove_count == 0:
+            continue
+
+        removed_fraction = remove_count / float(indices.size)
+        if removed_fraction > float(max_removed_fraction):
+            skipped_by_safety += 1
+            object_stats.append(
+                {
+                    "object_id": obj_id,
+                    "points": int(indices.size),
+                    "components": int(counts.size),
+                    "largest_component": largest,
+                    "removed_points": 0,
+                    "skipped_by_safety": True,
+                    "candidate_removed_fraction": round(removed_fraction, 4),
+                }
+            )
+            continue
+
+        cleaned[indices[~keep_mask]] = 0
+        total_removed += remove_count
+        processed += 1
+        object_stats.append(
+            {
+                "object_id": obj_id,
+                "points": int(indices.size),
+                "components": int(counts.size),
+                "largest_component": largest,
+                "removed_points": remove_count,
+                "removed_fraction": round(removed_fraction, 4),
+                "skipped_by_safety": False,
+            }
+        )
+
+    stats = {
+        "enabled": True,
+        "radius": float(radius),
+        "min_points": int(min_points),
+        "min_fraction_of_largest": float(min_fraction_of_largest),
+        "max_removed_fraction": float(max_removed_fraction),
+        "objects_changed": int(processed),
+        "objects_skipped_by_safety": int(skipped_by_safety),
+        "removed_points": int(total_removed),
+        "object_stats": object_stats,
+    }
+    print(
+        "[INFO] Component cleanup: "
+        f"removed_points={total_removed} objects_changed={processed} "
+        f"skipped_by_safety={skipped_by_safety}"
+    )
+    return cleaned, stats
+
+
 def create_pi3x_graph_segmented_scene(
     sam_root: str,
     scan_id: str,
@@ -616,6 +735,11 @@ def create_pi3x_graph_segmented_scene(
     out_root_dir: str,
     skip: Optional[int] = None,
     projection_dilation: int = 2,
+    clean_components: bool = False,
+    component_radius: float = 0.10,
+    component_min_points: int = 24,
+    component_min_fraction: float = 0.03,
+    component_max_removed_fraction: float = 0.20,
 ) -> np.ndarray:
     """
     Export the actual SAMObject graph result on the Pi3X support surface.
@@ -628,13 +752,27 @@ def create_pi3x_graph_segmented_scene(
     """
     scene_ply = osp.join(sam_root, "scenes", scan_id, "labels.instances.annotated.v2.ply")
     colors = _read_scene_colors_if_aligned(scene_ply, expected_points=len(sam_points))
+    export_ids = objectx_ids.astype(np.int32)
+    if clean_components:
+        export_ids, cleanup_stats = clean_small_object_components(
+            sam_points,
+            export_ids,
+            radius=component_radius,
+            min_points=component_min_points,
+            min_fraction_of_largest=component_min_fraction,
+            max_removed_fraction=component_max_removed_fraction,
+        )
+        stats_path = osp.join(out_root_dir, "scenes", scan_id, "samobject_export_cleanup_stats.json")
+        os.makedirs(osp.dirname(stats_path), exist_ok=True)
+        with open(stats_path, "w") as f:
+            json.dump(cleanup_stats, f, indent=2)
 
     out_ply = osp.join(out_root_dir, "scenes", scan_id, "labels.instances.annotated.v2.ply")
     write_annotated_ply(
         out_ply=out_ply,
         vertices=sam_points,
         faces=None,
-        object_ids=objectx_ids.astype(np.int32),
+        object_ids=export_ids,
         colors=colors,
     )
     _link_scene_ply_for_voxelise(out_ply, pi3x_seq_dir)
@@ -643,12 +781,12 @@ def create_pi3x_graph_segmented_scene(
         root_dir=out_root_dir,
         scan_id=scan_id,
         points_world=sam_points,
-        point_object_ids=objectx_ids.astype(np.int32),
+        point_object_ids=export_ids,
         skip=skip,
         dilation=projection_dilation,
         seq_root_dir=sam_root,
     )
-    return objectx_ids.astype(np.int32)
+    return export_ids
 
 
 def main():
@@ -722,6 +860,11 @@ def main():
         default=None,
         help="Path to the Pi3X sequence dir; used to publish the labeled PLY next to that scene.",
     )
+    parser.add_argument("--clean_components", action="store_true")
+    parser.add_argument("--component_radius", type=float, default=0.10)
+    parser.add_argument("--component_min_points", type=int, default=24)
+    parser.add_argument("--component_min_fraction", type=float, default=0.03)
+    parser.add_argument("--component_max_removed_fraction", type=float, default=0.20)
 
     args = parser.parse_args()
 
@@ -756,6 +899,11 @@ def main():
             out_root_dir=out_root_dir,
             skip=args.frame_skip,
             projection_dilation=args.projection_dilation,
+            clean_components=args.clean_components,
+            component_radius=args.component_radius,
+            component_min_points=args.component_min_points,
+            component_min_fraction=args.component_min_fraction,
+            component_max_removed_fraction=args.component_max_removed_fraction,
         )
         update_objects_json(
             root_dir=out_root_dir,
