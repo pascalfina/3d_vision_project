@@ -136,12 +136,17 @@ class ScanNet_SAM2OBJECT(SAM2OBJECTBase):
             seg_num = self.N
             seg_members = seg_ids
             points_kdtree = scipy.spatial.KDTree(self.points)
-            points_neighbors = points_kdtree.query(self.points, k_graph, workers=n_workers)[1]  # (n,k)
+            points_dists, points_neighbors = points_kdtree.query(self.points, k_graph, workers=n_workers)  # (n,k)
+            max_knn_distance = float(getattr(self.args, "max_knn_distance", 0.0) or 0.0)
+            if max_knn_distance > 0:
+                points_neighbors = np.where(points_dists <= max_knn_distance, points_neighbors, np.arange(self.N)[:, None])
             self.seg_member_count = np.ones(self.N, dtype=int)
 
             return seg_ids, seg_num, seg_members, points_neighbors
 
         # use superpoints(oversegmentation) as primitives of region growing
+        direct_neighbor_pairs = None
+        raw_seg_ids_for_neighbors = None
         if seg_ids is None:
             if points_obj_labels_path is None:
                 # load superpoint ids from json file
@@ -157,6 +162,20 @@ class ScanNet_SAM2OBJECT(SAM2OBJECTBase):
                     with open(scene_seg_path, 'r') as f:
                         seg_data = json.load(f)
                     seg_ids = np.array(seg_data['segIndices'])
+                    raw_seg_ids_for_neighbors = seg_ids.copy()
+                    if DATASET == '3RScan':
+                        neighbor_path = join(
+                            f'{DATA_PATH}',
+                            scene_id,
+                            'mesh.refined.0.010000.seg_neighbors.v2.json',
+                        )
+                        if os.path.exists(neighbor_path):
+                            with open(neighbor_path, 'r') as f:
+                                neighbor_data = json.load(f)
+                            direct_neighbor_pairs = neighbor_data.get(
+                                'superpointNeighbors',
+                                neighbor_data.get('neighbors', []),
+                            )
                 else:
                     ply_path = join(f'{DATA_PATH}/data', args.scene_id, 'scans', 'mesh_aligned_0.05.ply')
                     superpoint_path = \
@@ -181,17 +200,41 @@ class ScanNet_SAM2OBJECT(SAM2OBJECTBase):
             seg_members[id] = np.where(seg_ids == id)[0]
 
         # collect spatial neighboring superpoints of each superpoint
-        # 1. find neighboring points of each point
-        points_kdtree = scipy.spatial.KDTree(self.points)
-        points_neighbors = points_kdtree.query(
-            self.points, k_graph, workers=n_workers)[1]  # (n,k)
-        # 2. find directly neighboring superpoints of each superpoint with the help of point neighbors
-        # binary matrix, "True" indicating the two superpoints are neighboring
+        # Prefer an explicit Pi3X superpoint topology if the adapter wrote one.
+        # The original SAMObject fallback is point kNN, which is fine on meshes
+        # but can create false edges through holes in Pi3X support clouds.
         seg_direct_neighbors = np.zeros((seg_num, seg_num), dtype=bool)
-        for id, members in seg_members.items():
-            neighbors = points_neighbors[members]
-            neighbor_seg_ids = seg_ids[neighbors]
-            seg_direct_neighbors[id][neighbor_seg_ids] = 1
+        if direct_neighbor_pairs is not None and raw_seg_ids_for_neighbors is not None:
+            raw_unique = np.unique(raw_seg_ids_for_neighbors[raw_seg_ids_for_neighbors != -1])
+            raw_to_natural = {int(label): idx for idx, label in enumerate(raw_unique)}
+            for pair in direct_neighbor_pairs:
+                if len(pair) != 2:
+                    continue
+                left = raw_to_natural.get(int(pair[0]))
+                right = raw_to_natural.get(int(pair[1]))
+                if left is None or right is None or left == right:
+                    continue
+                if left < seg_num and right < seg_num:
+                    seg_direct_neighbors[left, right] = 1
+                    seg_direct_neighbors[right, left] = 1
+            print(f'loaded explicit superpoint neighbors: {int(seg_direct_neighbors.sum() // 2)}')
+        else:
+            # 1. find neighboring points of each point
+            points_kdtree = scipy.spatial.KDTree(self.points)
+            points_dists, points_neighbors = points_kdtree.query(
+                self.points, k_graph, workers=n_workers)  # (n,k)
+            max_knn_distance = float(getattr(self.args, "max_knn_distance", 0.0) or 0.0)
+            points_neighbor_valid = None
+            if max_knn_distance > 0:
+                points_neighbor_valid = points_dists <= max_knn_distance
+            # 2. find directly neighboring superpoints of each superpoint with the help of point neighbors
+            # binary matrix, "True" indicating the two superpoints are neighboring
+            for id, members in seg_members.items():
+                neighbors = points_neighbors[members]
+                if points_neighbor_valid is not None:
+                    neighbors = neighbors[points_neighbor_valid[members]]
+                neighbor_seg_ids = seg_ids[neighbors] if neighbors.size else np.array([], dtype=int)
+                seg_direct_neighbors[id][neighbor_seg_ids] = 1
         seg_direct_neighbors[np.eye(seg_num, dtype=bool)] = 0  # exclude self
         # make neighboring matrix symmetric
         seg_direct_neighbors[seg_direct_neighbors.T] = 1
@@ -433,6 +476,8 @@ if __name__ == '__main__':
                         help='thres to merge small isolated regions in the postprocess')
     parser.add_argument('--max_neighbor_distance', type=int, default=2,
                         help='max logical distance for taking priimtive neighbors into account')
+    parser.add_argument('--max_knn_distance', type=float, default=0.0,
+                        help='optional Euclidean cutoff for point kNN edges; 0 keeps original SAMObject behavior')
     parser.add_argument('--similar_metric', type=str, default='2-norm',
                         help='metric to compute similarities betweeen primitives, see utils.py/calcu_similar() for detail')
     parser.add_argument('--thres_trunc', type=float, default=0.,

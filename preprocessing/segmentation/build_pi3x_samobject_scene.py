@@ -94,7 +94,7 @@ def _valid_pi3x_pixels(
     return valid
 
 
-def build_stable_surfels(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+def build_stable_surfels(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     frames = _iter_frame_paths(args.sequence_dir)
     if not frames:
         raise FileNotFoundError(f"No Pi3X frames found in {args.sequence_dir}")
@@ -172,6 +172,7 @@ def build_stable_surfels(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarr
     ).astype(np.float32)
     colors = np.clip(colors, 0.0, 1.0)
     support_views = np.array([len(accum[key].views) for key in kept_keys], dtype=np.int32)
+    voxel_keys = np.array(kept_keys, dtype=np.int64)
 
     stats = {
         "frames_total": len(frames),
@@ -179,8 +180,11 @@ def build_stable_surfels(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarr
         "raw_points": raw_points,
         "raw_voxels": len(accum),
         "stable_surfels": len(points),
+        "conf_thr": float(args.conf_thr),
+        "pixel_stride": int(args.pixel_stride),
         "voxel_size": float(args.voxel_size),
         "min_views_per_voxel": int(args.min_views_per_voxel),
+        "min_points_per_voxel": int(args.min_points_per_voxel),
         "support_views_mean_all_voxels": float(
             np.mean([len(item.views) for item in accum.values()])
         ),
@@ -190,7 +194,7 @@ def build_stable_surfels(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarr
         "support_views_mean_kept": float(support_views.mean()),
         "support_views_median_kept": float(np.median(support_views)),
     }
-    return points, colors, support_views, stats
+    return points, colors, support_views, voxel_keys, stats
 
 
 def estimate_normals(points: np.ndarray, *, k: int, chunk_size: int = 8192) -> np.ndarray:
@@ -337,11 +341,96 @@ def write_superpoint_json(out_json: str, labels: np.ndarray) -> None:
         json.dump({"segIndices": labels.astype(np.int64).tolist()}, f)
 
 
+def build_superpoint_adjacency(
+    points: np.ndarray,
+    colors: np.ndarray,
+    normals: np.ndarray,
+    superpoints: np.ndarray,
+    voxel_keys: np.ndarray,
+    args: argparse.Namespace,
+) -> tuple[list[tuple[int, int]], dict]:
+    """Build direct superpoint neighbors from local Pi3X surface connectivity.
+
+    SAMObject normally infers primitive neighbors with point kNN.  That works on
+    dense meshes, but Pi3X support geometry can contain holes and floaters.  This
+    sidecar graph gives SAMObject the physically local superpoint topology that
+    our surfel builder actually observed.
+    """
+
+    key_to_index = {tuple(int(v) for v in key): idx for idx, key in enumerate(voxel_keys)}
+    radius = float(args.adjacency_radius)
+    cos_thr = float(np.cos(np.deg2rad(float(args.adjacency_normal_angle_deg))))
+    color_thr = float(args.adjacency_color_distance_thr)
+    max_step = max(1, int(np.ceil(radius / float(args.voxel_size))))
+
+    pairs: set[tuple[int, int]] = set()
+    tested_edges = 0
+    offsets = [
+        (dx, dy, dz)
+        for dx in range(-max_step, max_step + 1)
+        for dy in range(-max_step, max_step + 1)
+        for dz in range(-max_step, max_step + 1)
+        if not (dx == 0 and dy == 0 and dz == 0)
+    ]
+
+    for idx, key in enumerate(voxel_keys):
+        label_i = int(superpoints[idx])
+        key_tuple = tuple(int(v) for v in key)
+        for offset in offsets:
+            nbr_idx = key_to_index.get(
+                (
+                    key_tuple[0] + offset[0],
+                    key_tuple[1] + offset[1],
+                    key_tuple[2] + offset[2],
+                )
+            )
+            if nbr_idx is None or nbr_idx <= idx:
+                continue
+            label_j = int(superpoints[nbr_idx])
+            if label_i == label_j:
+                continue
+            tested_edges += 1
+            if float(np.linalg.norm(points[idx] - points[nbr_idx])) > radius:
+                continue
+            if float(np.dot(normals[idx], normals[nbr_idx])) < cos_thr:
+                continue
+            if float(np.linalg.norm(colors[idx] - colors[nbr_idx])) > color_thr:
+                continue
+            pairs.add((min(label_i, label_j), max(label_i, label_j)))
+
+    superpoint_count = int(np.unique(superpoints).size)
+    degrees = np.zeros(superpoint_count, dtype=np.int32)
+    for left, right in pairs:
+        degrees[left] += 1
+        degrees[right] += 1
+
+    stats = {
+        "superpoint_neighbors": int(len(pairs)),
+        "adjacency_radius": radius,
+        "adjacency_normal_angle_deg": float(args.adjacency_normal_angle_deg),
+        "adjacency_color_distance_thr": color_thr,
+        "candidate_cross_superpoint_edges": int(tested_edges),
+        "degree_min": int(degrees.min()) if degrees.size else 0,
+        "degree_median": float(np.median(degrees)) if degrees.size else 0.0,
+        "degree_mean": float(degrees.mean()) if degrees.size else 0.0,
+        "degree_max": int(degrees.max()) if degrees.size else 0,
+        "isolated_superpoints": int((degrees == 0).sum()) if degrees.size else 0,
+    }
+    return sorted(pairs), stats
+
+
+def write_superpoint_neighbors_json(out_json: str, pairs: list[tuple[int, int]]) -> None:
+    os.makedirs(osp.dirname(out_json), exist_ok=True)
+    with open(out_json, "w") as f:
+        json.dump({"superpointNeighbors": [[int(a), int(b)] for a, b in pairs]}, f)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sequence-dir", required=True)
     parser.add_argument("--out-ply", required=True)
     parser.add_argument("--superpoint-json-out", required=True)
+    parser.add_argument("--superpoint-neighbors-json-out", default=None)
     parser.add_argument("--debug-json-out", default=None)
     parser.add_argument("--conf-thr", type=float, default=0.10)
     parser.add_argument("--pixel-stride", type=int, default=2)
@@ -354,26 +443,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--color-distance-thr", type=float, default=0.35)
     parser.add_argument("--min-superpoint-points", type=int, default=8)
     parser.add_argument("--max-superpoint-points", type=int, default=512)
+    parser.add_argument("--adjacency-radius", type=float, default=0.12)
+    parser.add_argument("--adjacency-normal-angle-deg", type=float, default=75.0)
+    parser.add_argument("--adjacency-color-distance-thr", type=float, default=0.70)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    points, colors, support_views, surface_stats = build_stable_surfels(args)
+    points, colors, support_views, voxel_keys, surface_stats = build_stable_surfels(args)
     normals = estimate_normals(points, k=int(args.normal_k))
     superpoints, superpoint_stats = build_surface_superpoints(
         points, colors, normals, support_views, args
     )
+    superpoint_neighbors, adjacency_stats = build_superpoint_adjacency(
+        points, colors, normals, superpoints, voxel_keys, args
+    )
 
     write_scene_ply(args.out_ply, points, colors)
     write_superpoint_json(args.superpoint_json_out, superpoints)
+    if args.superpoint_neighbors_json_out:
+        write_superpoint_neighbors_json(args.superpoint_neighbors_json_out, superpoint_neighbors)
 
     payload = {
         "surface": surface_stats,
         "superpoints": superpoint_stats,
+        "superpoint_adjacency": adjacency_stats,
         "outputs": {
             "ply": args.out_ply,
             "superpoint_json": args.superpoint_json_out,
+            "superpoint_neighbors_json": args.superpoint_neighbors_json_out,
         },
     }
     if args.debug_json_out:
@@ -384,6 +483,7 @@ def main() -> None:
     print(
         "[Pi3X SAMObject scene] "
         f"surfels={len(points)} superpoints={superpoint_stats['superpoints']} "
+        f"neighbors={adjacency_stats['superpoint_neighbors']} "
         f"support_views_median={surface_stats['support_views_median_kept']:.2f} "
         f"ply={args.out_ply}"
     )

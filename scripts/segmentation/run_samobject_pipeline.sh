@@ -57,6 +57,7 @@ GRAPH_VIEW_FREQ="${SAMOBJECT_VIEW_FREQ:-3}"
 GRAPH_THRES_MERGE="${SAMOBJECT_THRES_MERGE:-200}"
 GRAPH_THRES_CONNECT="${SAMOBJECT_THRES_CONNECT:-0.9,0.3,5}"
 GRAPH_MAX_NEIGHBOR_DISTANCE="${SAMOBJECT_MAX_NEIGHBOR_DISTANCE:-2}"
+GRAPH_MAX_KNN_DISTANCE="${SAMOBJECT_MAX_KNN_DISTANCE:-0}"
 GRAPH_SIMILAR_METRIC="${SAMOBJECT_SIMILAR_METRIC:-2-norm}"
 GRAPH_DIS_DECAY="${SAMOBJECT_DIS_DECAY:-0.5}"
 
@@ -192,6 +193,7 @@ if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" ]]; then
     --sequence-dir "$_PI3X_SEQ_DIR" \
     --out-ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \
     --superpoint-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+    --superpoint-neighbors-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.seg_neighbors.v2.json" \
     --debug-json-out "$PI3X_SCENE_DIR/pi3x_samobject_scene_stats.json" \
     --conf-thr "${SAMOBJECT_PI3X_CONF_THR:-0.10}" \
     --pixel-stride "${SAMOBJECT_PI3X_PIXEL_STRIDE:-2}" \
@@ -203,7 +205,17 @@ if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" ]]; then
     --normal-angle-deg "${SAMOBJECT_PI3X_SUPERPOINT_NORMAL_ANGLE_DEG:-45}" \
     --color-distance-thr "${SAMOBJECT_PI3X_SUPERPOINT_COLOR_DISTANCE_THR:-0.35}" \
     --min-superpoint-points "${SAMOBJECT_PI3X_MIN_SUPERPOINT_POINTS:-8}" \
-    --max-superpoint-points "${SAMOBJECT_PI3X_MAX_SUPERPOINT_POINTS:-512}"
+    --max-superpoint-points "${SAMOBJECT_PI3X_MAX_SUPERPOINT_POINTS:-512}" \
+    --adjacency-radius "${SAMOBJECT_PI3X_SUPERPOINT_ADJ_RADIUS:-0.12}" \
+    --adjacency-normal-angle-deg "${SAMOBJECT_PI3X_SUPERPOINT_ADJ_NORMAL_ANGLE_DEG:-75}" \
+    --adjacency-color-distance-thr "${SAMOBJECT_PI3X_SUPERPOINT_ADJ_COLOR_DISTANCE_THR:-0.70}"
+  if [[ "${SAMOBJECT_WRITE_SUPERPOINT_DEBUG_PLY:-1}" != "0" ]]; then
+    python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/visualize_samobject_superpoints.py" \
+      --ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \
+      --superpoint-json "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+      --out-ply "$PI3X_SCENE_DIR/labels.instances.superpoints_debug.ply" \
+      --seed "${SAMOBJECT_SUPERPOINT_DEBUG_SEED:-13}"
+  fi
   export SAMOBJECT_3RSCAN_SCENES_DIR="$SAMOBJECT_DATA_ROOT/scenes"
   rm -f "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/points.pts"
   rm -f "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/results/${SAMOBJECT_SCAN_ID}_points.npy"
@@ -279,6 +291,7 @@ GRAPH_ARGS=(
   --thres_merge "$GRAPH_THRES_MERGE"
   --thres_connect "$GRAPH_THRES_CONNECT"
   --max_neighbor_distance "$GRAPH_MAX_NEIGHBOR_DISTANCE"
+  --max_knn_distance "$GRAPH_MAX_KNN_DISTANCE"
   --similar_metric "$GRAPH_SIMILAR_METRIC"
   --dis_decay "$GRAPH_DIS_DECAY"
 )
