@@ -289,7 +289,15 @@ if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" && "${SAMOBJECT_REFIN
     --min-signature-fraction "${SAMOBJECT_MASK_AWARE_MIN_SIGNATURE_FRACTION:-0.12}" \
     --ambiguous-split-fraction "${SAMOBJECT_MASK_AWARE_AMBIGUOUS_SPLIT_FRACTION:-0.25}" \
     --adjacency-radius "${SAMOBJECT_PI3X_SUPERPOINT_ADJ_RADIUS:-0.12}" \
-    --adjacency-k "${SAMOBJECT_MASK_AWARE_ADJ_K:-24}"
+    --adjacency-k "${SAMOBJECT_MASK_AWARE_ADJ_K:-24}" \
+    --edge-min-signature-points "${SAMOBJECT_MASK_AWARE_EDGE_MIN_SIGNATURE_POINTS:-6}" \
+    --edge-min-positive-ratio "${SAMOBJECT_MASK_AWARE_EDGE_MIN_POSITIVE_RATIO:-0.60}" \
+    --edge-min-total-fraction "${SAMOBJECT_MASK_AWARE_EDGE_MIN_TOTAL_FRACTION:-0.10}" \
+    --edge-weak-conflict-min-points "${SAMOBJECT_MASK_AWARE_EDGE_WEAK_CONFLICT_MIN_POINTS:-6}" \
+    --edge-weak-conflict-positive-ratio "${SAMOBJECT_MASK_AWARE_EDGE_WEAK_CONFLICT_POSITIVE_RATIO:-0.60}" \
+    --prune-signature-conflicts "${SAMOBJECT_MASK_AWARE_PRUNE_SIGNATURE_CONFLICTS:-0}" \
+    --prune-ambiguous-edges "${SAMOBJECT_MASK_AWARE_PRUNE_AMBIGUOUS_EDGES:-0}" \
+    --ambiguous-edge-keep-radius "${SAMOBJECT_MASK_AWARE_AMBIGUOUS_EDGE_KEEP_RADIUS:-0.07}"
   if [[ "${SAMOBJECT_WRITE_SUPERPOINT_DEBUG_PLY:-1}" != "0" ]]; then
     python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/visualize_samobject_superpoints.py" \
       --ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \

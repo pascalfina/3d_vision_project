@@ -94,14 +94,26 @@ def collect_point_mask_evidence(
         valid_z = np.isfinite(points_cam).all(axis=1) & (z > 0.0)
         color_pix_h = (color_intrinsic @ points_cam.T).T
         depth_pix_h = (depth_intrinsic @ points_cam.T).T
-        color_uv = np.zeros((len(points_world), 2), dtype=np.int32)
-        depth_uv = np.zeros((len(points_world), 2), dtype=np.int32)
-        color_uv[valid_z] = np.rint(
-            color_pix_h[valid_z, :2] / np.clip(color_pix_h[valid_z, 2:3], 1e-8, np.inf)
-        ).astype(np.int32)
-        depth_uv[valid_z] = np.rint(
-            depth_pix_h[valid_z, :2] / np.clip(depth_pix_h[valid_z, 2:3], 1e-8, np.inf)
-        ).astype(np.int32)
+        color_uv = np.full((len(points_world), 2), np.nan, dtype=np.float32)
+        depth_uv = np.full((len(points_world), 2), np.nan, dtype=np.float32)
+        valid_color = (
+            valid_z
+            & np.isfinite(color_pix_h).all(axis=1)
+            & (np.abs(color_pix_h[:, 2]) > 1e-8)
+        )
+        valid_depth = (
+            valid_z
+            & np.isfinite(depth_pix_h).all(axis=1)
+            & (np.abs(depth_pix_h[:, 2]) > 1e-8)
+        )
+        color_uv[valid_color] = np.rint(color_pix_h[valid_color, :2] / color_pix_h[valid_color, 2:3])
+        depth_uv[valid_depth] = np.rint(depth_pix_h[valid_depth, :2] / depth_pix_h[valid_depth, 2:3])
+        valid_projected = (
+            valid_color
+            & valid_depth
+            & np.isfinite(color_uv).all(axis=1)
+            & np.isfinite(depth_uv).all(axis=1)
+        )
 
         mask = load_mask(osp.join(mask_dir, f"maskraw_{frame_id}.png"))
         depth = load_depth(osp.join(posed_images_dir, f"{frame_id}.png"))
@@ -110,7 +122,7 @@ def collect_point_mask_evidence(
         cu, cv = color_uv[:, 0], color_uv[:, 1]
         du, dv = depth_uv[:, 0], depth_uv[:, 1]
         bounded = (
-            valid_z
+            valid_projected
             & (cu >= 0)
             & (cu < mw)
             & (cv >= 0)
@@ -124,14 +136,18 @@ def collect_point_mask_evidence(
             continue
 
         bounded_idx = np.flatnonzero(bounded)
-        captured_depth = depth[dv[bounded_idx], du[bounded_idx]]
+        cu_idx = cu[bounded_idx].astype(np.int32)
+        cv_idx = cv[bounded_idx].astype(np.int32)
+        du_idx = du[bounded_idx].astype(np.int32)
+        dv_idx = dv[bounded_idx].astype(np.int32)
+        captured_depth = depth[dv_idx, du_idx]
         visible = np.isclose(z[bounded_idx], captured_depth, rtol=float(vis_rtol))
         visible &= captured_depth > 0.0
         if not np.any(visible):
             continue
 
         visible_idx = bounded_idx[visible]
-        labels = mask[cv[visible_idx], cu[visible_idx]]
+        labels = mask[cv_idx[visible], cu_idx[visible]]
         seen_counts[visible_idx] += 1
         visible_total += int(visible_idx.size)
         valid_label = labels > 0
@@ -299,17 +315,115 @@ def split_superpoints_by_signature(
     return refined.astype(np.int32), stats
 
 
+def summarize_superpoint_signatures(
+    labels: np.ndarray,
+    point_signatures: np.ndarray,
+    *,
+    min_signature_points: int,
+    min_positive_ratio: float,
+    min_total_fraction: float,
+) -> tuple[dict[str, np.ndarray], dict]:
+    sp_count = int(labels.max()) + 1
+    dominant_label = np.zeros(sp_count, dtype=np.int32)
+    dominant_count = np.zeros(sp_count, dtype=np.int32)
+    positive_count = np.zeros(sp_count, dtype=np.int32)
+    member_count = np.zeros(sp_count, dtype=np.int32)
+    dominant_positive_ratio = np.zeros(sp_count, dtype=np.float32)
+    dominant_total_fraction = np.zeros(sp_count, dtype=np.float32)
+
+    for sp_id in range(sp_count):
+        members = np.flatnonzero(labels == sp_id)
+        member_count[sp_id] = int(members.size)
+        if members.size == 0:
+            continue
+        positives = point_signatures[members]
+        positives = positives[positives > 0]
+        positive_count[sp_id] = int(positives.size)
+        if positives.size == 0:
+            continue
+        values, counts = np.unique(positives, return_counts=True)
+        best = int(np.argmax(counts))
+        dominant_label[sp_id] = int(values[best])
+        dominant_count[sp_id] = int(counts[best])
+        dominant_positive_ratio[sp_id] = float(counts[best]) / float(positives.size)
+        dominant_total_fraction[sp_id] = float(counts[best]) / float(members.size)
+
+    strong = (
+        (dominant_label > 0)
+        & (dominant_count >= int(min_signature_points))
+        & (dominant_positive_ratio >= float(min_positive_ratio))
+        & (dominant_total_fraction >= float(min_total_fraction))
+    )
+    evidence_fraction = np.zeros(sp_count, dtype=np.float32)
+    nonempty = member_count > 0
+    evidence_fraction[nonempty] = positive_count[nonempty] / member_count[nonempty]
+    payload = {
+        "dominant_label": dominant_label,
+        "dominant_count": dominant_count,
+        "positive_count": positive_count,
+        "member_count": member_count,
+        "dominant_positive_ratio": dominant_positive_ratio,
+        "dominant_total_fraction": dominant_total_fraction,
+        "evidence_fraction": evidence_fraction,
+        "strong": strong,
+    }
+    stats = {
+        "strong_signature_superpoints": int(strong.sum()),
+        "weak_or_ambiguous_superpoints": int((~strong).sum()),
+        "edge_min_signature_points": int(min_signature_points),
+        "edge_min_positive_ratio": float(min_positive_ratio),
+        "edge_min_total_fraction": float(min_total_fraction),
+        "evidence_fraction_quantiles": np.percentile(
+            evidence_fraction, [0, 10, 25, 50, 75, 90, 100]
+        ).round(3).tolist(),
+        "dominant_positive_ratio_quantiles": np.percentile(
+            dominant_positive_ratio[dominant_label > 0],
+            [0, 10, 25, 50, 75, 90, 100],
+        ).round(3).tolist()
+        if np.any(dominant_label > 0)
+        else [],
+        "dominant_total_fraction_quantiles": np.percentile(
+            dominant_total_fraction[dominant_label > 0],
+            [0, 10, 25, 50, 75, 90, 100],
+        ).round(3).tolist()
+        if np.any(dominant_label > 0)
+        else [],
+    }
+    return payload, stats
+
+
 def build_adjacency(
     points: np.ndarray,
     labels: np.ndarray,
+    point_signatures: np.ndarray,
     *,
     radius: float,
     k: int,
+    edge_min_signature_points: int,
+    edge_min_positive_ratio: float,
+    edge_min_total_fraction: float,
+    edge_weak_conflict_min_points: int,
+    edge_weak_conflict_positive_ratio: float,
+    prune_signature_conflicts: bool,
+    prune_ambiguous_edges: bool,
+    ambiguous_edge_keep_radius: float,
 ) -> tuple[list[tuple[int, int]], dict]:
+    signature_summary, signature_stats = summarize_superpoint_signatures(
+        labels,
+        point_signatures,
+        min_signature_points=edge_min_signature_points,
+        min_positive_ratio=edge_min_positive_ratio,
+        min_total_fraction=edge_min_total_fraction,
+    )
+    dominant_label = signature_summary["dominant_label"]
+    dominant_count = signature_summary["dominant_count"]
+    dominant_positive_ratio = signature_summary["dominant_positive_ratio"]
+    strong = signature_summary["strong"]
+
     tree = cKDTree(points)
     k = min(max(2, int(k)), len(points))
     dists, neighbors = tree.query(points, k=k, distance_upper_bound=float(radius), workers=-1)
-    pairs: set[tuple[int, int]] = set()
+    candidate_pairs: dict[tuple[int, int], float] = {}
     for idx in range(len(points)):
         label_i = int(labels[idx])
         for dist, nbr in zip(np.atleast_1d(dists[idx]), np.atleast_1d(neighbors[idx])):
@@ -319,21 +433,75 @@ def build_adjacency(
             label_j = int(labels[nbr])
             if label_i == label_j:
                 continue
-            pairs.add((min(label_i, label_j), max(label_i, label_j)))
+            pair = (min(label_i, label_j), max(label_i, label_j))
+            prev = candidate_pairs.get(pair)
+            if prev is None or float(dist) < prev:
+                candidate_pairs[pair] = float(dist)
+
+    pairs: set[tuple[int, int]] = set()
+    pruned_strong_conflict = 0
+    pruned_weak_conflict = 0
+    pruned_ambiguous = 0
+    keep_ambiguous_radius = float(ambiguous_edge_keep_radius)
+
+    for pair, min_dist in candidate_pairs.items():
+        left, right = pair
+        left_strong = bool(strong[left])
+        right_strong = bool(strong[right])
+        left_label = int(dominant_label[left])
+        right_label = int(dominant_label[right])
+
+        if bool(prune_signature_conflicts) and left_strong and right_strong and left_label != right_label:
+            pruned_strong_conflict += 1
+            continue
+
+        if bool(prune_signature_conflicts) and left_strong != right_strong:
+            strong_id = left if left_strong else right
+            weak_id = right if left_strong else left
+            if (
+                int(dominant_label[weak_id]) > 0
+                and int(dominant_label[weak_id]) != int(dominant_label[strong_id])
+                and int(dominant_count[weak_id]) >= int(edge_weak_conflict_min_points)
+                and float(dominant_positive_ratio[weak_id])
+                >= float(edge_weak_conflict_positive_ratio)
+            ):
+                pruned_weak_conflict += 1
+                continue
+
+        if (
+            not left_strong
+            and not right_strong
+            and bool(prune_ambiguous_edges)
+            and (keep_ambiguous_radius <= 0.0 or min_dist > keep_ambiguous_radius)
+        ):
+            pruned_ambiguous += 1
+            continue
+
+        pairs.add(pair)
 
     degrees = np.zeros(int(labels.max()) + 1, dtype=np.int32)
     for left, right in pairs:
         degrees[left] += 1
         degrees[right] += 1
     stats = {
+        "candidate_superpoint_neighbors": int(len(candidate_pairs)),
         "superpoint_neighbors": int(len(pairs)),
         "adjacency_radius": float(radius),
         "adjacency_k": int(k),
+        "pruned_strong_signature_conflict": int(pruned_strong_conflict),
+        "pruned_weak_signature_conflict": int(pruned_weak_conflict),
+        "pruned_ambiguous_edges": int(pruned_ambiguous),
+        "prune_signature_conflicts": bool(prune_signature_conflicts),
+        "prune_ambiguous_edges": bool(prune_ambiguous_edges),
+        "ambiguous_edge_keep_radius": float(ambiguous_edge_keep_radius),
+        "edge_weak_conflict_min_points": int(edge_weak_conflict_min_points),
+        "edge_weak_conflict_positive_ratio": float(edge_weak_conflict_positive_ratio),
         "degree_min": int(degrees.min()) if degrees.size else 0,
         "degree_median": float(np.median(degrees)) if degrees.size else 0.0,
         "degree_mean": float(degrees.mean()) if degrees.size else 0.0,
         "degree_max": int(degrees.max()) if degrees.size else 0,
         "isolated_superpoints": int((degrees == 0).sum()) if degrees.size else 0,
+        "signature_summary": signature_stats,
     }
     return sorted(pairs), stats
 
@@ -368,6 +536,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ambiguous-split-fraction", type=float, default=0.25)
     parser.add_argument("--adjacency-radius", type=float, default=0.12)
     parser.add_argument("--adjacency-k", type=int, default=24)
+    parser.add_argument("--edge-min-signature-points", type=int, default=6)
+    parser.add_argument("--edge-min-positive-ratio", type=float, default=0.60)
+    parser.add_argument("--edge-min-total-fraction", type=float, default=0.10)
+    parser.add_argument("--edge-weak-conflict-min-points", type=int, default=6)
+    parser.add_argument("--edge-weak-conflict-positive-ratio", type=float, default=0.60)
+    parser.add_argument("--prune-signature-conflicts", type=int, default=0)
+    parser.add_argument("--prune-ambiguous-edges", type=int, default=0)
+    parser.add_argument("--ambiguous-edge-keep-radius", type=float, default=0.07)
     return parser.parse_args()
 
 
@@ -404,8 +580,17 @@ def main() -> None:
     neighbor_pairs, adjacency_stats = build_adjacency(
         points,
         refined_superpoints,
+        signatures,
         radius=float(args.adjacency_radius),
         k=int(args.adjacency_k),
+        edge_min_signature_points=int(args.edge_min_signature_points),
+        edge_min_positive_ratio=float(args.edge_min_positive_ratio),
+        edge_min_total_fraction=float(args.edge_min_total_fraction),
+        edge_weak_conflict_min_points=int(args.edge_weak_conflict_min_points),
+        edge_weak_conflict_positive_ratio=float(args.edge_weak_conflict_positive_ratio),
+        prune_signature_conflicts=bool(args.prune_signature_conflicts),
+        prune_ambiguous_edges=bool(args.prune_ambiguous_edges),
+        ambiguous_edge_keep_radius=float(args.ambiguous_edge_keep_radius),
     )
 
     write_superpoint_json(args.superpoint_json_out, refined_superpoints)
@@ -433,7 +618,8 @@ def main() -> None:
         f"base={split_stats['base_superpoints']} refined={split_stats['refined_superpoints']} "
         f"split_base={split_stats['split_base_superpoints']} "
         f"signature_points={signature_stats['points_with_mask_signature']} "
-        f"neighbors={adjacency_stats['superpoint_neighbors']}"
+        f"neighbors={adjacency_stats['superpoint_neighbors']} "
+        f"pruned={adjacency_stats['candidate_superpoint_neighbors'] - adjacency_stats['superpoint_neighbors']}"
     )
 
 
