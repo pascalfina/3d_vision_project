@@ -245,6 +245,19 @@ if [[ "${SAMOBJECT_REFRESH_2D_MASKS:-1}" != "0" && -d "$MASK2D_SCENE_DIR" ]]; th
 fi
 python mask_convert.py
 
+_FILTER_MASKS_DEFAULT=0
+if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" ]]; then
+  _FILTER_MASKS_DEFAULT=1
+fi
+if [[ "${SAMOBJECT_FILTER_GRAPH_MASKS:-$_FILTER_MASKS_DEFAULT}" != "0" ]]; then
+  echo "========== STEP 2b: Filter scene-level masks for SAMObject graph =========="
+  python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/filter_samobject_masks_for_graph.py" \
+    --mask-dir "$MASK2D_SCENE_DIR" \
+    --debug-json-out "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/results/${SAMOBJECT_SCAN_ID}_mask_filter_stats.json" \
+    --max-area-ratio "${SAMOBJECT_MASK_MAX_AREA_RATIO:-0.45}" \
+    --max-positive-fraction "${SAMOBJECT_MASK_MAX_POSITIVE_FRACTION:-0.85}"
+fi
+
 # ── STEP 3: Graph clustering 3D ──────────────────────────────────────────────
 echo "========== STEP 3: Graph Clustering 3D =========="
 cd "$SAMOBJECT_DIR/graphclustering"

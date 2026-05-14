@@ -179,6 +179,9 @@ def _update_single_objects_json(objects_path: str, scan_id: str, object_ids: np.
     data["scans"] = [s for s in data["scans"] if s.get("scan") != scan_id]
     data["scans"].append(new_scan_entry)
 
+    if osp.islink(objects_path):
+        os.unlink(objects_path)
+
     with open(objects_path, "w") as f:
         json.dump(data, f, indent=2)
 
