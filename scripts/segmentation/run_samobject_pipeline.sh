@@ -270,6 +270,35 @@ if [[ "${SAMOBJECT_FILTER_GRAPH_MASKS:-$_FILTER_MASKS_DEFAULT}" != "0" ]]; then
     --max-positive-fraction "${SAMOBJECT_MASK_MAX_POSITIVE_FRACTION:-0.85}"
 fi
 
+if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" && "${SAMOBJECT_REFINE_SUPERPOINTS_WITH_MASKS:-1}" != "0" ]]; then
+  echo "========== STEP 2c: Refine Pi3X superpoints with SAMObject masks =========="
+  PI3X_SCENE_DIR="$SAMOBJECT_DATA_ROOT/scenes/$SAMOBJECT_SCAN_ID"
+  python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/refine_pi3x_superpoints_with_sam_masks.py" \
+    --ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \
+    --posed-images-dir "$SAMOBJECT_DATA_ROOT/posed_images/$SAMOBJECT_SCAN_ID" \
+    --mask-dir "$MASK2D_SCENE_DIR" \
+    --superpoint-json-in "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+    --superpoint-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+    --superpoint-neighbors-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.seg_neighbors.v2.json" \
+    --debug-json-out "$PI3X_SCENE_DIR/pi3x_mask_aware_superpoints_stats.json" \
+    --view-stride "${SAMOBJECT_MASK_AWARE_VIEW_STRIDE:-1}" \
+    --vis-rtol "${SAMOBJECT_MASK_AWARE_VIS_RTOL:-0.15}" \
+    --min-observations "${SAMOBJECT_MASK_AWARE_MIN_OBSERVATIONS:-2}" \
+    --min-dominant-ratio "${SAMOBJECT_MASK_AWARE_DOMINANT_RATIO:-0.45}" \
+    --min-split-points "${SAMOBJECT_MASK_AWARE_MIN_SPLIT_POINTS:-6}" \
+    --min-signature-fraction "${SAMOBJECT_MASK_AWARE_MIN_SIGNATURE_FRACTION:-0.12}" \
+    --ambiguous-split-fraction "${SAMOBJECT_MASK_AWARE_AMBIGUOUS_SPLIT_FRACTION:-0.25}" \
+    --adjacency-radius "${SAMOBJECT_PI3X_SUPERPOINT_ADJ_RADIUS:-0.12}" \
+    --adjacency-k "${SAMOBJECT_MASK_AWARE_ADJ_K:-24}"
+  if [[ "${SAMOBJECT_WRITE_SUPERPOINT_DEBUG_PLY:-1}" != "0" ]]; then
+    python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/visualize_samobject_superpoints.py" \
+      --ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \
+      --superpoint-json "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+      --out-ply "$PI3X_SCENE_DIR/labels.instances.superpoints_debug.ply" \
+      --seed "${SAMOBJECT_SUPERPOINT_DEBUG_SEED:-13}"
+  fi
+fi
+
 # ── STEP 3: Graph clustering 3D ──────────────────────────────────────────────
 echo "========== STEP 3: Graph Clustering 3D =========="
 cd "$SAMOBJECT_DIR/graphclustering"
