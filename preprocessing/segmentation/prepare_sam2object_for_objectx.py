@@ -35,6 +35,21 @@ from PIL import Image
 from plyfile import PlyData, PlyElement
 from scipy.spatial import cKDTree
 
+try:
+    from preprocessing.segmentation.refine_pi3x_superpoints_with_sam_masks import (
+        collect_point_mask_evidence,
+        dominant_point_signatures,
+    )
+except ImportError:  # pragma: no cover - direct script execution fallback.
+    try:
+        from refine_pi3x_superpoints_with_sam_masks import (
+            collect_point_mask_evidence,
+            dominant_point_signatures,
+        )
+    except ImportError:
+        collect_point_mask_evidence = None
+        dominant_point_signatures = None
+
 
 def load_points(path: str) -> np.ndarray:
     if path.endswith(".npy"):
@@ -726,6 +741,190 @@ def clean_small_object_components(
     return cleaned, stats
 
 
+def clean_mask_unsupported_tails(
+    points: np.ndarray,
+    object_ids: np.ndarray,
+    *,
+    sam_root: str,
+    scan_id: str,
+    view_stride: int,
+    vis_rtol: float,
+    min_observations: int,
+    dominant_ratio: float,
+    core_radius: float,
+    core_min_points: int,
+    core_min_fraction: float,
+    signature_keep_fraction: float,
+    max_signatures: int,
+    max_removed_fraction: float,
+    large_core_min_points: int,
+    large_core_max_removed_fraction: float,
+) -> tuple[np.ndarray, dict]:
+    """
+    Remove long, weakly-supported object tails without shrinking the object core.
+
+    SAMObject's graph can occasionally attach Pi3X wall/slab surfels to a good
+    object cluster.  Detached islands are handled by component cleanup; this
+    pass targets attached tails by anchoring each object to points that are
+    repeatedly seen inside consistent SAMObject 2D masks.  Ambiguous points are
+    kept when they are spatially close to that supported core.
+    """
+    if collect_point_mask_evidence is None or dominant_point_signatures is None:
+        raise RuntimeError(
+            "Mask-tail cleanup requires refine_pi3x_superpoints_with_sam_masks.py imports."
+        )
+
+    posed_images_dir = osp.join(sam_root, "posed_images", scan_id)
+    mask_dir = osp.join(sam_root, "2D_masks", scan_id, "semantic-sam")
+
+    point_labels, _seen_counts, evidence_stats = collect_point_mask_evidence(
+        points.astype(np.float32, copy=False),
+        posed_images_dir=posed_images_dir,
+        mask_dir=mask_dir,
+        view_stride=int(view_stride),
+        vis_rtol=float(vis_rtol),
+    )
+    signatures, _dominant_counts, nonzero_counts, signature_stats = dominant_point_signatures(
+        point_labels,
+        min_observations=int(min_observations),
+        min_dominant_ratio=float(dominant_ratio),
+    )
+
+    cleaned = object_ids.astype(np.int32, copy=True)
+    object_stats = []
+    total_removed = 0
+    processed = 0
+    skipped_insufficient_core = 0
+    skipped_by_safety = 0
+
+    for obj_id in sorted(int(i) for i in np.unique(object_ids) if int(i) > 0):
+        indices = np.flatnonzero(cleaned == obj_id)
+        if indices.size < max(2, int(core_min_points)):
+            continue
+
+        obj_signatures = signatures[indices]
+        positive = obj_signatures[obj_signatures > 0]
+        if positive.size == 0:
+            skipped_insufficient_core += 1
+            continue
+
+        values, counts = np.unique(positive, return_counts=True)
+        order = np.argsort(counts)[::-1]
+        values = values[order]
+        counts = counts[order]
+
+        keep_labels = []
+        cumulative = 0
+        target = max(1, int(np.ceil(float(signature_keep_fraction) * positive.size)))
+        for value, count in zip(values, counts):
+            if len(keep_labels) >= max(1, int(max_signatures)):
+                break
+            keep_labels.append(int(value))
+            cumulative += int(count)
+            if cumulative >= target:
+                break
+
+        core_mask = np.isin(obj_signatures, np.asarray(keep_labels, dtype=np.int32))
+        min_core = max(
+            int(core_min_points),
+            int(np.ceil(float(core_min_fraction) * float(indices.size))),
+        )
+        core_count = int(core_mask.sum())
+        if core_count < min_core:
+            skipped_insufficient_core += 1
+            object_stats.append(
+                {
+                    "object_id": obj_id,
+                    "points": int(indices.size),
+                    "positive_signature_points": int(positive.size),
+                    "core_points": core_count,
+                    "min_core_points": int(min_core),
+                    "skipped_insufficient_core": True,
+                }
+            )
+            continue
+
+        core_points = points[indices[core_mask]]
+        tree = cKDTree(core_points)
+        distances, _ = tree.query(points[indices], k=1)
+        keep_mask = core_mask | (distances <= float(core_radius))
+        remove_count = int((~keep_mask).sum())
+        if remove_count == 0:
+            continue
+
+        removed_fraction = remove_count / float(indices.size)
+        allowed_removed_fraction = float(max_removed_fraction)
+        if core_count >= int(large_core_min_points):
+            allowed_removed_fraction = max(
+                allowed_removed_fraction,
+                float(large_core_max_removed_fraction),
+            )
+
+        if removed_fraction > allowed_removed_fraction:
+            skipped_by_safety += 1
+            object_stats.append(
+                {
+                    "object_id": obj_id,
+                    "points": int(indices.size),
+                    "positive_signature_points": int(positive.size),
+                    "core_points": core_count,
+                    "kept_signature_labels": keep_labels,
+                    "candidate_removed_points": remove_count,
+                    "candidate_removed_fraction": round(removed_fraction, 4),
+                    "allowed_removed_fraction": round(allowed_removed_fraction, 4),
+                    "skipped_by_safety": True,
+                }
+            )
+            continue
+
+        cleaned[indices[~keep_mask]] = 0
+        total_removed += remove_count
+        processed += 1
+        object_stats.append(
+            {
+                "object_id": obj_id,
+                "points": int(indices.size),
+                "positive_signature_points": int(positive.size),
+                "nonzero_observation_points": int((nonzero_counts[indices] > 0).sum()),
+                "core_points": core_count,
+                "kept_signature_labels": keep_labels,
+                "removed_points": remove_count,
+                "removed_fraction": round(removed_fraction, 4),
+                "allowed_removed_fraction": round(allowed_removed_fraction, 4),
+                "skipped_by_safety": False,
+            }
+        )
+
+    stats = {
+        "enabled": True,
+        "view_stride": int(view_stride),
+        "vis_rtol": float(vis_rtol),
+        "min_observations": int(min_observations),
+        "dominant_ratio": float(dominant_ratio),
+        "core_radius": float(core_radius),
+        "core_min_points": int(core_min_points),
+        "core_min_fraction": float(core_min_fraction),
+        "signature_keep_fraction": float(signature_keep_fraction),
+        "max_signatures": int(max_signatures),
+        "max_removed_fraction": float(max_removed_fraction),
+        "large_core_min_points": int(large_core_min_points),
+        "large_core_max_removed_fraction": float(large_core_max_removed_fraction),
+        "objects_changed": int(processed),
+        "objects_skipped_insufficient_core": int(skipped_insufficient_core),
+        "objects_skipped_by_safety": int(skipped_by_safety),
+        "removed_points": int(total_removed),
+        "evidence": evidence_stats,
+        "point_signatures": signature_stats,
+        "object_stats": object_stats,
+    }
+    print(
+        "[INFO] Mask-tail cleanup: "
+        f"removed_points={total_removed} objects_changed={processed} "
+        f"skipped_core={skipped_insufficient_core} skipped_safety={skipped_by_safety}"
+    )
+    return cleaned, stats
+
+
 def create_pi3x_graph_segmented_scene(
     sam_root: str,
     scan_id: str,
@@ -740,6 +939,19 @@ def create_pi3x_graph_segmented_scene(
     component_min_points: int = 24,
     component_min_fraction: float = 0.03,
     component_max_removed_fraction: float = 0.20,
+    clean_mask_tails: bool = False,
+    mask_tail_view_stride: int = 1,
+    mask_tail_vis_rtol: float = 0.15,
+    mask_tail_min_observations: int = 2,
+    mask_tail_dominant_ratio: float = 0.45,
+    mask_tail_core_radius: float = 0.20,
+    mask_tail_core_min_points: int = 32,
+    mask_tail_core_min_fraction: float = 0.05,
+    mask_tail_signature_keep_fraction: float = 0.75,
+    mask_tail_max_signatures: int = 8,
+    mask_tail_max_removed_fraction: float = 0.25,
+    mask_tail_large_core_min_points: int = 512,
+    mask_tail_large_core_max_removed_fraction: float = 0.50,
 ) -> np.ndarray:
     """
     Export the actual SAMObject graph result on the Pi3X support surface.
@@ -766,6 +978,29 @@ def create_pi3x_graph_segmented_scene(
         os.makedirs(osp.dirname(stats_path), exist_ok=True)
         with open(stats_path, "w") as f:
             json.dump(cleanup_stats, f, indent=2)
+    if clean_mask_tails:
+        export_ids, tail_stats = clean_mask_unsupported_tails(
+            sam_points,
+            export_ids,
+            sam_root=sam_root,
+            scan_id=scan_id,
+            view_stride=mask_tail_view_stride,
+            vis_rtol=mask_tail_vis_rtol,
+            min_observations=mask_tail_min_observations,
+            dominant_ratio=mask_tail_dominant_ratio,
+            core_radius=mask_tail_core_radius,
+            core_min_points=mask_tail_core_min_points,
+            core_min_fraction=mask_tail_core_min_fraction,
+            signature_keep_fraction=mask_tail_signature_keep_fraction,
+            max_signatures=mask_tail_max_signatures,
+            max_removed_fraction=mask_tail_max_removed_fraction,
+            large_core_min_points=mask_tail_large_core_min_points,
+            large_core_max_removed_fraction=mask_tail_large_core_max_removed_fraction,
+        )
+        stats_path = osp.join(out_root_dir, "scenes", scan_id, "samobject_export_mask_tail_stats.json")
+        os.makedirs(osp.dirname(stats_path), exist_ok=True)
+        with open(stats_path, "w") as f:
+            json.dump(tail_stats, f, indent=2)
 
     out_ply = osp.join(out_root_dir, "scenes", scan_id, "labels.instances.annotated.v2.ply")
     write_annotated_ply(
@@ -865,6 +1100,19 @@ def main():
     parser.add_argument("--component_min_points", type=int, default=24)
     parser.add_argument("--component_min_fraction", type=float, default=0.03)
     parser.add_argument("--component_max_removed_fraction", type=float, default=0.20)
+    parser.add_argument("--clean_mask_tails", action="store_true")
+    parser.add_argument("--mask_tail_view_stride", type=int, default=1)
+    parser.add_argument("--mask_tail_vis_rtol", type=float, default=0.15)
+    parser.add_argument("--mask_tail_min_observations", type=int, default=2)
+    parser.add_argument("--mask_tail_dominant_ratio", type=float, default=0.45)
+    parser.add_argument("--mask_tail_core_radius", type=float, default=0.20)
+    parser.add_argument("--mask_tail_core_min_points", type=int, default=32)
+    parser.add_argument("--mask_tail_core_min_fraction", type=float, default=0.05)
+    parser.add_argument("--mask_tail_signature_keep_fraction", type=float, default=0.75)
+    parser.add_argument("--mask_tail_max_signatures", type=int, default=8)
+    parser.add_argument("--mask_tail_max_removed_fraction", type=float, default=0.25)
+    parser.add_argument("--mask_tail_large_core_min_points", type=int, default=512)
+    parser.add_argument("--mask_tail_large_core_max_removed_fraction", type=float, default=0.50)
 
     args = parser.parse_args()
 
@@ -904,6 +1152,19 @@ def main():
             component_min_points=args.component_min_points,
             component_min_fraction=args.component_min_fraction,
             component_max_removed_fraction=args.component_max_removed_fraction,
+            clean_mask_tails=args.clean_mask_tails,
+            mask_tail_view_stride=args.mask_tail_view_stride,
+            mask_tail_vis_rtol=args.mask_tail_vis_rtol,
+            mask_tail_min_observations=args.mask_tail_min_observations,
+            mask_tail_dominant_ratio=args.mask_tail_dominant_ratio,
+            mask_tail_core_radius=args.mask_tail_core_radius,
+            mask_tail_core_min_points=args.mask_tail_core_min_points,
+            mask_tail_core_min_fraction=args.mask_tail_core_min_fraction,
+            mask_tail_signature_keep_fraction=args.mask_tail_signature_keep_fraction,
+            mask_tail_max_signatures=args.mask_tail_max_signatures,
+            mask_tail_max_removed_fraction=args.mask_tail_max_removed_fraction,
+            mask_tail_large_core_min_points=args.mask_tail_large_core_min_points,
+            mask_tail_large_core_max_removed_fraction=args.mask_tail_large_core_max_removed_fraction,
         )
         update_objects_json(
             root_dir=out_root_dir,

@@ -370,6 +370,23 @@ if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" ]]; then
       --component_max_removed_fraction "${SAMOBJECT_EXPORT_COMPONENT_MAX_REMOVED_FRACTION:-0.20}"
     )
   fi
+  if [[ "${SAMOBJECT_EXPORT_CLEAN_MASK_TAILS:-0}" != "0" ]]; then
+    PREPARE_ARGS+=(
+      --clean_mask_tails
+      --mask_tail_view_stride "${SAMOBJECT_EXPORT_MASK_TAIL_VIEW_STRIDE:-1}"
+      --mask_tail_vis_rtol "${SAMOBJECT_EXPORT_MASK_TAIL_VIS_RTOL:-0.15}"
+      --mask_tail_min_observations "${SAMOBJECT_EXPORT_MASK_TAIL_MIN_OBSERVATIONS:-2}"
+      --mask_tail_dominant_ratio "${SAMOBJECT_EXPORT_MASK_TAIL_DOMINANT_RATIO:-0.45}"
+      --mask_tail_core_radius "${SAMOBJECT_EXPORT_MASK_TAIL_CORE_RADIUS:-0.20}"
+      --mask_tail_core_min_points "${SAMOBJECT_EXPORT_MASK_TAIL_CORE_MIN_POINTS:-32}"
+      --mask_tail_core_min_fraction "${SAMOBJECT_EXPORT_MASK_TAIL_CORE_MIN_FRACTION:-0.05}"
+      --mask_tail_signature_keep_fraction "${SAMOBJECT_EXPORT_MASK_TAIL_SIGNATURE_KEEP_FRACTION:-0.75}"
+      --mask_tail_max_signatures "${SAMOBJECT_EXPORT_MASK_TAIL_MAX_SIGNATURES:-8}"
+      --mask_tail_max_removed_fraction "${SAMOBJECT_EXPORT_MASK_TAIL_MAX_REMOVED_FRACTION:-0.25}"
+      --mask_tail_large_core_min_points "${SAMOBJECT_EXPORT_MASK_TAIL_LARGE_CORE_MIN_POINTS:-512}"
+      --mask_tail_large_core_max_removed_fraction "${SAMOBJECT_EXPORT_MASK_TAIL_LARGE_CORE_MAX_REMOVED_FRACTION:-0.50}"
+    )
+  fi
 else
   PREPARE_ARGS+=(--mesh_path "$SAMOBJECT_MESH_PATH")
 fi

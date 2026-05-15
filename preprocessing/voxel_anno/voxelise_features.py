@@ -764,6 +764,87 @@ def _normalize_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, float
     return normalized, center.astype(np.float32), float(scale)
 
 
+def _filter_point_cloud_object_points(
+    points: np.ndarray, scan_id: str, obj_id: int
+) -> np.ndarray:
+    """Trim sparse point-cloud object outliers before 64^3 voxelization.
+
+    The Pi3X/SAMObject path exports point-cloud objects rather than watertight
+    meshes.  A few mislabeled wall/slab tail points can dominate mean/scale and
+    make the final voxelized object look much longer than the actual support.
+    This filter is intentionally bounded by a minimum keep fraction so it cannot
+    silently collapse an object.
+    """
+    enabled = os.getenv("OBJECTX_VOXEL_POINT_CLOUD_FILTER_OUTLIERS", "0").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    }
+    if not enabled or points.shape[0] < 64:
+        return points
+
+    filtered = points.astype(np.float32, copy=False)
+    original_count = int(filtered.shape[0])
+    min_keep_fraction = float(
+        os.getenv("OBJECTX_VOXEL_POINT_CLOUD_FILTER_MIN_KEEP_FRACTION", "0.50")
+    )
+    min_keep = max(32, int(original_count * min_keep_fraction))
+
+    lower_q = float(os.getenv("OBJECTX_VOXEL_POINT_CLOUD_TRIM_LOW_Q", "0.0"))
+    upper_q = float(os.getenv("OBJECTX_VOXEL_POINT_CLOUD_TRIM_HIGH_Q", "100.0"))
+    if 0.0 <= lower_q < upper_q <= 100.0:
+        lower = np.percentile(filtered, lower_q, axis=0)
+        upper = np.percentile(filtered, upper_q, axis=0)
+        keep = np.all((filtered >= lower) & (filtered <= upper), axis=1)
+        if int(keep.sum()) >= min_keep:
+            filtered = filtered[keep]
+        else:
+            _LOGGER.info(
+                "[2.5] object %s/%s point_cloud_trim skipped keep=%s/%s min_keep=%s q=%.2f-%.2f",
+                scan_id,
+                obj_id,
+                int(keep.sum()),
+                original_count,
+                int(min_keep),
+                lower_q,
+                upper_q,
+            )
+
+    keep_radius_q = float(os.getenv("OBJECTX_VOXEL_POINT_CLOUD_KEEP_RADIUS_Q", "100.0"))
+    if 0.0 < keep_radius_q < 100.0 and filtered.shape[0] >= 64:
+        center = np.median(filtered, axis=0)
+        distances = np.linalg.norm(filtered - center[None, :], axis=1)
+        keep_radius = float(np.percentile(distances, keep_radius_q))
+        keep = distances <= keep_radius
+        if int(keep.sum()) >= min_keep:
+            filtered = filtered[keep]
+        else:
+            _LOGGER.info(
+                "[2.5] object %s/%s point_cloud_radius skipped keep=%s/%s min_keep=%s q=%.2f",
+                scan_id,
+                obj_id,
+                int(keep.sum()),
+                original_count,
+                int(min_keep),
+                keep_radius_q,
+            )
+
+    if filtered.shape[0] != original_count:
+        _LOGGER.info(
+            "[2.5] object %s/%s point_cloud_filter kept=%s/%s trim_q=%.2f-%.2f radius_q=%.2f",
+            scan_id,
+            obj_id,
+            int(filtered.shape[0]),
+            original_count,
+            lower_q,
+            upper_q,
+            keep_radius_q,
+        )
+    return filtered.astype(np.float32, copy=False)
+
+
 def _filter_lifted_points_by_support(
     points: np.ndarray, view_indices: Optional[np.ndarray]
 ) -> tuple[np.ndarray, Optional[np.ndarray]]:
@@ -1677,6 +1758,10 @@ def voxelise_features(
                     obj_pts = all_vertices[annos == obj_id]
                     if len(obj_pts) == 0:
                         _LOGGER.info("Skipping %s (%s): no vertices in point cloud PLY", scan_id, obj_id)
+                        continue
+                    obj_pts = _filter_point_cloud_object_points(obj_pts, scan_id, obj_id)
+                    if len(obj_pts) == 0:
+                        _LOGGER.info("Skipping %s (%s): no vertices after point cloud filtering", scan_id, obj_id)
                         continue
                     mean = obj_pts.mean(axis=0)
                     obj_pts = obj_pts - mean
