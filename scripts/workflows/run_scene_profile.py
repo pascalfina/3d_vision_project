@@ -798,6 +798,7 @@ def build_geom_debug_action(repo_root: Path, profile: dict):
             "geom-debug action requires a reconstruction root via geom_debug.data_root, "
             "render_bundle.data_root, or roots.reconstruction."
         )
+    baseline_root = sec.get("baseline_root", roots(profile).get("baseline"))
 
     scan_id = sec.get("scan_id", sec.get("scene_id", shared_value(profile, "scene_id")))
     if not scan_id:
@@ -899,6 +900,16 @@ def build_geom_debug_action(repo_root: Path, profile: dict):
     add_cli_arg(cmd, "--label", label)
     add_cli_arg(cmd, "--out-dir", out_dir)
     add_cli_arg(cmd, "--skip-cameras", sec.get("skip_cameras", False))
+    if sec.get("write_gt_html", True):
+        gt_mesh = sec.get(
+            "gt_mesh",
+            f"{baseline_root}/scenes/{scan_id}/mesh.refined.v2.obj"
+            if baseline_root and scan_id
+            else None,
+        )
+        add_cli_arg(cmd, "--gt-mesh", gt_mesh)
+        add_cli_arg(cmd, "--gt-label", sec.get("gt_label", "ground_truth_geometry"))
+        add_cli_arg(cmd, "--gt-max-points", sec.get("gt_max_points"))
     log_value = sec.get(
         "log",
         f"{os.environ['OBJECTX_WORKFLOW_LOG_ROOT']}/debug_{profile.get('name', 'scene')}_geom_debug.log",

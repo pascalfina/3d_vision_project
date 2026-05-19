@@ -9,24 +9,57 @@ Recommended first run:
 bash evaluation/geometry/run_oven_pi3x_geometry_eval.sh
 ```
 
+Generic scene run:
+
+```bash
+SCAN_ID=<scene_id> \
+METHOD_NAME=pi3x_samobject \
+PRED_ROOT=<pi3x_pred_root> \
+BASELINE_ROOT=<gt_root> \
+bash evaluation/geometry/run_pi3x_geometry_eval.sh
+```
+
 For debug PLY outputs:
 
 ```bash
 WRITE_DEBUG_PLY=1 bash evaluation/geometry/run_oven_pi3x_geometry_eval.sh
 ```
 
-This also writes an interactive HTML overlay at
-`evaluation/outputs/geometry/oven_pi3x/overlay_pred_gt.html`.
-Use `WRITE_DEBUG_HTML=1` if you only want the HTML and no PLY files.
+Every runner writes an interactive HTML overlay by default at
+`<run_out_dir>/overlay_pred_gt.html`, so each metrics file has a matching visual
+alignment check.  Set `WRITE_DEBUG_HTML=` to disable it for unusually large
+batch jobs.  Use `WRITE_DEBUG_PLY=1` if you also want PLY debug files.
+
+Each run writes:
+
+- `metrics.json`: full machine-readable result.
+- `metrics.csv`: one report row per GT scope.
+- `report_summary.md`: compact report-ready table.
+- `overlay_pred_gt.html`: interactive GT-vs-Pi3X overlay when requested.
+
+Aggregate several completed scene runs:
+
+```bash
+python evaluation/geometry/summarize_geometry_runs.py \
+  --metrics-glob 'evaluation/outputs/geometry/final/**/metrics.json' \
+  --out-dir evaluation/outputs/geometry/final
+```
+
+This writes `geometry_summary.csv`, `geometry_summary.md` and
+`geometry_summary.json`.
 
 Main metrics:
 
-- `pred_to_gt`: accuracy.  Low values mean reconstructed points lie close to
+- `pred_to_gt` / `accuracy`: low values mean reconstructed points lie close to
   the GT surface.
-- `gt_to_pred`: completeness.  Low values mean GT surface points are covered by
-  the reconstruction.
+- `gt_to_pred` / `completeness`: low values mean GT surface points are covered
+  by the reconstruction.
 - `precision/recall/fscore@T`: percentage of points within distance threshold
   `T`, reported for thresholds such as 2 cm, 5 cm and 10 cm.
+
+For paper-style tables, use the `visible_gt` scope when possible and report
+`accuracy_mean_m`, `completeness_mean_m` and `fscore_at_0.050m`.  The full JSON
+also contains medians and p95 values, which are useful for explaining outliers.
 
 The oven convenience runner defaults to `PRED_INPUT_MODE=ply`.
 That means it evaluates the self-computed Pi3X/SAMObject point cloud

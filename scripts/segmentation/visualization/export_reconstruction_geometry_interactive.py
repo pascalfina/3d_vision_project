@@ -69,6 +69,18 @@ def parse_args():
     parser.add_argument("--label", default="reconstruction_geometry")
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--skip-cameras", action="store_true")
+    parser.add_argument(
+        "--gt-mesh",
+        default=None,
+        help="Optional GT mesh path. When set, also writes a GT HTML/PLY into --out-dir.",
+    )
+    parser.add_argument("--gt-label", default="ground_truth_geometry")
+    parser.add_argument(
+        "--gt-max-points",
+        type=int,
+        default=300000,
+        help="Maximum sampled GT surface points.",
+    )
     return parser.parse_args()
 
 
@@ -176,6 +188,85 @@ def camera_colors(count: int) -> np.ndarray:
     return (255.0 * cmap(vals)[:, :3]).astype(np.uint8)
 
 
+def label_slug(label: str) -> str:
+    return label.replace(" ", "_")
+
+
+def load_gt_mesh(path: Path) -> trimesh.Trimesh:
+    mesh = trimesh.load(str(path), process=False)
+    if isinstance(mesh, trimesh.Scene):
+        geometries = [geom for geom in mesh.geometry.values() if hasattr(geom, "faces")]
+        if not geometries:
+            raise ValueError(f"GT scene has no triangle geometry: {path}")
+        mesh = trimesh.util.concatenate(geometries)
+    if len(mesh.vertices) == 0 or len(mesh.faces) == 0:
+        raise ValueError(f"GT mesh has no vertices/faces: {path}")
+    return mesh
+
+
+def sample_gt_surface(mesh: trimesh.Trimesh, max_points: int) -> np.ndarray:
+    n_points = min(int(max_points), max(len(mesh.faces), 1) * 8)
+    n_points = max(n_points, min(len(mesh.vertices), int(max_points)))
+    if n_points <= 0:
+        raise ValueError("GT max points must be positive")
+    points, _face_ids = trimesh.sample.sample_surface(mesh, n_points)
+    return points.astype(np.float32)
+
+
+def write_gt_debug_outputs(
+    *,
+    gt_mesh_path: Path,
+    scan_id: str,
+    label: str,
+    out_dir: Path,
+    max_points: int,
+) -> dict:
+    mesh = load_gt_mesh(gt_mesh_path)
+    points = sample_gt_surface(mesh, max_points)
+    colors = np.tile(np.array([[55, 130, 255]], dtype=np.uint8), (len(points), 1))
+    cloud = trimesh.points.PointCloud(points, colors=colors)
+
+    scene = trimesh.Scene()
+    scene.add_geometry(cloud, geom_name="ground_truth_geometry")
+    bounds = scene.bounds
+    if bounds is not None and np.isfinite(bounds).all():
+        center = bounds.mean(axis=0)
+        extent = np.max(bounds[1] - bounds[0])
+        scene.set_camera(angles=(0.6, 0.0, 0.6), distance=max(float(extent) * 1.6, 1.0), center=center)
+
+    slug = label_slug(label)
+    html_path = out_dir / f"{scan_id}_interactive_{slug}.html"
+    ply_path = out_dir / f"{scan_id}_{slug}_geometry.ply"
+    cloud.export(ply_path)
+
+    summary = {
+        "data_root": str(gt_mesh_path.parent.parent.parent) if gt_mesh_path.name else None,
+        "gt_mesh": str(gt_mesh_path),
+        "scan_id": scan_id,
+        "label": label,
+        "point_count": int(len(points)),
+        "html": str(html_path),
+        "geometry_ply": str(ply_path),
+    }
+    html_text = trimesh.viewer.scene_to_html(scene)
+    html_text = inject_overlay(html_text, build_gt_overlay(summary))
+    html_path.write_text(html_text, encoding="utf-8")
+    return summary
+
+
+def build_gt_overlay(summary: dict) -> str:
+    return (
+        "<div class='objectx-overlay'><div class='objectx-card'>"
+        f"<div class='title'>{html.escape(summary['scan_id'])}</div>"
+        f"<div class='meta'>label: {html.escape(summary['label'])}</div>"
+        f"<div class='meta'>points: {int(summary['point_count'])}</div>"
+        f"<div class='meta'>GT mesh: {html.escape(Path(summary['gt_mesh']).name)}</div>"
+        "<div class='swatch-row'><span class='swatch' style='background: rgb(55,130,255)'></span>"
+        "<span>ground truth surface sample</span></div>"
+        "</div></div>"
+    )
+
+
 def main():
     args = parse_args()
     data_root = Path(args.data_root)
@@ -231,9 +322,10 @@ def main():
     distance = max(float(extent) * 1.6, 1.0)
     scene.set_camera(angles=(0.6, 0.0, 0.6), distance=distance, center=center)
 
-    html_path = out_dir / f"{args.scan_id}_interactive_{args.label.replace(' ', '_')}.html"
-    ply_path = out_dir / f"{args.scan_id}_{args.label.replace(' ', '_')}_geometry.ply"
-    cams_ply_path = out_dir / f"{args.scan_id}_{args.label.replace(' ', '_')}_camera_centers.ply"
+    label = label_slug(args.label)
+    html_path = out_dir / f"{args.scan_id}_interactive_{label}.html"
+    ply_path = out_dir / f"{args.scan_id}_{label}_geometry.ply"
+    cams_ply_path = out_dir / f"{args.scan_id}_{label}_camera_centers.ply"
     summary_path = out_dir / "summary.json"
 
     geom_cloud.export(ply_path)
@@ -265,8 +357,19 @@ def main():
     html_text = trimesh.viewer.scene_to_html(scene)
     html_text = inject_overlay(html_text, build_overlay(summary))
     html_path.write_text(html_text, encoding="utf-8")
+    if args.gt_mesh:
+        gt_summary = write_gt_debug_outputs(
+            gt_mesh_path=Path(args.gt_mesh),
+            scan_id=args.scan_id,
+            label=args.gt_label,
+            out_dir=out_dir,
+            max_points=args.gt_max_points,
+        )
+        summary["ground_truth"] = gt_summary
     summary_path.write_text(json.dumps(summary, indent=2))
     print(html_path)
+    if args.gt_mesh:
+        print(summary["ground_truth"]["html"])
 
 
 if __name__ == "__main__":

@@ -34,9 +34,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--gt-mesh", required=True, help="Ground-truth mesh path.")
     parser.add_argument("--out-dir", required=True, help="Output directory.")
+    parser.add_argument(
+        "--scene-id",
+        default=None,
+        help="Scene identifier stored in report outputs. Defaults to out-dir name.",
+    )
+    parser.add_argument(
+        "--method-name",
+        default=None,
+        help="Method/config name stored in report outputs.",
+    )
     parser.add_argument("--sample-gt-points", type=int, default=400000)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--thresholds", type=float, nargs="+", default=[0.02, 0.05, 0.10])
+    parser.add_argument(
+        "--report-threshold",
+        type=float,
+        default=0.05,
+        help="Primary threshold for paper-style precision/recall/F1 reporting.",
+    )
     parser.add_argument(
         "--align",
         choices=[
@@ -1277,6 +1293,10 @@ def distance_summary(distances: np.ndarray) -> dict:
     }
 
 
+def threshold_key(threshold: float) -> str:
+    return f"{float(threshold):.3f}m"
+
+
 def threshold_metrics(pred_to_gt: np.ndarray, gt_to_pred: np.ndarray, thresholds: Iterable[float]) -> dict:
     out = {}
     for threshold in thresholds:
@@ -1285,7 +1305,7 @@ def threshold_metrics(pred_to_gt: np.ndarray, gt_to_pred: np.ndarray, thresholds
         fscore = 0.0
         if precision + recall > 0.0:
             fscore = 2.0 * precision * recall / (precision + recall)
-        key = f"{float(threshold):.3f}m"
+        key = threshold_key(float(threshold))
         out[key] = {
             "threshold_m": float(threshold),
             "precision": precision,
@@ -1418,16 +1438,171 @@ def write_overlay_html(
     path.write_text(html_text, encoding="utf-8")
 
 
-def write_metrics_csv(path: Path, metrics: dict) -> None:
+def _alignment_value(metrics: dict, key: str):
+    alignment = metrics.get("alignment", {})
+    if key in alignment:
+        return alignment[key]
+    for nested_key in ("rgbd_fit", "pose", "icp"):
+        nested = alignment.get(nested_key, {})
+        if isinstance(nested, dict) and key in nested:
+            return nested[key]
+    return None
+
+
+def _primary_threshold_payload(thresholds: dict, report_threshold: float) -> tuple[str, dict]:
+    preferred = threshold_key(report_threshold)
+    if preferred in thresholds:
+        return preferred, thresholds[preferred]
+    if not thresholds:
+        return preferred, {
+            "threshold_m": float(report_threshold),
+            "precision": None,
+            "recall": None,
+            "fscore": None,
+        }
+    return min(
+        thresholds.items(),
+        key=lambda item: abs(float(item[1].get("threshold_m", report_threshold)) - report_threshold),
+    )
+
+
+def build_report_rows(metrics: dict, report_threshold: float) -> list[dict]:
     rows = []
+    pred_summary = metrics["pred_to_gt"]
+    alignment = metrics.get("alignment", {})
+    rgbd_corr = alignment.get("rgbd_correspondences", {})
+    rgbd_fit = alignment.get("rgbd_fit", {})
     for scope, payload in metrics["scopes"].items():
         gt_summary = payload["gt_to_pred"]
-        row = {"scope": scope}
-        row.update({f"gt_to_pred_{k}": v for k, v in gt_summary.items()})
-        for threshold_key, threshold_payload in payload["thresholds"].items():
-            for key, value in threshold_payload.items():
-                row[f"{threshold_key}_{key}"] = value
+        primary_key, primary = _primary_threshold_payload(payload["thresholds"], report_threshold)
+        row = {
+            "scene_id": metrics.get("scene_id"),
+            "method_name": metrics.get("method_name"),
+            "scope": scope,
+            "scope_description": payload.get("description"),
+            "pred_source_type": metrics.get("pred_source", {}).get("type"),
+            "pred_source_path": metrics.get("pred_source", {}).get("path"),
+            "gt_mesh": metrics.get("gt_mesh"),
+            "pred_points_eval": metrics.get("counts", {}).get("pred_points_eval"),
+            "gt_points_scope": payload.get("gt_points"),
+            "gt_fraction_scope": payload.get("gt_fraction"),
+            "accuracy_mean_m": pred_summary.get("mean"),
+            "accuracy_rmse_m": pred_summary.get("rmse"),
+            "accuracy_median_m": pred_summary.get("median"),
+            "accuracy_p90_m": pred_summary.get("p90"),
+            "accuracy_p95_m": pred_summary.get("p95"),
+            "completeness_mean_m": gt_summary.get("mean"),
+            "completeness_rmse_m": gt_summary.get("rmse"),
+            "completeness_median_m": gt_summary.get("median"),
+            "completeness_p90_m": gt_summary.get("p90"),
+            "completeness_p95_m": gt_summary.get("p95"),
+            "chamfer_l1_mean_m": payload.get("chamfer_l1_mean"),
+            f"precision_at_{primary_key}": primary.get("precision"),
+            f"recall_at_{primary_key}": primary.get("recall"),
+            f"fscore_at_{primary_key}": primary.get("fscore"),
+            "report_threshold_m": primary.get("threshold_m"),
+            "alignment_mode": alignment.get("mode"),
+            "alignment_scale": alignment.get("effective_uniform_scale")
+            if alignment.get("effective_uniform_scale") is not None
+            else rgbd_fit.get("scale"),
+            "alignment_translation_norm_m": alignment.get("translation_norm"),
+            "rgbd_frames_used": rgbd_corr.get("frames_used"),
+            "rgbd_correspondences_raw": rgbd_corr.get("correspondences_raw"),
+            "rgbd_fit_correspondences": rgbd_fit.get("fit_correspondences"),
+            "rgbd_fit_kept_correspondences_final": rgbd_fit.get("kept_correspondences_final"),
+            "rgbd_fit_residual_median_m": rgbd_fit.get("residual_median"),
+            "rgbd_fit_residual_p95_m": rgbd_fit.get("residual_p95"),
+        }
+        for threshold_name, threshold_payload in payload["thresholds"].items():
+            row[f"precision_at_{threshold_name}"] = threshold_payload.get("precision")
+            row[f"recall_at_{threshold_name}"] = threshold_payload.get("recall")
+            row[f"fscore_at_{threshold_name}"] = threshold_payload.get("fscore")
         rows.append(row)
+    return rows
+
+
+def _fmt_float(value, digits: int = 4) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def write_report_markdown(path: Path, metrics: dict, report_threshold: float) -> None:
+    rows = build_report_rows(metrics, report_threshold)
+    alignment = metrics.get("alignment", {})
+    threshold_name = threshold_key(report_threshold)
+    threshold_label = f"@{int(round(report_threshold * 100))}cm"
+    lines = [
+        "# Geometry Evaluation Summary",
+        "",
+        f"- Scene: `{metrics.get('scene_id')}`",
+        f"- Method: `{metrics.get('method_name')}`",
+        f"- Prediction: `{metrics.get('pred_source', {}).get('type')}`",
+        f"- Alignment: `{alignment.get('mode')}`",
+        f"- GT mesh: `{metrics.get('gt_mesh')}`",
+        "",
+        f"| Scope | Acc mean | Acc med | Acc p95 | Compl mean | Compl med | Compl p95 | P{threshold_label} | R{threshold_label} | F1{threshold_label} |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        primary_key = f"fscore_at_{threshold_name}"
+        precision_key = f"precision_at_{threshold_name}"
+        recall_key = f"recall_at_{threshold_name}"
+        if primary_key not in row:
+            # Fall back to the nearest available threshold if the user supplied
+            # a custom threshold list that does not include report_threshold.
+            available = sorted(k for k in row if k.startswith("fscore_at_"))
+            suffix = available[0].removeprefix("fscore_at_") if available else threshold_name
+            precision_key = f"precision_at_{suffix}"
+            recall_key = f"recall_at_{suffix}"
+            primary_key = f"fscore_at_{suffix}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row["scope"]),
+                    _fmt_float(row["accuracy_mean_m"]),
+                    _fmt_float(row["accuracy_median_m"]),
+                    _fmt_float(row["accuracy_p95_m"]),
+                    _fmt_float(row["completeness_mean_m"]),
+                    _fmt_float(row["completeness_median_m"]),
+                    _fmt_float(row["completeness_p95_m"]),
+                    _fmt_float(row.get(precision_key), digits=3),
+                    _fmt_float(row.get(recall_key), digits=3),
+                    _fmt_float(row.get(primary_key), digits=3),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Alignment QC",
+            "",
+            f"- Scale: `{_fmt_float(_alignment_value(metrics, 'effective_uniform_scale'))}`",
+            f"- Translation norm: `{_fmt_float(alignment.get('translation_norm'))} m`",
+            f"- RGB-D frames used: `{alignment.get('rgbd_correspondences', {}).get('frames_used', 'n/a')}`",
+            f"- RGB-D raw correspondences: `{alignment.get('rgbd_correspondences', {}).get('correspondences_raw', 'n/a')}`",
+            f"- RGB-D fit residual median: `{_fmt_float(alignment.get('rgbd_fit', {}).get('residual_median'))} m`",
+            f"- RGB-D fit residual p95: `{_fmt_float(alignment.get('rgbd_fit', {}).get('residual_p95'))} m`",
+            "",
+            "## Artifacts",
+            "",
+            "- `metrics.json`: full machine-readable output",
+            "- `metrics.csv`: one report row per GT scope",
+            "- `report_summary.md`: this report-ready summary",
+            "- `overlay_pred_gt.html`: interactive overlay when `--write-debug-html` is enabled",
+        ]
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_metrics_csv(path: Path, metrics: dict, report_threshold: float) -> None:
+    rows = build_report_rows(metrics, report_threshold)
     if not rows:
         return
     fieldnames = sorted({key for row in rows for key in row.keys()})
@@ -1442,6 +1617,8 @@ def main() -> None:
     args = parse_args()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    scene_id = args.scene_id or out_dir.name
+    method_name = args.method_name or "pi3x_geometry"
 
     if args.pred_ply:
         pred_points, pred_colors = load_ply_points(Path(args.pred_ply))
@@ -1733,10 +1910,13 @@ def main() -> None:
         }
 
     metrics = {
+        "scene_id": scene_id,
+        "method_name": method_name,
         "pred_source": pred_source,
         "gt_mesh": str(Path(args.gt_mesh)),
         "units": "meters",
         "thresholds_m": [float(x) for x in args.thresholds],
+        "report_threshold_m": float(args.report_threshold),
         "counts": {
             "pred_points_raw": pred_count_raw,
             "pred_points_eval": pred_count_eval,
@@ -1777,9 +1957,11 @@ def main() -> None:
             ),
         }
 
+    metrics["report_rows"] = build_report_rows(metrics, args.report_threshold)
     metrics_path = out_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2))
-    write_metrics_csv(out_dir / "metrics.csv", metrics)
+    write_metrics_csv(out_dir / "metrics.csv", metrics, args.report_threshold)
+    write_report_markdown(out_dir / "report_summary.md", metrics, args.report_threshold)
 
     if args.write_debug_ply or args.write_debug_html:
         clip = max(args.thresholds) if args.thresholds else 0.10
