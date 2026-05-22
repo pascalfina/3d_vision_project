@@ -18,6 +18,10 @@ __pycache__/
 
 # out
 **/outputs/
+!evaluation/outputs/
+evaluation/outputs/**
+!evaluation/outputs/**/
+!evaluation/outputs/**/geometry_summary.*
 **/output/
 **/out/
 **/tmp*/
