@@ -22,6 +22,7 @@ DEFAULT_ACTIONS = [
     "slat",
     "u3dgs",
     "geom-debug",
+    "geometry-eval",
     "render",
 ]
 
@@ -102,7 +103,7 @@ def set_derived_path_defaults() -> None:
     os.environ.setdefault("OBJECTX_BASELINE_ROOT", f"{user_root}/objectx-data-baseline")
     os.environ.setdefault("OBJECTX_REPO_DEBUG_ROOT", f"{os.environ['OBJECTX_REPO_ROOT']}/debug")
     os.environ.setdefault("OBJECTX_REPO_VIS_ROOT", f"{os.environ['OBJECTX_REPO_ROOT']}/vis")
-    os.environ.setdefault("OBJECTX_WORKFLOW_LOG_ROOT", f"{team_root}/logs")
+    os.environ.setdefault("OBJECTX_WORKFLOW_LOG_ROOT", f"{user_root}/object-x/logs")
 
     # Scene/profile roots. Override these in configs/workflows/local_paths.env
     # when running on another account or storage layout.
@@ -303,8 +304,12 @@ def stream_command(cmd, cwd: Path, env_updates: dict, log_path: Path, dry_run: b
 
     log_handle = None
     if log_path is not None:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_handle = log_path.open("w", encoding="utf-8")
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = log_path.open("w", encoding="utf-8")
+        except OSError as exc:
+            print(f"[warn] Could not open log file {log_path}: {exc}. Continuing without file log.")
+            log_handle = None
 
     try:
         process = subprocess.Popen(
@@ -320,12 +325,20 @@ def stream_command(cmd, cwd: Path, env_updates: dict, log_path: Path, dry_run: b
         for line in process.stdout:
             print(line, end="")
             if log_handle is not None:
-                log_handle.write(line)
-                log_handle.flush()
+                try:
+                    log_handle.write(line)
+                    log_handle.flush()
+                except OSError as exc:
+                    print(f"[warn] Disabling file log {log_path}: {exc}.")
+                    log_handle.close()
+                    log_handle = None
         return process.wait()
     finally:
         if log_handle is not None:
-            log_handle.close()
+            try:
+                log_handle.close()
+            except OSError as exc:
+                print(f"[warn] Could not close log file {log_path}: {exc}.")
 
 
 def shared_value(profile: dict, key: str, default=None):
@@ -918,6 +931,87 @@ def build_geom_debug_action(repo_root: Path, profile: dict):
     return cmd, env_updates, log_path
 
 
+def build_geometry_eval_action(repo_root: Path, profile: dict):
+    """Evaluate the profile's Pi3X geometry against the matching GT scene.
+
+    Keeping this as a profile action avoids the easy-to-make mistake of mixing a
+    scene id from one run with a prediction root from another run.
+    """
+
+    sec = section(profile, "geometry_eval")
+    scan_id = sec.get("scan_id", sec.get("scene_id", shared_value(profile, "scene_id")))
+    if not scan_id:
+        raise ValueError("geometry-eval action requires profile.scene_id or geometry_eval.scene_id")
+
+    baseline_root = sec.get("baseline_root", roots(profile).get("baseline"))
+    pred_root = sec.get("pred_root", roots(profile).get("reconstruction"))
+    scenes_dirname = sec.get("scenes_dirname", "scenes_sam2_pi3x")
+    method_name = sec.get("method_name", profile.get("name", "pi3x"))
+
+    pred_sequence_dir = sec.get("pred_sequence_dir")
+    if pred_sequence_dir is None and pred_root:
+        pred_sequence_dir = f"{pred_root}/{scenes_dirname}/{scan_id}/sequence"
+
+    gt_mesh = sec.get("gt_mesh")
+    if gt_mesh is None and baseline_root:
+        gt_mesh = f"{baseline_root}/scenes/{scan_id}/mesh.refined.v2.obj"
+
+    gt_sequence_zip = sec.get("gt_sequence_zip")
+    if gt_sequence_zip is None and baseline_root:
+        gt_sequence_zip = f"{baseline_root}/scenes/{scan_id}/sequence.zip"
+
+    env_updates = {
+        "SCAN_ID": scan_id,
+        "METHOD_NAME": method_name,
+        "PRED_INPUT_MODE": sec.get("pred_input_mode", "sequence"),
+        "PRED_ROOT": pred_root,
+        "BASELINE_ROOT": baseline_root,
+        "PRED_SEQUENCE_DIR": pred_sequence_dir,
+        "GT_MESH": gt_mesh,
+        "GT_SEQUENCE_ZIP": gt_sequence_zip,
+        "GEOMETRY_EVAL_GROUP": sec.get(
+            "group", os.environ.get("GEOMETRY_EVAL_GROUP", "final")
+        ),
+        "STRICT_SCENE_GUARD": str(int(sec.get("strict_scene_guard", 1))),
+        "STRICT_SEQUENCE_COLOR_GUARD": str(int(sec.get("strict_sequence_color_guard", 1))),
+    }
+    optional_env_map = {
+        "OUT_DIR": "out_dir",
+        "SEQUENCE_CONF_THR": "sequence_conf_thr",
+        "SEQUENCE_PIXEL_STRIDE": "sequence_pixel_stride",
+        "SEQUENCE_MAX_FRAMES": "sequence_max_frames",
+        "RGBD_FRAME_STRIDE": "rgbd_frame_stride",
+        "RGBD_MAX_FRAMES": "rgbd_max_frames",
+        "RGBD_PIXEL_STRIDE": "rgbd_pixel_stride",
+        "RGBD_CONF_THR": "rgbd_conf_thr",
+        "RGBD_MAX_CORRESPONDENCES": "rgbd_max_correspondences",
+        "RGBD_TRIM_QUANTILE": "rgbd_trim_quantile",
+        "RGBD_FIT_ITERATIONS": "rgbd_fit_iterations",
+        "SAMPLE_GT_POINTS": "sample_gt_points",
+        "VISIBLE_MAX_FRAMES": "visible_max_frames",
+        "VISIBLE_FRAME_STRIDE": "visible_frame_stride",
+        "PRED_VOXEL_SIZE": "pred_voxel_size",
+        "MAX_PRED_POINTS": "max_pred_points",
+        "ALIGN": "align",
+        "REPORT_THRESHOLD": "report_threshold",
+        "DEBUG_HTML_MAX_POINTS": "debug_html_max_points",
+        "THRESHOLDS": "thresholds",
+    }
+    for env_key, profile_key in optional_env_map.items():
+        if sec.get(profile_key) is not None:
+            env_updates[env_key] = str(sec[profile_key])
+    if sec.get("write_debug_html") is not None:
+        env_updates["WRITE_DEBUG_HTML"] = str(int(sec["write_debug_html"]))
+    if sec.get("write_debug_ply"):
+        env_updates["WRITE_DEBUG_PLY"] = "1"
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+
+    cmd = ["bash", str(repo_root / "evaluation" / "geometry" / "run_pi3x_geometry_eval.sh")]
+    log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
+    return cmd, env_updates, log_path
+
+
 def build_render_action(repo_root: Path, profile: dict):
     sec = section(profile, "render_bundle")
     mask_source = sec.get("mask_source", profile_mask_source(repo_root, profile))
@@ -1084,6 +1178,7 @@ ACTION_BUILDERS = {
     "slat": build_slat_action,
     "u3dgs": build_u3dgs_action,
     "geom-debug": build_geom_debug_action,
+    "geometry-eval": build_geometry_eval_action,
     "render": build_render_action,
     "plot-voxelised": build_plot_voxelised_action,
     "samobject": build_samobject_action,

@@ -222,7 +222,12 @@
     "reconstruction_scenes_dirname": "scenes_sam2_pi3x",
     "knn": 4,
     "min_voxels": 32,
-    "point_counts": [64, 128, 256, 512],
+    "point_counts": [
+      64,
+      128,
+      256,
+      512
+    ],
     "overwrite": true
   },
   "validate_pred_ready": {
@@ -329,5 +334,11 @@
       "SAMOBJECT_THRES_MERGE": "150",
       "SAMOBJECT_GRAPH_PROCESS_NUM": "1"
     }
+  },
+  "geometry_eval": {
+    "method_name": "scene_5630cfcf_sam2_pi3x",
+    "pred_input_mode": "sequence",
+    "scenes_dirname": "scenes_sam2_pi3x",
+    "write_debug_html": true
   }
 }

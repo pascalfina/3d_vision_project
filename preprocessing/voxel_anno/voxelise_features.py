@@ -55,30 +55,47 @@ def _lookup_mask_frame(mask: Dict, frame_id):
 
 
 def _load_dino_model(model_name: str):
+    local_hub_candidates = []
     local_hub_dir = os.getenv("OBJECTX_DINOV2_HUB_DIR")
+    if local_hub_dir:
+        local_hub_candidates.append(local_hub_dir)
     if not local_hub_dir:
         torch_home = os.getenv("TORCH_HOME")
         if torch_home:
             local_hub_dir = osp.join(torch_home, "hub", "facebookresearch_dinov2_main")
+            local_hub_candidates.append(local_hub_dir)
     if not local_hub_dir:
         cache_root = os.getenv("OBJECTX_CACHE_ROOT")
         if cache_root:
             local_hub_dir = osp.join(
                 cache_root, "torch", "hub", "facebookresearch_dinov2_main"
             )
+            local_hub_candidates.append(local_hub_dir)
     if not local_hub_dir:
         fallback_cache = "/work/scratch/pafina/objectx-cache/torch/hub/facebookresearch_dinov2_main"
         if osp.isdir(fallback_cache):
             local_hub_dir = fallback_cache
+        local_hub_candidates.append(fallback_cache)
     if not local_hub_dir:
         local_hub_dir = osp.expanduser("~/.cache/torch/hub/facebookresearch_dinov2_main")
+        local_hub_candidates.append(local_hub_dir)
     if osp.isdir(local_hub_dir):
         _ensure_dinov2_py39_compat(local_hub_dir)
         _LOGGER.info("Loading DINOv2 from local hub cache: %s", local_hub_dir)
         return torch.hub.load(local_hub_dir, model_name, source="local")
 
     _LOGGER.info("Loading DINOv2 from torch hub repo")
-    return torch.hub.load("facebookresearch/dinov2", model_name)
+    try:
+        return torch.hub.load("facebookresearch/dinov2", model_name)
+    except TypeError:
+        # torch.hub may have just downloaded a Python-3.10+ DINOv2 main checkout
+        # before failing on PEP 604 annotations. Patch that fresh cache and retry.
+        for candidate in local_hub_candidates:
+            if candidate and osp.isdir(candidate):
+                _ensure_dinov2_py39_compat(candidate)
+                _LOGGER.info("Retrying DINOv2 from patched local hub cache: %s", candidate)
+                return torch.hub.load(candidate, model_name, source="local")
+        raise
 
 
 def _ensure_dinov2_py39_compat(local_hub_dir: str) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import json
 from pathlib import Path
 from statistics import mean
@@ -96,7 +97,7 @@ def load_row(path: Path, *, requested_scope: str, report_threshold: float) -> di
 
 
 def numeric_mean(rows: list[dict], key: str):
-    values = [row.get(key) for row in rows if isinstance(row.get(key), int | float)]
+    values = [row.get(key) for row in rows if isinstance(row.get(key), (int, float))]
     return mean(values) if values else None
 
 
@@ -107,14 +108,13 @@ def fmt(value, digits: int = 4) -> str:
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({key for row in rows for key in row})
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+        if fieldnames:
+            writer.writeheader()
+            writer.writerows(rows)
 
 
 def write_markdown(path: Path, rows: list[dict], *, report_threshold: float) -> None:
@@ -171,7 +171,10 @@ def write_markdown(path: Path, rows: list[dict], *, report_threshold: float) -> 
 
 def main() -> None:
     args = parse_args()
-    paths = sorted(Path().glob(args.metrics_glob))
+    if Path(args.metrics_glob).is_absolute():
+        paths = sorted(Path(path) for path in glob.glob(args.metrics_glob, recursive=True))
+    else:
+        paths = sorted(Path().glob(args.metrics_glob))
     rows = [
         load_row(path, requested_scope=args.scope, report_threshold=args.report_threshold)
         for path in paths

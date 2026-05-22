@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import io
 import json
 import re
@@ -1380,6 +1381,7 @@ def write_overlay_html(
     *,
     max_points_per_cloud: int,
     title: str,
+    details=None,
 ) -> None:
     import trimesh
     import trimesh.viewer
@@ -1406,6 +1408,13 @@ def write_overlay_html(
         scene.set_camera(angles=(0.75, 0.0, 0.65), distance=distance, center=center)
 
     html_text = trimesh.viewer.scene_to_html(scene)
+    detail_rows = []
+    for key, value in (details or {}).items():
+        detail_rows.append(
+            f'<div class="meta"><b>{html.escape(str(key))}:</b> '
+            f'{html.escape(str(value))}</div>'
+        )
+    detail_html = "\n  ".join(detail_rows)
     legend = f"""
 <style>
 .objx-overlay-legend {{
@@ -1422,20 +1431,24 @@ def write_overlay_html(
 }}
 .objx-overlay-legend .title {{ font-weight: 700; margin-bottom: 6px; }}
 .objx-overlay-legend .row {{ display: flex; align-items: center; gap: 8px; }}
+.objx-overlay-legend .meta {{ max-width: 560px; overflow-wrap: anywhere; margin-top: 3px; }}
 .objx-overlay-legend .swatch {{ width: 12px; height: 12px; border-radius: 50%; display: inline-block; }}
 </style>
 <div class="objx-overlay-legend">
-  <div class="title">{title}</div>
+  <div class="title">{html.escape(title)}</div>
   <div class="row"><span class="swatch" style="background:#2378ff"></span>GT mesh sample</div>
   <div class="row"><span class="swatch" style="background:#ff5f23"></span>Pi3X output aligned</div>
   <div>points: GT {len(gt_vis):,}, Pi3X {len(pred_vis):,}</div>
+  {detail_html}
 </div>
 """
     if "</body>" in html_text:
         html_text = html_text.replace("</body>", legend + "\n</body>")
     else:
         html_text += legend
-    path.write_text(html_text, encoding="utf-8")
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(html_text, encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _alignment_value(metrics: dict, key: str):
@@ -1974,7 +1987,16 @@ def main() -> None:
                 overlay_pred,
                 overlay_gt,
                 max_points_per_cloud=args.debug_html_max_points,
-                title=f"Geometry overlay: {args.align}",
+                title=f"{scene_id} | {method_name} | {args.align}",
+                details={
+                    "scene_id": scene_id,
+                    "method": method_name,
+                    "pred_source": pred_source.get("type"),
+                    "pred_path": pred_source.get("path"),
+                    "gt_mesh": str(Path(args.gt_mesh)),
+                    "pred_raw_points": pred_count_raw,
+                    "pred_eval_points": pred_count_eval,
+                },
             )
         if args.write_debug_ply:
             write_point_ply(out_dir / "pred_error_to_gt.ply", pred_points, error_colors(pred_to_gt, clip))
