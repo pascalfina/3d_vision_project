@@ -62,6 +62,57 @@ def _clean_pythonpath_for_vlsg(env: dict, repo_root: Path, vlsg_root: Path) -> N
     env["PYTHONPATH"] = os.pathsep.join(preferred + cleaned)
 
 
+def _write_numpy_pickle_compat(tmp_root: Path) -> Path:
+    """Provide NumPy-2 pickle aliases when the runtime still has NumPy 1.x.
+
+    Some SAMObject/Object-X mask pickle files are written by environments whose
+    NumPy serializes arrays via ``numpy._core``.  The VLSG Feature3D subprocess
+    currently runs with an older NumPy that exposes the same implementation as
+    ``numpy.core``.  A tiny sitecustomize module is the least invasive place to
+    bridge that import name before pickle.load() runs inside the dependency.
+    """
+
+    compat_dir = tmp_root / "_python_compat"
+    compat_dir.mkdir(parents=True, exist_ok=True)
+    (compat_dir / "sitecustomize.py").write_text(
+        """
+import importlib
+import sys
+
+try:
+    import numpy as _np
+
+    try:
+        import numpy._core  # noqa: F401
+    except Exception:
+        _core = importlib.import_module("numpy.core")
+        sys.modules.setdefault("numpy._core", _core)
+        setattr(_np, "_core", _core)
+        for _name in (
+            "multiarray",
+            "_multiarray_umath",
+            "numeric",
+            "fromnumeric",
+            "umath",
+            "shape_base",
+            "_methods",
+            "records",
+            "overrides",
+            "function_base",
+        ):
+            try:
+                _mod = importlib.import_module(f"numpy.core.{_name}")
+                sys.modules.setdefault(f"numpy._core.{_name}", _mod)
+            except Exception:
+                pass
+except Exception:
+    pass
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return compat_dir
+
+
 def load_scan_ids(root: Path, split: str) -> list[str]:
     preferred = root / "files" / f"{split}_resplit_scans.txt"
     fallback = root / "files" / f"{split}_scans.txt"
@@ -211,6 +262,10 @@ def main():
         env["Data_ROOT_DIR"] = str(tmp_root)
         env["VLSG_SPACE"] = str(vlsG_space)
         _clean_pythonpath_for_vlsg(env, repo_root, vlsG_space)
+        compat_dir = _write_numpy_pickle_compat(tmp_root)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(compat_dir), env.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
 
         try:
             subprocess.run(

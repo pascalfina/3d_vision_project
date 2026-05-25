@@ -36,7 +36,7 @@ require_scene_path() {
   fi
   local resolved
   resolved="$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")"
-  if [[ "$resolved" != *"/$SCAN_ID/"* && "$resolved" != *"/$SCAN_ID."* ]]; then
+  if [[ "$resolved" != *"/$SCAN_ID/"* && "$resolved" != *"/$SCAN_ID."* && "$resolved" != *"/${SCAN_ID}_"* ]]; then
     echo "[geometry-eval] refusing suspicious $label path for SCAN_ID=$SCAN_ID:" >&2
     echo "  $resolved" >&2
     echo "Set STRICT_SCENE_GUARD=0 only if this is intentional." >&2
@@ -117,6 +117,9 @@ DEFAULT_ALIGN="none"
 DEFAULT_PRED_VOXEL_SIZE="0.03"
 if [[ "$PRED_INPUT_MODE" == "ply" ]]; then
   require_scene_path "prediction PLY" "$PRED_PLY"
+  if [[ -d "$PRED_SEQUENCE_DIR" && -f "$GT_SEQUENCE_ZIP" ]]; then
+    require_sequence_color_match "$PRED_SEQUENCE_DIR" "$GT_SEQUENCE_ZIP"
+  fi
   PRED_ARGS=(--pred-ply "$PRED_PLY")
   DEFAULT_ALIGN="rgbd_correspondence"
   DEFAULT_PRED_VOXEL_SIZE="0.0"

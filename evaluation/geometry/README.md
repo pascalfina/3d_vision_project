@@ -48,6 +48,95 @@ python evaluation/geometry/summarize_geometry_runs.py \
 This writes `geometry_summary.csv`, `geometry_summary.md` and
 `geometry_summary.json`.
 
+## Final Object-X Geometry
+
+For the final Object-X output, do not evaluate the render images and do not stop
+at voxelise.  The relevant decoded geometry is written by the `u3dgs` stage when
+visualization is enabled:
+
+- `files/gs_embeddings/<scene>_slat.npz`: structured latent, not final geometry.
+- `files/gs_embeddings/<scene>_ulat.npz`: unstructured latent, not final geometry.
+- `vis/<scene>_joint.ply`: final decoded U3DGS Gaussian scene geometry.
+
+If you explicitly set `OBJECTX_VIS_EXPORT_MESH=1` for `u3dgs`, Object-X also
+writes `vis/rendered/<scene>_mesh.ply`; pass that as `FINAL_PLY` if you want to
+evaluate the optional splatted mesh instead of Gaussian centers.
+
+Run the full final-geometry evaluation after `slat` and `u3dgs`:
+
+```bash
+bash scripts/workflows/run_scene_profile.sh <profile> objectx-final-geometry-eval
+```
+
+The action writes:
+
+- `final_vs_gt/metrics.json`: final `*_joint.ply` aligned to GT via the same
+  RGB-D correspondence alignment used for Pi3X-vs-GT.
+- `final_vs_objectx_input/metrics.json`: final `*_joint.ply` compared in the
+  Object-X coordinate frame against `files/gs_annotations/<scene>/<obj>`, i.e.
+  the voxelized geometry that Object-X actually received.
+- `final_vs_raw_pi3x/metrics.json`: final `*_joint.ply` compared in the
+  Object-X/Pi3X coordinate frame against the raw fused Pi3X `frame-*.xyz.npy`
+  sequence.
+- `report_summary.md`: compact combined summary.
+- HTML overlays for both comparisons when `WRITE_DEBUG_HTML=1`.
+
+Standalone equivalent:
+
+```bash
+SCAN_ID=<scene_id> \
+METHOD_NAME=<method_name> \
+PRED_ROOT=<pi3x_reconstruction_root> \
+PRED_READY_ROOT=<pred_ready_root_used_by_slat_u3dgs> \
+BASELINE_ROOT=<gt_root> \
+FINAL_PLY=vis/<scene_id>_joint.ply \
+bash evaluation/geometry/run_objectx_final_geometry_eval.sh
+```
+
+Balanced 100-scene final benchmark from the existing 329-scene Pi3X geometry
+run:
+
+```bash
+bash evaluation/geometry/run_objectx_final_benchmark_100.sh
+```
+
+The batch script selects 50 scenes from the best Pi3X geometry scores, 25 from
+the middle, and 25 from the worst.  It runs the full pipeline per scene, keeps
+only `evaluation/outputs/geometry/objectx_final_100/...`, and cleans the heavy
+per-scene reconstruction/pred-ready/SAMObject/vis artifacts after each scene.
+Use `DRY_RUN=1 LIMIT=1` to inspect the command sequence without running it.
+
+MUSt3R-only geometry benchmark over the same under-300-frame scene list as the
+Pi3X sequence benchmark:
+
+```bash
+bash evaluation/geometry/run_must3r_sequence_benchmark_under300.sh
+```
+
+For a non-interactive GPU job:
+
+```bash
+sbatch scripts/slurm/must3r_under300_geometry_benchmark.sbatch
+tail -f "$(ls -t debug/slurm-must3r-geom329-*.out | head -n 1)"
+```
+
+This writes directly comparable outputs under
+`evaluation/outputs/geometry/must3r_sequence_under300/`.  It runs only the
+profile's `must3r` action, evaluates
+`scenes_sam2_must3r/<scan>/sequence` with the same Geometry Eval backend used
+for Pi3X, then removes the generated MUSt3R reconstruction artifacts unless
+`KEEP_ARTIFACTS=1` is set.
+
+After every scene, the batch script updates the global benchmark summaries:
+
+- `objectx_final_100_summary.md`: report-friendly category aggregates plus a
+  per-scene table.
+- `objectx_final_100_summary.csv`: one row per selected scene with all measured
+  final-vs-GT, final-vs-input and final-vs-raw-Pi3X metrics.
+- `objectx_final_100_category_summary.csv`: global and bucket-level aggregates
+  for each comparison category.
+- `objectx_final_100_summary.json`: machine-readable version of both tables.
+
 Main metrics:
 
 - `pred_to_gt` / `accuracy`: low values mean reconstructed points lie close to

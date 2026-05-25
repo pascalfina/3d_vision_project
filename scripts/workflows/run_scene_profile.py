@@ -23,6 +23,7 @@ DEFAULT_ACTIONS = [
     "u3dgs",
     "geom-debug",
     "geometry-eval",
+    "objectx-final-geometry-eval",
     "render",
 ]
 
@@ -685,18 +686,24 @@ def build_pred_ready_action(repo_root: Path, profile: dict):
 def build_features3d_action(repo_root: Path, profile: dict):
     sec = section(profile, "features3d")
     voxel_sec = section(profile, "voxelise")
-    default_scene_source_dirname = voxel_sec.get("scene_source_dirname", "scenes")
+    data_root = sec.get("data_root", roots(profile).get("pred_ready") or roots(profile).get("reconstruction"))
+    using_pred_ready = data_root == roots(profile).get("pred_ready")
+    default_scene_source_dirname = "scenes" if using_pred_ready else voxel_sec.get("scene_source_dirname", "scenes")
+    default_mask_source = "gt_projection" if using_pred_ready else profile_mask_source(repo_root, profile)
     env_updates = {
-        "DATA_ROOT_DIR": sec.get("data_root", roots(profile).get("reconstruction")),
+        "DATA_ROOT_DIR": data_root,
         "SPLIT": sec.get("split", shared_value(profile, "split", "val")),
         "SCENE_ID": sec.get("scene_id", shared_value(profile, "scene_id")),
         "MAX_SCANS": str(sec.get("max_scans", 0)),
-        "RESET_TMP": str(sec.get("reset_tmp", 0)),
+        "RESET_TMP": str(sec.get("reset_tmp", os.environ.get("OBJECTX_FEATURES3D_RESET_TMP", 0))),
+        "OBJECTX_FEATURES3D_FORCE_LOCAL_OUTPUT": str(
+            int(sec.get("force_local_output", using_pred_ready))
+        ),
         "OBJECTX_SCENE_SOURCE_DIRNAME": sec.get(
             "scene_source_dirname", default_scene_source_dirname
         ),
         "OBJECTX_MASK_SOURCE": sec.get(
-            "mask_source", profile_mask_source(repo_root, profile)
+            "mask_source", default_mask_source
         ),
     }
     for key, value in sec.get("env", {}).items():
@@ -748,9 +755,14 @@ def build_compare_action(repo_root: Path, profile: dict):
 
 def build_slat_action(repo_root: Path, profile: dict):
     sec = section(profile, "slat")
-    mask_source = sec.get("mask_source", profile_mask_source(repo_root, profile))
+    data_root = sec.get("data_root", roots(profile).get("pred_ready"))
+    using_pred_ready = data_root == roots(profile).get("pred_ready")
+    mask_source = sec.get(
+        "mask_source",
+        "gt_projection" if using_pred_ready else profile_mask_source(repo_root, profile),
+    )
     env_updates = {
-        "DATA_ROOT_DIR": sec.get("data_root", roots(profile).get("pred_ready")),
+        "DATA_ROOT_DIR": data_root,
         "SPLIT": sec.get("split", shared_value(profile, "split", "val")),
         "SCENE_ID": sec.get("scene_id", shared_value(profile, "scene_id")),
         "OBJECTX_MASK_SOURCE": mask_source,
@@ -771,9 +783,14 @@ def build_slat_action(repo_root: Path, profile: dict):
 
 def build_u3dgs_action(repo_root: Path, profile: dict):
     sec = section(profile, "u3dgs")
-    mask_source = sec.get("mask_source", profile_mask_source(repo_root, profile))
+    data_root = sec.get("data_root", roots(profile).get("pred_ready"))
+    using_pred_ready = data_root == roots(profile).get("pred_ready")
+    mask_source = sec.get(
+        "mask_source",
+        "gt_projection" if using_pred_ready else profile_mask_source(repo_root, profile),
+    )
     env_updates = {
-        "DATA_ROOT_DIR": sec.get("data_root", roots(profile).get("pred_ready")),
+        "DATA_ROOT_DIR": data_root,
         "SPLIT": sec.get("split", shared_value(profile, "split", "val")),
         "SCENE_ID": sec.get("scene_id", shared_value(profile, "scene_id")),
         "OBJECTX_MASK_SOURCE": mask_source,
@@ -1012,6 +1029,88 @@ def build_geometry_eval_action(repo_root: Path, profile: dict):
     return cmd, env_updates, log_path
 
 
+def build_objectx_final_geometry_eval_action(repo_root: Path, profile: dict):
+    """Evaluate decoded Object-X geometry against GT and Object-X input geometry."""
+
+    sec = section(profile, "objectx_final_geometry_eval")
+    scan_id = sec.get("scan_id", sec.get("scene_id", shared_value(profile, "scene_id")))
+    if not scan_id:
+        raise ValueError(
+            "objectx-final-geometry-eval action requires profile.scene_id "
+            "or objectx_final_geometry_eval.scene_id"
+        )
+
+    baseline_root = sec.get("baseline_root", roots(profile).get("baseline"))
+    pred_root = sec.get("pred_root", roots(profile).get("reconstruction"))
+    pred_ready_root = sec.get("pred_ready_root", sec.get("input_root", roots(profile).get("pred_ready")))
+    scenes_dirname = sec.get(
+        "scenes_dirname",
+        section(profile, "geometry_eval").get("scenes_dirname", "scenes_sam2_pi3x"),
+    )
+    method_name = sec.get("method_name", profile.get("name", "objectx_final"))
+
+    pred_sequence_dir = sec.get("pred_sequence_dir")
+    if pred_sequence_dir is None and pred_root:
+        pred_sequence_dir = f"{pred_root}/{scenes_dirname}/{scan_id}/sequence"
+
+    final_ply = sec.get("final_ply", str(repo_root / "vis" / f"{scan_id}_joint.ply"))
+
+    env_updates = {
+        "SCAN_ID": scan_id,
+        "METHOD_NAME": method_name,
+        "PRED_ROOT": pred_root,
+        "PRED_READY_ROOT": pred_ready_root,
+        "BASELINE_ROOT": baseline_root,
+        "SCENES_DIRNAME": scenes_dirname,
+        "PRED_SEQUENCE_DIR": pred_sequence_dir,
+        "FINAL_PLY": final_ply,
+        "GEOMETRY_EVAL_GROUP": sec.get(
+            "group", os.environ.get("GEOMETRY_EVAL_GROUP", "objectx_final")
+        ),
+        "STRICT_SCENE_GUARD": str(int(sec.get("strict_scene_guard", 1))),
+        "STRICT_SEQUENCE_COLOR_GUARD": str(int(sec.get("strict_sequence_color_guard", 1))),
+    }
+    optional_env_map = {
+        "OUT_DIR": "out_dir",
+        "WRITE_DEBUG_HTML": "write_debug_html",
+        "THRESHOLDS": "thresholds",
+        "REPORT_THRESHOLD": "report_threshold",
+        "DEBUG_HTML_MAX_POINTS": "debug_html_max_points",
+        "FINAL_VS_GT_ALIGN": "final_vs_gt_align",
+        "FINAL_VS_GT_MAX_PRED_POINTS": "final_vs_gt_max_pred_points",
+        "FINAL_VS_GT_PRED_VOXEL_SIZE": "final_vs_gt_pred_voxel_size",
+        "FINAL_VS_INPUT_ALIGN": "final_vs_input_align",
+        "FINAL_VS_INPUT_MAX_PRED_POINTS": "final_vs_input_max_pred_points",
+        "FINAL_VS_INPUT_MAX_REFERENCE_POINTS": "final_vs_input_max_reference_points",
+        "FINAL_VS_INPUT_PRED_VOXEL_SIZE": "final_vs_input_pred_voxel_size",
+        "FINAL_VS_INPUT_REFERENCE_VOXEL_SIZE": "final_vs_input_reference_voxel_size",
+        "FINAL_VS_RAW_ALIGN": "final_vs_raw_align",
+        "FINAL_VS_RAW_MAX_PRED_POINTS": "final_vs_raw_max_pred_points",
+        "FINAL_VS_RAW_MAX_REFERENCE_POINTS": "final_vs_raw_max_reference_points",
+        "FINAL_VS_RAW_PRED_VOXEL_SIZE": "final_vs_raw_pred_voxel_size",
+        "FINAL_VS_RAW_REFERENCE_VOXEL_SIZE": "final_vs_raw_reference_voxel_size",
+        "FINAL_VS_RAW_SEQUENCE_CONF_THR": "final_vs_raw_sequence_conf_thr",
+        "FINAL_VS_RAW_SEQUENCE_PIXEL_STRIDE": "final_vs_raw_sequence_pixel_stride",
+        "FINAL_VS_RAW_SEQUENCE_MAX_FRAMES": "final_vs_raw_sequence_max_frames",
+        "FINAL_PLY_OPACITY_MIN": "final_ply_opacity_min",
+        "FINAL_PLY_OPACITY_QUANTILE": "final_ply_opacity_quantile",
+        "RUN_OBJECTX": "run_objectx",
+        "PROFILE": "profile",
+    }
+    for env_key, profile_key in optional_env_map.items():
+        if sec.get(profile_key) is not None:
+            value = sec[profile_key]
+            if isinstance(value, bool):
+                value = int(value)
+            env_updates[env_key] = str(value)
+    for key, value in sec.get("env", {}).items():
+        env_updates[key] = str(value)
+
+    cmd = ["bash", str(repo_root / "evaluation" / "geometry" / "run_objectx_final_geometry_eval.sh")]
+    log_path = Path(sec["log"]).expanduser() if sec.get("log") else None
+    return cmd, env_updates, log_path
+
+
 def build_render_action(repo_root: Path, profile: dict):
     sec = section(profile, "render_bundle")
     mask_source = sec.get("mask_source", profile_mask_source(repo_root, profile))
@@ -1179,6 +1278,7 @@ ACTION_BUILDERS = {
     "u3dgs": build_u3dgs_action,
     "geom-debug": build_geom_debug_action,
     "geometry-eval": build_geometry_eval_action,
+    "objectx-final-geometry-eval": build_objectx_final_geometry_eval_action,
     "render": build_render_action,
     "plot-voxelised": build_plot_voxelised_action,
     "samobject": build_samobject_action,

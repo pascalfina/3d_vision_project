@@ -120,6 +120,19 @@ def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: l
         )
     print(f"[infer] using mask source {mask_dirname} from {mask_src}", flush=True)
 
+    missing_masks = []
+    for scan_id in scan_ids:
+        pkl = tmp_root / "files" / "gt_projection" / "obj_id_pkl" / f"{scan_id}.pkl"
+        pkl_gz = tmp_root / "files" / "gt_projection" / "obj_id_pkl" / f"{scan_id}.pkl.gz"
+        if not pkl.exists() and not pkl_gz.exists():
+            missing_masks.append(str(pkl))
+    if missing_masks:
+        raise FileNotFoundError(
+            "Inference staging did not provide required gt_projection masks. "
+            "Object-X inference expects files/gt_projection/obj_id_pkl/<scan>.pkl "
+            f"inside tmp root {tmp_root}. Missing examples: {missing_masks[:5]}"
+        )
+
     # Write one-line split file for targeted inference, or mirror the requested split.
     split_file = tmp_root / "files" / f"{split}_resplit_scans.txt"
     split_file.write_text("\n".join(scan_ids) + "\n")

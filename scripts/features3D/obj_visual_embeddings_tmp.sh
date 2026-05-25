@@ -18,6 +18,10 @@ if [[ "$RESET_TMP" == "1" ]]; then
   rm -rf "$TMP_FEAT3D_ROOT"
 fi
 
+if [[ "${OBJECTX_FEATURES3D_FORCE_LOCAL_OUTPUT:-0}" == "1" && -L "$SCRATCH_ROOT/files/Features3D" ]]; then
+  rm "$SCRATCH_ROOT/files/Features3D"
+fi
+
 mkdir -p "$TMP_FEAT3D_ROOT/scenes" "$TMP_FEAT3D_ROOT/files/orig"
 mkdir -p "$SCRATCH_ROOT/files/Features3D/obj_dinov2_top10_l3"
 mkdir -p "$CACHE_ROOT/torch/hub" "$CACHE_ROOT/xdg" "$CACHE_ROOT/matplotlib"
@@ -39,4 +43,5 @@ python -u scripts/features3D/run_scanwise_obj_visual_embeddings_tmp.py \
   --split "$SPLIT" \
   --scene-source-dirname "$OBJECTX_SCENE_SOURCE_DIRNAME" \
   ${SCENE_ID:+--scene-id "$SCENE_ID"} \
-  --max-scans "$MAX_SCANS"
+  --max-scans "$MAX_SCANS" \
+  ${OBJECTX_FEATURES3D_OVERRIDE:+--override}
