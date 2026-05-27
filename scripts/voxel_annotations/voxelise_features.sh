@@ -29,4 +29,5 @@ python preprocessing/voxel_anno/voxelise_features.py \
   --model_dir "$DATA_ROOT_DIR" \
   "data.root_dir='$DATA_ROOT_DIR'"  \
   "autoencoder.encoder.scan_type='scan'" \
-  ${args[@]}
+  ${args[@]} \
+  --visualize

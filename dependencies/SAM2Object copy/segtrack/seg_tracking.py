@@ -23,7 +23,7 @@ opj = os.path.join
 ol = os.listdir
 
 DATASET     = os.environ.get("DATASET", "3RScan")
-PROJECT_DIR = os.environ.get("SAM2OBJECT_DIR", "/cluster/home/ealegret/3d_vision_project/dependencies/SAM2Object")
+PROJECT_DIR = os.environ.get("SAM2OBJECT_DIR", "/cluster/home/ealegret/3d_vision_project/dependencies")
 OUTPUT_PATH = os.environ.get("DATA_ROOT_DIR", "/cluster/scratch/ealegret/sam2object")
 
 

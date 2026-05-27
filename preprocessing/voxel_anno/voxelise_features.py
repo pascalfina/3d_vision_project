@@ -163,7 +163,7 @@ def voxelise_features(
     for obj in obj_data["objects"]:
         try:
             voxel_path = osp.join(
-                args.model_dir,
+                '/cluster/scratch/ealegret/sam2object', #args.model_dir,
                 "files",
                 mode,
                 scan_id,
@@ -171,7 +171,7 @@ def voxelise_features(
                 "voxel_output_dense.npz",
             )
             mean_scale_path = osp.join(
-                args.model_dir,
+                '/cluster/scratch/ealegret/sam2object', #args.model_dir,
                 "files",
                 mode,
                 scan_id,

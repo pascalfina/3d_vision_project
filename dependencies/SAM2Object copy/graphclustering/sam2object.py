@@ -414,7 +414,7 @@ def export_scannetpp_eval(inst_gt,
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--base_dir', type=str,
-                        default='/cluster/scratch/ealegret/sam2object', help='path to scannet dataset')
+                        default='/cluster/scratch/ealegret/3Rscan', help='path to scannet dataset')
     parser.add_argument('--scene_id', type=str, default=None)
     parser.add_argument('--mask_name', type=str, default='semantic-sam',
                         help='which group of mask to use(fast-sam, sam-hq...)')
@@ -466,7 +466,7 @@ if __name__ == '__main__':
         if args.eval_dir is not None:
             if os.path.exists(os.path.join(args.eval_dir, scene_id + '.txt')):
                 print("already save!")
-                continue
+                #continue
 
         args.scene_id = scene_id
         print(scene_id)
