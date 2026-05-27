@@ -325,9 +325,16 @@ def main():
     modes = ["all", "objects-only"] if args.mode == "both" else [args.mode]
 
     results = {m: {} for m in modes}
+    skipped = []
     for scan_id in scans:
-        gt_ids, id2label = load_gt(args.gt_root, scan_id)
-        pred = load_pred(args, scan_id, len(gt_ids), gt_ids)
+        try:
+            gt_ids, id2label = load_gt(args.gt_root, scan_id)
+            pred = load_pred(args, scan_id, len(gt_ids), gt_ids)
+        except (FileNotFoundError, RuntimeError) as e:
+            # Missing prediction/GT, or vertex-count mismatch: skip, keep going.
+            print(f"[SKIP] {scan_id}: {e}")
+            skipped.append(scan_id)
+            continue
         n_fg = int((pred >= 0).sum())
         print(f"[{scan_id}] vertices={len(gt_ids)}  "
               f"pred fg(>=0)={n_fg}  pred bg(<0)={len(pred) - n_fg}  "
@@ -340,6 +347,13 @@ def main():
                 min_gt_points=args.min_gt_points,
                 min_pred_points=args.min_pred_points,
             )
+
+    n_eval = len(scans) - len(skipped)
+    print(f"\n[SUMMARY] evaluated {n_eval}, skipped {len(skipped)} "
+          f"(of {len(scans)} listed)")
+    if n_eval == 0:
+        print("[WARN] no scans evaluated; nothing to report.")
+        return
 
     full = {}
     for m in modes:
