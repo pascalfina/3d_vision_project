@@ -127,6 +127,25 @@ profile's `must3r` action, evaluates
 for Pi3X, then removes the generated MUSt3R reconstruction artifacts unless
 `KEEP_ARTIFACTS=1` is set.
 
+SAM2 + MUSt3R final Object-X benchmark, using the same 100-scene selection as
+`objectx_final_100` but replacing the Pi3X/SAMObject path with plain MUSt3R
+geometry and SAM2 masks:
+
+```bash
+sbatch scripts/slurm/sam2_must3r_final_100_benchmark.sbatch
+tail -f "$(ls -t debug/slurm-sam2-must3r-final100-*.out | head -n 1)"
+```
+
+This writes outputs under
+`evaluation/outputs/geometry/objectx_final_100_sam2_must3r/`.  The runner
+creates temporary generated profiles named `scene_<short>_sam2_must3r`, runs
+`must3r -> segment-inputs -> voxelise -> build-pred-ready -> features3d ->
+slat -> u3dgs -> objectx-final-geometry-eval`, and never runs the `samobject`
+action.  It also verifies that reconstruction masks come from
+`files/sam2_projection/obj_id_pkl/<scene>.pkl`, removes/overrides any
+pred-ready `gt_projection`, and aliases pred-ready `gt_projection` to the SAM2
+masks for Object-X compatibility.
+
 After every scene, the batch script updates the global benchmark summaries:
 
 - `objectx_final_100_summary.md`: report-friendly category aggregates plus a

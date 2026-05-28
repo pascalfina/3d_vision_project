@@ -1092,6 +1092,8 @@ def build_objectx_final_geometry_eval_action(repo_root: Path, profile: dict):
         "FINAL_VS_RAW_SEQUENCE_CONF_THR": "final_vs_raw_sequence_conf_thr",
         "FINAL_VS_RAW_SEQUENCE_PIXEL_STRIDE": "final_vs_raw_sequence_pixel_stride",
         "FINAL_VS_RAW_SEQUENCE_MAX_FRAMES": "final_vs_raw_sequence_max_frames",
+        "RAW_REFERENCE_NAME": "raw_reference_name",
+        "RAW_REFERENCE_LABEL": "raw_reference_label",
         "FINAL_PLY_OPACITY_MIN": "final_ply_opacity_min",
         "FINAL_PLY_OPACITY_QUANTILE": "final_ply_opacity_quantile",
         "RUN_OBJECTX": "run_objectx",

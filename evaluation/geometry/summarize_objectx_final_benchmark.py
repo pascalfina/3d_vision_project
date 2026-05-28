@@ -103,6 +103,35 @@ def get_nested(data: dict[str, Any] | None, *keys: str) -> Any:
     return current
 
 
+def raw_reference_label(reference_name: str | None) -> str:
+    reference = (reference_name or "").lower()
+    if "must3r" in reference:
+        return "Raw MUSt3R"
+    if "pi3x" in reference:
+        return "Raw Pi3X"
+    return "Raw"
+
+
+def raw_category_name(reference_name: str | None) -> str:
+    reference = (reference_name or "").lower()
+    if "must3r" in reference:
+        return "final_vs_raw_must3r"
+    if "pi3x" in reference:
+        return "final_vs_raw_pi3x"
+    return RAW_CATEGORY
+
+
+def common_raw_reference_name(rows: list[dict[str, Any]]) -> str | None:
+    names = sorted(
+        {
+            str(row.get("raw_reference_name"))
+            for row in rows
+            if row.get("raw_reference_name")
+        }
+    )
+    return names[0] if len(names) == 1 else None
+
+
 def add_float(row: dict[str, Any], key: str, value: Any) -> None:
     number = as_float(value)
     row[key] = number
@@ -140,6 +169,7 @@ def flatten_scene_metrics(
         "source_metrics": selected["source_metrics"],
         "complete": bool(gt and obj_input and raw),
         "gt_scope": scope_name,
+        "raw_reference_name": raw.get("reference_name") if raw else None,
     }
 
     add_float(row, "final_gt_accuracy_mean_m", get_nested(gt, "pred_to_gt", "mean"))
@@ -231,18 +261,22 @@ def category_keys(category: str) -> tuple[str, str, str, str, str, str, str, str
     raise ValueError(category)
 
 
-def category_label(category: str) -> tuple[str, str]:
+def category_label(category: str, raw_reference_name: str | None = None) -> tuple[str, str]:
     if category == GT_CATEGORY:
         return "Accuracy", "Completeness"
     if category == INPUT_CATEGORY:
         return "Final->input", "Input->final"
     if category == RAW_CATEGORY:
-        return "Final->raw", "Raw->final"
+        raw_label = raw_reference_label(raw_reference_name)
+        return f"Final->{raw_label}", f"{raw_label}->final"
     raise ValueError(category)
 
 
 def category_summary_rows(scene_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    fallback_raw_reference_name = common_raw_reference_name(
+        [row for row in scene_rows if row.get("raw_reference_name")]
+    )
     for group in GROUPS:
         if group == "overall":
             group_rows = [row for row in scene_rows if row.get("complete")]
@@ -261,10 +295,13 @@ def category_summary_rows(scene_rows: list[dict[str, Any]]) -> list[dict[str, An
                 recall_key,
                 f1_key,
             ) = category_keys(category)
-            a_label, b_label = category_label(category)
+            raw_reference_name = common_raw_reference_name(group_rows) or fallback_raw_reference_name
+            a_label, b_label = category_label(category, raw_reference_name)
             row = {
                 "group": group,
-                "category": category,
+                "category": raw_category_name(raw_reference_name) if category == RAW_CATEGORY else category,
+                "category_storage": category,
+                "raw_reference_name": raw_reference_name,
                 "runs": len(group_rows),
                 "metric_a_label": a_label,
                 "metric_b_label": b_label,
@@ -310,6 +347,7 @@ def write_markdown(
     summary_rows: list[dict[str, Any]],
 ) -> None:
     complete_rows = [row for row in scene_rows if row.get("complete")]
+    raw_label = raw_reference_label(common_raw_reference_name(complete_rows))
     lines = [
         "# Object-X Final Geometry 100-Scene Benchmark",
         "",
@@ -318,8 +356,8 @@ def write_markdown(
         "",
         "## Category Aggregates",
         "",
-        "| Group | Category | Runs | A metric | A mean | A median | B metric | B mean | B median | Chamfer | P@5cm | R@5cm | F1@5cm |",
-        "| --- | --- | ---: | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Group | Category | Runs | A metric | A mean avg | A mean med | A med avg | B metric | B mean avg | B mean med | B med avg | Chamfer | P@5cm | R@5cm | F1@5cm |",
+        "| --- | --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in summary_rows:
         lines.append(
@@ -332,9 +370,11 @@ def write_markdown(
                     str(row["metric_a_label"]),
                     md_number(row["metric_a_mean_of_means_m"]),
                     md_number(row["metric_a_median_of_means_m"]),
+                    md_number(row["metric_a_mean_of_medians_m"]),
                     str(row["metric_b_label"]),
                     md_number(row["metric_b_mean_of_means_m"]),
                     md_number(row["metric_b_median_of_means_m"]),
+                    md_number(row["metric_b_mean_of_medians_m"]),
                     md_number(row["chamfer_l1_mean_m"]),
                     md_number(row["precision_5cm_mean"], 3),
                     md_number(row["recall_5cm_mean"], 3),
@@ -349,7 +389,7 @@ def write_markdown(
             "",
             "## Per-Scene Summary",
             "",
-            "| Bucket | Scene | Profile | Complete | Source score | GT F1@5cm | Input F1@5cm | Raw F1@5cm | GT acc mean | GT compl mean |",
+            f"| Bucket | Scene | Profile | Complete | Source score | GT F1@5cm | Input F1@5cm | {raw_label} F1@5cm | GT acc mean | GT compl mean |",
             "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )

@@ -23,6 +23,8 @@ FINAL_VS_GT_OUT_DIR="${FINAL_VS_GT_OUT_DIR:-$OUT_DIR/final_vs_gt}"
 FINAL_VS_INPUT_OUT_DIR="${FINAL_VS_INPUT_OUT_DIR:-$OUT_DIR/final_vs_objectx_input}"
 FINAL_VS_RAW_PI3X_OUT_DIR="${FINAL_VS_RAW_PI3X_OUT_DIR:-$OUT_DIR/final_vs_raw_pi3x}"
 WRITE_DEBUG_HTML="${WRITE_DEBUG_HTML:-1}"
+RAW_REFERENCE_NAME="${RAW_REFERENCE_NAME:-raw_pi3x_sequence}"
+RAW_REFERENCE_LABEL="${RAW_REFERENCE_LABEL:-Raw Pi3X}"
 
 if [[ "${RUN_OBJECTX:-0}" == "1" ]]; then
   PROFILE="${PROFILE:?Set PROFILE when RUN_OBJECTX=1 so slat/u3dgs can be run first}"
@@ -58,7 +60,7 @@ mkdir -p "$FINAL_VS_GT_OUT_DIR" "$FINAL_VS_INPUT_OUT_DIR" "$FINAL_VS_RAW_PI3X_OU
 echo "[objectx-final-eval] scan=$SCAN_ID method=$METHOD_NAME" >&2
 echo "[objectx-final-eval] final_ply=$FINAL_PLY" >&2
 echo "[objectx-final-eval] objectx_input=$PRED_READY_ROOT/files/gs_annotations/$SCAN_ID" >&2
-echo "[objectx-final-eval] pi3x_sequence=$PRED_SEQUENCE_DIR" >&2
+echo "[objectx-final-eval] raw_sequence=$PRED_SEQUENCE_DIR reference=$RAW_REFERENCE_NAME" >&2
 
 AUTO_SUMMARIZE_GEOMETRY=0 \
 SCAN_ID="$SCAN_ID" \
@@ -112,7 +114,7 @@ RAW_ARGS=(
   --reference-sequence-dir "$PRED_SEQUENCE_DIR"
   --scene-id "$SCAN_ID"
   --method-name "$METHOD_NAME"
-  --reference-name "raw_pi3x_sequence"
+  --reference-name "$RAW_REFERENCE_NAME"
   --out-dir "$FINAL_VS_RAW_PI3X_OUT_DIR"
   --sequence-conf-thr "${FINAL_VS_RAW_SEQUENCE_CONF_THR:-${SEQUENCE_CONF_THR:-0.10}}"
   --sequence-pixel-stride "${FINAL_VS_RAW_SEQUENCE_PIXEL_STRIDE:-${SEQUENCE_PIXEL_STRIDE:-2}}"
@@ -140,6 +142,7 @@ fi
 
 "$PYTHON_BIN" - "$OUT_DIR" "$FINAL_VS_GT_OUT_DIR/metrics.json" "$FINAL_VS_INPUT_OUT_DIR/metrics.json" "$FINAL_VS_RAW_PI3X_OUT_DIR/metrics.json" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -150,6 +153,7 @@ raw_path = Path(sys.argv[4])
 gt = json.loads(gt_path.read_text())
 inp = json.loads(input_path.read_text())
 raw = json.loads(raw_path.read_text())
+raw_label = os.environ.get("RAW_REFERENCE_LABEL", "Raw Pi3X")
 
 def fmt(value, digits=4):
     if value is None:
@@ -191,17 +195,17 @@ lines = [
     f"- Input -> final mean/median/p95: `{fmt(inp.get('reference_to_final', {}).get('mean'))}` / `{fmt(inp.get('reference_to_final', {}).get('median'))}` / `{fmt(inp.get('reference_to_final', {}).get('p95'))}` m",
     f"- F1@5cm: `{fmt(inp_t.get('fscore'), 3)}`",
     "",
-    "## Final Output vs Raw Pi3X",
+    f"## Final Output vs {raw_label}",
     "",
-    f"- Final -> raw Pi3X mean/median/p95: `{fmt(raw.get('final_to_reference', {}).get('mean'))}` / `{fmt(raw.get('final_to_reference', {}).get('median'))}` / `{fmt(raw.get('final_to_reference', {}).get('p95'))}` m",
-    f"- Raw Pi3X -> final mean/median/p95: `{fmt(raw.get('reference_to_final', {}).get('mean'))}` / `{fmt(raw.get('reference_to_final', {}).get('median'))}` / `{fmt(raw.get('reference_to_final', {}).get('p95'))}` m",
+    f"- Final -> {raw_label} mean/median/p95: `{fmt(raw.get('final_to_reference', {}).get('mean'))}` / `{fmt(raw.get('final_to_reference', {}).get('median'))}` / `{fmt(raw.get('final_to_reference', {}).get('p95'))}` m",
+    f"- {raw_label} -> final mean/median/p95: `{fmt(raw.get('reference_to_final', {}).get('mean'))}` / `{fmt(raw.get('reference_to_final', {}).get('median'))}` / `{fmt(raw.get('reference_to_final', {}).get('p95'))}` m",
     f"- F1@5cm: `{fmt(raw_t.get('fscore'), 3)}`",
     "",
     "## Artifacts",
     "",
     f"- GT overlay: `{gt_path.parent / 'overlay_pred_gt.html'}`",
     f"- Input overlay: `{input_path.parent / 'overlay_final_reference.html'}`",
-    f"- Raw Pi3X overlay: `{raw_path.parent / 'overlay_final_reference.html'}`",
+    f"- {raw_label} overlay: `{raw_path.parent / 'overlay_final_reference.html'}`",
 ]
 out_dir.mkdir(parents=True, exist_ok=True)
 (out_dir / "report_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
