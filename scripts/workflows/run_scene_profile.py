@@ -964,28 +964,33 @@ def build_geometry_eval_action(repo_root: Path, profile: dict):
     pred_root = sec.get("pred_root", roots(profile).get("reconstruction"))
     scenes_dirname = sec.get("scenes_dirname", "scenes_sam2_pi3x")
     method_name = sec.get("method_name", profile.get("name", "pi3x"))
+    dataset = sec.get("dataset", profile.get("dataset", os.environ.get("GEOMETRY_DATASET", "3rscan")))
+    dataset_normalized = str(dataset).lower()
 
     pred_sequence_dir = sec.get("pred_sequence_dir")
     if pred_sequence_dir is None and pred_root:
         pred_sequence_dir = f"{pred_root}/{scenes_dirname}/{scan_id}/sequence"
 
     gt_mesh = sec.get("gt_mesh")
-    if gt_mesh is None and baseline_root:
+    if gt_mesh is None and baseline_root and dataset_normalized in {"3rscan", "3rscan-v2", "scan3r"}:
         gt_mesh = f"{baseline_root}/scenes/{scan_id}/mesh.refined.v2.obj"
 
     gt_sequence_zip = sec.get("gt_sequence_zip")
-    if gt_sequence_zip is None and baseline_root:
+    if gt_sequence_zip is None and baseline_root and dataset_normalized in {"3rscan", "3rscan-v2", "scan3r"}:
         gt_sequence_zip = f"{baseline_root}/scenes/{scan_id}/sequence.zip"
+    gt_sequence_dir = sec.get("gt_sequence_dir")
 
     env_updates = {
         "SCAN_ID": scan_id,
         "METHOD_NAME": method_name,
+        "GEOMETRY_DATASET": dataset,
         "PRED_INPUT_MODE": sec.get("pred_input_mode", "sequence"),
         "PRED_ROOT": pred_root,
         "BASELINE_ROOT": baseline_root,
         "PRED_SEQUENCE_DIR": pred_sequence_dir,
         "GT_MESH": gt_mesh,
         "GT_SEQUENCE_ZIP": gt_sequence_zip,
+        "GT_SEQUENCE_DIR": gt_sequence_dir,
         "GEOMETRY_EVAL_GROUP": sec.get(
             "group", os.environ.get("GEOMETRY_EVAL_GROUP", "final")
         ),
@@ -1043,6 +1048,7 @@ def build_objectx_final_geometry_eval_action(repo_root: Path, profile: dict):
     baseline_root = sec.get("baseline_root", roots(profile).get("baseline"))
     pred_root = sec.get("pred_root", roots(profile).get("reconstruction"))
     pred_ready_root = sec.get("pred_ready_root", sec.get("input_root", roots(profile).get("pred_ready")))
+    dataset = sec.get("dataset", profile.get("dataset", os.environ.get("GEOMETRY_DATASET", "3rscan")))
     scenes_dirname = sec.get(
         "scenes_dirname",
         section(profile, "geometry_eval").get("scenes_dirname", "scenes_sam2_pi3x"),
@@ -1058,12 +1064,16 @@ def build_objectx_final_geometry_eval_action(repo_root: Path, profile: dict):
     env_updates = {
         "SCAN_ID": scan_id,
         "METHOD_NAME": method_name,
+        "GEOMETRY_DATASET": dataset,
         "PRED_ROOT": pred_root,
         "PRED_READY_ROOT": pred_ready_root,
         "BASELINE_ROOT": baseline_root,
         "SCENES_DIRNAME": scenes_dirname,
         "PRED_SEQUENCE_DIR": pred_sequence_dir,
         "FINAL_PLY": final_ply,
+        "GT_MESH": sec.get("gt_mesh"),
+        "GT_SEQUENCE_ZIP": sec.get("gt_sequence_zip"),
+        "GT_SEQUENCE_DIR": sec.get("gt_sequence_dir"),
         "GEOMETRY_EVAL_GROUP": sec.get(
             "group", os.environ.get("GEOMETRY_EVAL_GROUP", "objectx_final")
         ),

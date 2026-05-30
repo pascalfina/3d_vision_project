@@ -1,0 +1,10 @@
+scannet_scene0432_01_pi3x
+scannet_scene0161_02_pi3x
+scannet_scene0161_01_pi3x
+scannet_scene0161_00_pi3x
+scannet_scene0013_01_pi3x
+scannet_scene0150_02_pi3x
+scannet_scene0485_00_pi3x
+scannet_scene0150_01_pi3x
+scannet_scene0160_04_pi3x
+scannet_scene0183_00_pi3x

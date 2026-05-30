@@ -762,6 +762,84 @@ def _parse_color_intrinsics(text: str) -> dict:
     return {"width": width, "height": height, "intrinsic": intrinsic}
 
 
+def _normalize_scannet_sequence_dir(sequence_dir: Path | None) -> Path | None:
+    if sequence_dir is None:
+        return None
+    if (sequence_dir / "data" / "pose").is_dir() and (sequence_dir / "data" / "intrinsic").is_dir():
+        return sequence_dir / "data"
+    return sequence_dir
+
+
+def _is_scannet_sequence_dir(sequence_dir: Path | None) -> bool:
+    sequence_dir = _normalize_scannet_sequence_dir(sequence_dir)
+    return (
+        sequence_dir is not None
+        and (sequence_dir / "pose").is_dir()
+        and (sequence_dir / "intrinsic").is_dir()
+    )
+
+
+def _scannet_frame_variants(frame_id: str) -> list[str]:
+    stem = str(frame_id)
+    if stem.startswith("frame-"):
+        stem = stem.removeprefix("frame-")
+    for suffix in (".pose.txt", ".depth.png", ".depth.pgm", ".color.jpg", ".color.png"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+    variants = [stem]
+    try:
+        number = int(stem)
+    except ValueError:
+        pass
+    else:
+        variants.extend([str(number), f"{number:06d}"])
+    out = []
+    seen = set()
+    for value in variants:
+        if value not in seen:
+            out.append(value)
+            seen.add(value)
+    return out
+
+
+def _scannet_sequence_file(
+    sequence_dir: Path,
+    subdir: str,
+    frame_id: str,
+    suffixes: Iterable[str],
+) -> Path:
+    sequence_dir = _normalize_scannet_sequence_dir(sequence_dir) or sequence_dir
+    for variant in _scannet_frame_variants(frame_id):
+        for suffix in suffixes:
+            path = sequence_dir / subdir / f"{variant}{suffix}"
+            if path.exists():
+                return path
+    suffix_text = ", ".join(suffixes)
+    raise FileNotFoundError(
+        f"Missing ScanNet {subdir} frame {frame_id} ({suffix_text}) in {sequence_dir}"
+    )
+
+
+def _first_image_size(paths: Iterable[Path]) -> tuple[int, int] | None:
+    for path in paths:
+        if not path.exists():
+            continue
+        with Image.open(path) as image:
+            return image.size
+    return None
+
+
+def _numeric_frame_sort_key(value: str) -> tuple[int, int | str]:
+    try:
+        return (0, int(value))
+    except ValueError:
+        return (1, value)
+
+
+def _read_matrix_text(text: str) -> np.ndarray:
+    return np.loadtxt(io.StringIO(text)).reshape(4, 4).astype(np.float32)
+
+
 def _zip_member_by_basename(zip_path: Path, basename: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
         candidates = [name for name in zf.namelist() if Path(name).name == basename]
@@ -794,6 +872,29 @@ def load_intrinsics(
     sequence_dir: Path | None = None,
     sequence_zip: Path | None = None,
 ) -> dict:
+    if sequence_dir is not None and sequence_zip is None and _is_scannet_sequence_dir(sequence_dir):
+        sequence_dir = _normalize_scannet_sequence_dir(sequence_dir) or sequence_dir
+        intrinsic = np.loadtxt(sequence_dir / "intrinsic" / "intrinsic_color.txt")[:3, :3].astype(
+            np.float32
+        )
+        image_size = _first_image_size(
+            sorted((sequence_dir / "color").glob("*.jpg"))
+            + sorted((sequence_dir / "color").glob("*.png"))
+        )
+        width, height = image_size if image_size is not None else (1296, 968)
+        # Some ScanNet releases contain depth intrinsics in intrinsic_color.txt.
+        # Mirror Object-X's existing ScanNet fallback, but only for full-res color.
+        if intrinsic[0, 0] < 1000.0 and width >= 1000:
+            intrinsic = np.array(
+                [
+                    [1170.187988, 0.0, 647.75],
+                    [0.0, 1170.187988, 483.75],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            )
+        return {"width": int(width), "height": int(height), "intrinsic": intrinsic}
+
     text = _read_sequence_text(
         sequence_dir=sequence_dir,
         sequence_zip=sequence_zip,
@@ -807,6 +908,23 @@ def load_depth_camera_info(
     sequence_dir: Path | None = None,
     sequence_zip: Path | None = None,
 ) -> dict:
+    if sequence_dir is not None and sequence_zip is None and _is_scannet_sequence_dir(sequence_dir):
+        sequence_dir = _normalize_scannet_sequence_dir(sequence_dir) or sequence_dir
+        intrinsic = np.loadtxt(sequence_dir / "intrinsic" / "intrinsic_depth.txt")[:3, :3].astype(
+            np.float32
+        )
+        image_size = _first_image_size(
+            sorted((sequence_dir / "depth").glob("*.png"))
+            + sorted((sequence_dir / "depth").glob("*.pgm"))
+        )
+        width, height = image_size if image_size is not None else (640, 480)
+        return {
+            "width": int(width),
+            "height": int(height),
+            "depth_shift": 1000.0,
+            "intrinsic": intrinsic,
+        }
+
     text = _read_sequence_text(
         sequence_dir=sequence_dir,
         sequence_zip=sequence_zip,
@@ -828,6 +946,12 @@ def load_depth_image_meters(
     sequence_zip: Path | None = None,
     depth_shift: float,
 ) -> np.ndarray:
+    if sequence_dir is not None and sequence_zip is None and _is_scannet_sequence_dir(sequence_dir):
+        path = _scannet_sequence_file(sequence_dir, "depth", frame_id, [".png", ".pgm"])
+        image = Image.open(path)
+        image.load()
+        return np.asarray(image, dtype=np.float32) / float(depth_shift)
+
     basename = f"frame-{frame_id}.depth.pgm"
     if sequence_dir is not None:
         image = Image.open(sequence_dir / basename)
@@ -855,14 +979,25 @@ def frame_ids_from_sequence(
     stride: int,
     max_frames: int,
 ) -> list[str]:
-    if sequence_dir is not None:
+    if sequence_dir is not None and sequence_zip is None and _is_scannet_sequence_dir(sequence_dir):
+        sequence_dir = _normalize_scannet_sequence_dir(sequence_dir) or sequence_dir
+        stems = [p.stem for p in (sequence_dir / "pose").glob("*.txt")]
+        stems = sorted(set(stems), key=_numeric_frame_sort_key)
+        frame_ids = []
+        for stem in stems:
+            try:
+                frame_ids.append(f"{int(stem):06d}")
+            except ValueError:
+                frame_ids.append(stem)
+    elif sequence_dir is not None:
         names = [p.name for p in sequence_dir.glob("frame-*.pose.txt")]
+        frame_ids = sorted({frame_id for name in names if (frame_id := _extract_pose_frame_id(name))})
     elif sequence_zip is not None:
         with zipfile.ZipFile(sequence_zip) as zf:
             names = zf.namelist()
+        frame_ids = sorted({frame_id for name in names if (frame_id := _extract_pose_frame_id(name))})
     else:
         raise ValueError("Either sequence_dir or sequence_zip is required")
-    frame_ids = sorted({frame_id for name in names if (frame_id := _extract_pose_frame_id(name))})
     frame_ids = frame_ids[:: max(1, int(stride))]
     if max_frames and len(frame_ids) > max_frames:
         positions = np.linspace(0, len(frame_ids) - 1, max_frames).round().astype(int)
@@ -876,12 +1011,16 @@ def load_pose_matrix(
     sequence_dir: Path | None = None,
     sequence_zip: Path | None = None,
 ) -> np.ndarray:
+    if sequence_dir is not None and sequence_zip is None and _is_scannet_sequence_dir(sequence_dir):
+        path = _scannet_sequence_file(sequence_dir, "pose", frame_id, [".txt"])
+        return np.loadtxt(path).reshape(4, 4).astype(np.float32)
+
     text = _read_sequence_text(
         sequence_dir=sequence_dir,
         sequence_zip=sequence_zip,
         basename=f"frame-{frame_id}.pose.txt",
     )
-    return np.loadtxt(text.splitlines()).reshape(4, 4).astype(np.float32)
+    return _read_matrix_text(text)
 
 
 def load_pose_centers(
@@ -1008,6 +1147,8 @@ def collect_rgbd_correspondences(
 
         pred_pose = np.loadtxt(pred_pose_path).reshape(4, 4).astype(np.float32)
         gt_pose = load_pose_matrix(frame_id, sequence_dir=gt_sequence_dir, sequence_zip=gt_sequence_zip)
+        if not (np.isfinite(pred_pose).all() and np.isfinite(gt_pose).all()):
+            continue
         depth = load_depth_image_meters(
             frame_id,
             sequence_dir=gt_sequence_dir,
@@ -1223,6 +1364,8 @@ def visible_gt_mask(
 
     for frame_id in frame_ids:
         pose = load_pose_matrix(frame_id, sequence_dir=sequence_dir, sequence_zip=sequence_zip)
+        if not np.isfinite(pose).all():
+            continue
         world_to_camera = np.linalg.inv(pose).astype(np.float32)
         cam_h = (world_to_camera @ points_h.T).T
         cam = cam_h[:, :3] / np.clip(cam_h[:, 3:4], 1e-8, np.inf)

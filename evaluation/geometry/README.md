@@ -19,6 +19,87 @@ BASELINE_ROOT=<gt_root> \
 bash evaluation/geometry/run_pi3x_geometry_eval.sh
 ```
 
+## Dataset Selection
+
+The same evaluator supports both 3RScan and ScanNet via `GEOMETRY_DATASET`.
+The default remains `3rscan`.
+
+3RScan expects the existing Object-X/3RScan layout:
+
+```bash
+GEOMETRY_DATASET=3rscan \
+SCAN_ID=<3rscan_uuid> \
+PRED_ROOT=<pi3x_pred_root> \
+BASELINE_ROOT=<3rscan_gt_root> \
+bash evaluation/geometry/run_pi3x_geometry_eval.sh
+```
+
+ScanNet expects real downloaded/exported scans, not just the SDK zip.  The
+course file `/work/courses/3dv/team35/pafina/ScanNetDownload.zip` contains the
+official downloader and SDK.  Prepare one scene like this:
+
+```bash
+SCAN_ID=scene0000_00 \
+SCANNET_ROOT=/work/scratch/pafina/scannet_data \
+SCANNET_FRAME_SKIP=10 \
+SCANNET_MAX_FRAMES=300 \
+bash evaluation/geometry/prepare_scannet_scene.sh
+```
+
+This downloads the selected ScanNet files into
+`$SCANNET_ROOT/scans/<scan_id>/`, exports `<scan_id>.sens` to
+`data/{color,depth,pose,intrinsic}`, writes an Object-X compatible
+`sequence/frame-XXXXXX.*` view, and creates a compatibility symlink at
+`$SCANNET_ROOT/scenes/<scan_id>`.  Use `SCANNET_FRAME_SKIP=1
+SCANNET_MAX_FRAMES=0` for full-frame export, but be careful: full ScanNet
+`.sens` scenes can contain thousands of frames.  The benchmark uses capped mode:
+it samples at most 300 frames per scene, evenly over the full `.sens` span.
+
+Prepare the 300-scene ScanNet Pi3X geometry benchmark:
+
+```bash
+SCANNET_TARGET_SCENES=300 \
+SCANNET_SELECTION_MAX_FRAMES=300 \
+SCANNET_SELECTION_MODE=cap \
+bash evaluation/geometry/run_scannet_pi3x_sequence_benchmark_under300.sh
+```
+
+Submit the same benchmark non-interactively on Slurm:
+
+```bash
+sbatch scripts/slurm/scannet_pi3x_under300_geometry_benchmark.sbatch
+tail -f "$(ls -t debug/slurm-scannet-pi3x-geom300-*.out | head -n 1)"
+```
+
+`SCANNET_SELECTION_MODE=strict` means raw ScanNet scenes must have
+`numColorFrames <= 300`; ScanNet v2 only has very few such scenes.  The default
+benchmark therefore uses `cap`, selecting 300 scenes and exporting at most 300
+frames per scene.
+
+Run the same geometry metric on ScanNet:
+
+```bash
+GEOMETRY_DATASET=scannet \
+SCAN_ID=scene0000_00 \
+METHOD_NAME=scannet_pi3x \
+PRED_INPUT_MODE=sequence \
+PRED_ROOT=<pi3x_pred_root> \
+BASELINE_ROOT=/work/scratch/pafina/scannet_data \
+bash evaluation/geometry/run_pi3x_geometry_eval.sh
+```
+
+Important ScanNet differences:
+
+- GT meshes are PLY files such as `<scan>_vh_clean.ply` or
+  `<scan>_vh_clean_2.ply`, not `mesh.refined.v2.obj`.
+- RGB-D frames come from `.sens` export as `data/color/*.jpg`,
+  `data/depth/*.png`, `data/pose/*.txt`, and `data/intrinsic/*.txt`, not
+  `sequence.zip`.
+- The `<scan>.txt` file contains `axisAlignment`, but the default metric uses
+  the mesh and exported poses in their native shared coordinate frame.  Do not
+  apply `axisAlignment` unless the prediction pipeline also uses the aligned
+  coordinate frame.
+
 For debug PLY outputs:
 
 ```bash
