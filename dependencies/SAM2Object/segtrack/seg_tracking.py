@@ -116,12 +116,11 @@ mask_generator = SAM2AutomaticMaskGenerator(
     multimask_output=False,
 )
 
-if DATASET == 'ScanNet':
-    with open('scannet_scene_val.txt', 'r') as file:
-        data_list = [line.strip() for line in file.readlines()]
-    video_dir_scene_ids = data_list
-elif DATASET == '3RScan':
-    video_dir_scene_ids = ['5341b7e3-8a66-2cdd-8709-66a2159f0017']
+if DATASET in ('ScanNet', '3RScan'):
+    scan_ids_env = os.environ.get("SCAN_IDS", "")
+    video_dir_scene_ids = [s.strip() for s in scan_ids_env.split(",") if s.strip()]
+    if not video_dir_scene_ids:
+        raise ValueError("SCAN_IDS env is empty; set it (the batch script exports it)")
 else:
     raise ValueError(f"Unknown DATASET: {DATASET}")
 

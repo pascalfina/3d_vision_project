@@ -37,6 +37,7 @@ Examples:
 """
 
 import argparse
+import csv
 import json
 import os
 import os.path as osp
@@ -51,8 +52,15 @@ DEFAULT_IOU_THRESHOLDS = (0.25, 0.5, 0.75)
 # --------------------------------------------------------------------------- #
 # Loading
 # --------------------------------------------------------------------------- #
-def load_gt(gt_root: str, scan_id: str):
-    """Return (objectId per vertex [N], {objectId: label_str})."""
+def load_gt(dataset: str, gt_root: str, scan_id: str):
+    """Dispatch to the per-dataset GT loader."""
+    if dataset.lower() == "scannet":
+        return load_gt_scannet(gt_root, scan_id)
+    return load_gt_3rscan(gt_root, scan_id)
+
+
+def load_gt_3rscan(gt_root: str, scan_id: str):
+    """Return (objectId per vertex [N], {objectId: label_str}). objectId 0 = unannotated."""
     ply_path = osp.join(gt_root, scan_id, "labels.instances.annotated.v2.ply")
     if not osp.exists(ply_path):
         raise FileNotFoundError(f"GT ply not found: {ply_path}")
@@ -69,6 +77,40 @@ def load_gt(gt_root: str, scan_id: str):
     else:
         print(f"[WARN] no semseg.v2.json for {scan_id}; "
               f"objects-only mode cannot drop structural classes.")
+    return object_ids, id2label
+
+
+def load_gt_scannet(gt_root: str, scan_id: str):
+    """
+    Reconstruct per-vertex instance ids for ScanNet from the oversegmentation +
+    aggregation, mirroring utils/scannet.py (read_segmentation / read_obj_info_nyu40):
+      - <scene>_vh_clean_2.0.010000.segs.json -> 'segIndices' (per-vertex segment id)
+      - <scene>.aggregation.json (or <scene>_vh_clean.aggregation.json) -> 'segGroups'
+    ScanNet objectId is 0-based, so we store objectId+1 and leave unassigned vertices
+    at 0 (preserving the '0 = unannotated/ignore' convention used for 3RScan).
+    """
+    segs_path = osp.join(gt_root, scan_id, f"{scan_id}_vh_clean_2.0.010000.segs.json")
+    if not osp.exists(segs_path):
+        raise FileNotFoundError(f"ScanNet segs json not found: {segs_path}")
+    agg_path = None
+    for cand in (f"{scan_id}.aggregation.json", f"{scan_id}_vh_clean.aggregation.json"):
+        if osp.exists(osp.join(gt_root, scan_id, cand)):
+            agg_path = osp.join(gt_root, scan_id, cand)
+            break
+    if agg_path is None:
+        raise FileNotFoundError(f"ScanNet aggregation json not found for {scan_id}")
+
+    with open(segs_path) as f:
+        seg_indices = np.asarray(json.load(f)["segIndices"]).astype(np.int64)
+    with open(agg_path) as f:
+        seg_groups = json.load(f).get("segGroups", [])
+
+    object_ids = np.zeros(len(seg_indices), dtype=np.int64)
+    id2label = {}
+    for g in seg_groups:
+        oid = int(g["objectId"]) + 1  # 0 reserved for unannotated
+        id2label[oid] = str(g.get("label", "unknown")).strip().lower()
+        object_ids[np.isin(seg_indices, np.asarray(g["segments"], dtype=np.int64))] = oid
     return object_ids, id2label
 
 
@@ -285,12 +327,42 @@ def print_report(title, scan_results, agg, iou_thresholds):
               f"{t['f1']:>10.3f} {t['macro_f1']:>10.3f}")
 
 
+def append_ledger(path, run_tag, dataset, results, modes, thresholds):
+    """Append one tab-separated row per (scan, mode) to a never-overwritten .txt
+    ledger; write the header only when the file is new/empty. Pure append, so the
+    file accumulates across runs and re-runs add a new (run_tag-stamped) row."""
+    os.makedirs(osp.dirname(path) or ".", exist_ok=True)
+    need_header = (not osp.exists(path)) or osp.getsize(path) == 0
+    cols = ["run_tag", "dataset", "scan", "mode",
+            "n_gt", "n_pred", "gt_coverage", "pred_purity"]
+    for tau in thresholds:
+        cols += [f"{k}@{tau:g}" for k in ("p", "r", "f1", "miou", "tp", "fp", "fn")]
+    n_rows = 0
+    with open(path, "a", newline="") as f:
+        w = csv.writer(f, delimiter="\t")
+        if need_header:
+            w.writerow(cols)
+        for m in modes:
+            for scan_id, r in results[m].items():
+                row = [run_tag, dataset, scan_id, m, r["n_gt"], r["n_pred"],
+                       f"{r['gt_coverage']:.6f}", f"{r['pred_purity']:.6f}"]
+                for tau in thresholds:
+                    t = r["per_threshold"][tau]
+                    row += [f"{t['precision']:.6f}", f"{t['recall']:.6f}",
+                            f"{t['f1']:.6f}", f"{t['mean_matched_iou']:.6f}",
+                            t["tp"], t["fp"], t["fn"]]
+                w.writerow(row)
+                n_rows += 1
+    return n_rows
+
+
 # --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gt_root", required=True,
-                    help="3RScan scenes dir, e.g. /cluster/project/cvg/data/3RScan/scenes")
+                    help="scenes dir with per-scan GT: 3RScan /cluster/project/cvg/data/3RScan/scenes "
+                         "or ScanNet /cluster/project/cvg/data/scannet/scans")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--scans", nargs="+", help="scan ids")
     g.add_argument("--split_file", help="text file with one scan id per line")
@@ -303,6 +375,8 @@ def main():
     p.add_argument("--pred_scannet_dir",
                    help="dir with SAM2Object ScanNet export; use {scan} placeholder")
 
+    ap.add_argument("--dataset", default="3RScan", choices=["3RScan", "scannet", "ScanNet", "3rscan"],
+                    help="GT format/layout to load (case-insensitive)")
     ap.add_argument("--mode", choices=["objects-only", "all", "both"],
                     default="objects-only")
     ap.add_argument("--structural_labels", nargs="+", default=sorted(DEFAULT_STRUCTURAL),
@@ -312,6 +386,11 @@ def main():
     ap.add_argument("--min_gt_points", type=int, default=0)
     ap.add_argument("--min_pred_points", type=int, default=0)
     ap.add_argument("--out", help="optional path to dump full JSON report")
+    ap.add_argument("--append_txt",
+                    help="append one tab-separated row per (scan,mode) to this .txt "
+                         "ledger (header written if new; never overwritten)")
+    ap.add_argument("--run_tag", default="",
+                    help="tag written into each appended ledger row, e.g. <timestamp>_<jobid>")
     args = ap.parse_args()
 
     if args.split_file:
@@ -328,7 +407,7 @@ def main():
     skipped = []
     for scan_id in scans:
         try:
-            gt_ids, id2label = load_gt(args.gt_root, scan_id)
+            gt_ids, id2label = load_gt(args.dataset, args.gt_root, scan_id)
             pred = load_pred(args, scan_id, len(gt_ids), gt_ids)
         except (FileNotFoundError, RuntimeError) as e:
             # Missing prediction/GT, or vertex-count mismatch: skip, keep going.
@@ -374,6 +453,11 @@ def main():
         with open(args.out, "w") as f:
             json.dump(keys_to_str(full), f, indent=2)
         print(f"\n[OK] wrote report: {args.out}")
+
+    if args.append_txt:
+        n_rows = append_ledger(args.append_txt, args.run_tag, args.dataset,
+                               results, modes, thresholds)
+        print(f"[OK] appended {n_rows} row(s) to ledger: {args.append_txt}")
 
 
 if __name__ == "__main__":

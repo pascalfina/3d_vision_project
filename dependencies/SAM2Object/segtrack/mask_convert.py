@@ -21,16 +21,12 @@ def copy_png_files(source_dir, destination_dir):
             print(f'Copied: {source_file} to {destination_file}')
 
 
-if DATASET == 'ScanNet':
-    with open(f'{DATA_PATH}/scannet_scene_val.txt', 'r') as file:
-        data_list = [line.strip() for line in file.readlines()]
-
-    video_dir_scene_ids = data_list
-    video_dir_scene_ids = os.listdir(base_dir)
-elif DATASET == '3RScan':
-    #with open(f'{DATA_PATH}/{split}_scenes.txt', 'r') as file:
-    #    data_list = [line.strip() for line in file.readlines()]
-    video_dir_scene_ids = os.listdir(base_dir)
+# Select scans from SCAN_IDS (set by the batch script) for both datasets.
+# Scenes whose mask_data_merge dir is absent are skipped in the loop below.
+SCAN_IDS = [s.strip() for s in os.environ.get("SCAN_IDS", "").split(",") if s.strip()]
+if not SCAN_IDS:
+    raise ValueError("SCAN_IDS env is empty; set it (the batch script exports it)")
+video_dir_scene_ids = SCAN_IDS
 
 
 for scene in video_dir_scene_ids:

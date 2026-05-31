@@ -51,7 +51,10 @@ def parse_3rscan_intrinsics(info_path, key):
 
 for path in path_list:
     if DATASET == 'ScanNet':
-        for scene_dir in ol(path):
+        for scene_dir in SCAN_IDS:
+            if not os.path.isdir(opj(path, scene_dir)):
+                print(f"[SKIP] No scene folder found for {scene_dir}")
+                continue
             os.makedirs(opj(save_path, scene_dir), exist_ok=True)
             shutil.copyfile(opj(path, scene_dir, 'intrinsics', 'intrinsic_color.txt'), opj(save_path, scene_dir, 'intrinsics_color.txt'))
             shutil.copyfile(opj(path, scene_dir, 'intrinsics', 'intrinsic_depth.txt'), opj(save_path, scene_dir, 'intrinsics_depth.txt'))
@@ -87,8 +90,9 @@ for path in path_list:
                     "m_calibrationDepthIntrinsic",
                 )
 
-                np.savetxt(opj(out_scene_path, "intrinsic_color.txt"), K_color)
-                np.savetxt(opj(out_scene_path, "intrinsic_depth.txt"), K_depth)
+                # plural names to match sam2object's get_scannet_color_and_depth_intrinsic reader
+                np.savetxt(opj(out_scene_path, "intrinsics_color.txt"), K_color)
+                np.savetxt(opj(out_scene_path, "intrinsics_depth.txt"), K_depth)
             else:
                 print(f"[WARNING] No _info.txt found for {scene_dir}")
 

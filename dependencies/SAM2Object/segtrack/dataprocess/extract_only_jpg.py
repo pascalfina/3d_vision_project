@@ -20,10 +20,13 @@ os.makedirs(save_path,exist_ok=True)
 frame_step = 1
 for path in path_list:
     if DATASET == 'ScanNet':
-        for scene_dir in ol(path):
+        for scene_dir in SCAN_IDS:
+            if not os.path.isdir(opj(path, scene_dir, 'color')):
+                print(f"[SKIP] No color folder found for {scene_dir}")
+                continue
             if os.path.exists(opj(save_path, scene_dir)):
                 continue
-            
+
             os.makedirs(opj(save_path, scene_dir), exist_ok=True)
             for img in ol(opj(path, scene_dir, 'color')):
                 file_prefix = int(img.split('.')[0])

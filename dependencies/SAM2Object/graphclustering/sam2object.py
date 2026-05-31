@@ -10,8 +10,11 @@ import cv2
 from sam2object_base import *
 from linetimer import CodeTimer
 
-DATASET   = '3RScan'
-DATA_PATH = '/cluster/project/cvg/data/3RScan/scenes' # if scannet scans
+# Dataset + input-scenes dir come from env (set by the batch script); defaults
+# preserve the previous hardcoded 3RScan behaviour. The per-dataset PLY/segs
+# filename branches in everything_seg/get_seg_data key off DATASET.
+DATASET   = os.environ.get("DATASET", "3RScan")
+DATA_PATH = os.environ.get("SAM2OBJECT_DATA_PATH", "/cluster/project/cvg/data/3RScan/scenes")
 
 class ScanNet_SAM2OBJECT(SAM2OBJECTBase):
     def __init__(self, points, args):
