@@ -21,6 +21,12 @@ PROJECT_DIR="/cluster/home/ealegret/3d_vision_project"
 mkdir -p /cluster/scratch/ealegret/logs
 cd "$PROJECT_DIR"
 
+# Select ScanNet (run_pipeline.sh defaults to 3RScan when these are unset).
+export DATASET=ScanNet
+export SCAN_LIST="$PROJECT_DIR/objectx_complete_scans_scannet.txt"
+# Optional override of the read-only pre-extracted frames source:
+# export SCANNET_POSED_SRC=/cluster/project/cvg/data/scannet/posed_images
+
 # run_pipeline.sh activates the venvs itself (.sam2object for seg, .venvv for eval).
 bash scripts/segmentation/run_pipeline.sh
 

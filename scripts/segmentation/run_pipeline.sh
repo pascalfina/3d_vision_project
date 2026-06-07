@@ -8,7 +8,7 @@ set -euo pipefail
 # ============================================================================
 # Config  (edit these)
 # ============================================================================
-DATASET="3RScan"                 # 3RScan | ScanNet  (exact case)
+DATASET="${DATASET:-3RScan}"     # 3RScan | ScanNet  (exact case; overridable from env/wrapper)
 YOUR_ROOT_DIR="/cluster/home/ealegret"
 YOUR_SCRATCH_DIR="/cluster/scratch/ealegret"
 PROJECT_DIR="$YOUR_ROOT_DIR/3d_vision_project"
@@ -38,6 +38,9 @@ case "$DATASET" in
   ScanNet)
     SAM2OBJECT_DATA_PATH="/cluster/project/cvg/data/scannet/scans"
     DATA_ROOT_DIR="$YOUR_SCRATCH_DIR/sam2object_scannet"
+    # Pre-extracted RGB-D frames (read-only). The preprocessing stage sources frames
+    # from here for ScanNet instead of extracting .sens. Override via env if needed.
+    SCANNET_POSED_SRC="${SCANNET_POSED_SRC:-/cluster/project/cvg/data/scannet/posed_images}"
     ;;
   *) echo "ERROR: DATASET must be '3RScan' or 'ScanNet', got '$DATASET'"; exit 1 ;;
 esac
@@ -72,7 +75,9 @@ if [ "$RUN_SEGMENTATION" = true ]; then
 
   export VLSG_SPACE="$PROJECT_DIR"
   export PYTHONPATH="$VLSG_SPACE:${PYTHONPATH:-}:$VLSG_SPACE/dependencies/gaussian-splatting"
-  export DATASET DATA_ROOT_DIR SAM2OBJECT_DATA_PATH
+  # SCANNET_POSED_SRC is set only in the ScanNet case; exporting an unset name is a
+  # no-op for 3RScan (the preprocessing scripts fall back to their own default).
+  export DATASET DATA_ROOT_DIR SAM2OBJECT_DATA_PATH SCANNET_POSED_SRC
   export TORCH_HOME="$YOUR_SCRATCH_DIR/torch_cache"
   export XDG_CACHE_HOME="$YOUR_SCRATCH_DIR/.cache"
   # Reduce CUDA fragmentation OOM in SAM2 video propagation on long scenes (24GB GPU).
@@ -83,14 +88,14 @@ if [ "$RUN_SEGMENTATION" = true ]; then
   SEGTRACK="$PROJECT_DIR/dependencies/SAM2Object/segtrack"
 
   # The bulky per-scene segtrack/outputs (~0.9GB/scene) defaults to HOME (near quota),
-  # so we redirect it to scratch via a symlink (the dir is gitignored). The HOME symlink
-  # persists but scratch may PURGE its target between runs, leaving a dangling link -- so
-  # ALWAYS (re)create the target here, not just when the symlink is missing.
-  if [ -L "$SEGTRACK/outputs" ]; then
-    mkdir -p "$(readlink "$SEGTRACK/outputs")"
-  elif [ ! -e "$SEGTRACK/outputs" ]; then
-    mkdir -p "$DATA_ROOT_DIR/segtrack_outputs"
-    ln -s "$DATA_ROOT_DIR/segtrack_outputs" "$SEGTRACK/outputs"
+  # so we redirect it to scratch via a symlink (the dir is gitignored). Always point it at
+  # the ACTIVE dataset's DATA_ROOT_DIR: a stale symlink may target the OTHER dataset's
+  # scratch dir (after switching 3RScan<->ScanNet) or dangle after a scratch PURGE. We
+  # (re)create the target every run, and relink only when outputs is a symlink or absent
+  # (a real pre-existing dir, e.g. a manual override, is left untouched).
+  mkdir -p "$DATA_ROOT_DIR/segtrack_outputs"
+  if [ -L "$SEGTRACK/outputs" ] || [ ! -e "$SEGTRACK/outputs" ]; then
+    ln -sfn "$DATA_ROOT_DIR/segtrack_outputs" "$SEGTRACK/outputs"
     echo "[setup] segtrack/outputs -> $DATA_ROOT_DIR/segtrack_outputs (scratch)"
   fi
 
