@@ -17,15 +17,23 @@ def _resolve_frame_name(frame_idx=None, frame_id=None):
     return f"{int(frame_idx):06d}"
 
 
+def _ensure_output_dir(output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+
 def save_depth(depth, output_dir, frame_idx=None, frame_id=None):
     """Save depth as .pgm."""
+    _ensure_output_dir(output_dir)
     frame_name = _resolve_frame_name(frame_idx=frame_idx, frame_id=frame_id)
     depth_mm = (depth * 1000).astype(np.uint16)  # Convert to mm
-    cv2.imwrite(os.path.join(output_dir, f"frame-{frame_name}.depth.pgm"), depth_mm)
+    out_path = os.path.join(output_dir, f"frame-{frame_name}.depth.pgm")
+    if not cv2.imwrite(out_path, depth_mm):
+        raise OSError(f"Failed to write depth image: {out_path}")
 
 
 def save_depth_raw(depth, output_dir, frame_idx=None, frame_id=None):
     """Save raw float depth as .npy for downstream fallback consumers."""
+    _ensure_output_dir(output_dir)
     frame_name = _resolve_frame_name(frame_idx=frame_idx, frame_id=frame_id)
     np.save(
         os.path.join(output_dir, f"frame-{frame_name}.depth_raw.npy"),
@@ -35,6 +43,7 @@ def save_depth_raw(depth, output_dir, frame_idx=None, frame_id=None):
 
 def save_confidence(confidence, output_dir, frame_idx=None, frame_id=None):
     """Save MUSt3R confidence as .npy."""
+    _ensure_output_dir(output_dir)
     frame_name = _resolve_frame_name(frame_idx=frame_idx, frame_id=frame_id)
     np.save(
         os.path.join(output_dir, f"frame-{frame_name}.conf.npy"),
@@ -50,6 +59,7 @@ def save_xyz_map(xyz, output_dir, frame_idx=None, frame_id=None):
     from depth + pinhole intrinsics, avoiding focal/principal-point mismatch
     against the original Tango intrinsics in _info.txt.
     """
+    _ensure_output_dir(output_dir)
     frame_name = _resolve_frame_name(frame_idx=frame_idx, frame_id=frame_id)
     np.save(
         os.path.join(output_dir, f"frame-{frame_name}.xyz.npy"),
@@ -58,6 +68,7 @@ def save_xyz_map(xyz, output_dir, frame_idx=None, frame_id=None):
 
 def save_poses(poses, output_dir, scene_id=None, frame_ids=None):
     """Save poses per frame as .txt."""
+    _ensure_output_dir(output_dir)
     for i, pose in enumerate(poses):
         frame_name = _resolve_frame_name(
             frame_idx=i,

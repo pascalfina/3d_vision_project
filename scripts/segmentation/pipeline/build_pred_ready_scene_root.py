@@ -17,6 +17,48 @@ FALLBACK_EIGEN13 = 13
 FALLBACK_RIO27 = 27
 FALLBACK_PLY_COLOR = "#808080"
 MANIFEST_NAME = "pred_ready_scene_manifest.json"
+SCANNET40_CLASS_LINES = [
+    "1\twall",
+    "2\tfloor",
+    "3\tcabinet",
+    "4\tbed",
+    "5\tchair",
+    "6\tsofa",
+    "7\ttable",
+    "8\tdoor",
+    "9\twindow",
+    "10\tbookshelf",
+    "11\tpicture",
+    "12\tcounter",
+    "13\tblinds",
+    "14\tdesk",
+    "15\tshelves",
+    "16\tcurtain",
+    "17\tdresser",
+    "18\tpillow",
+    "19\tmirror",
+    "20\tfloor mat",
+    "21\tclothes",
+    "22\tceiling",
+    "23\tbooks",
+    "24\trefridgerator",
+    "25\ttelevision",
+    "26\tpaper",
+    "27\ttowel",
+    "28\tshower curtain",
+    "29\tbox",
+    "30\twhiteboard",
+    "31\tperson",
+    "32\tnightstand",
+    "33\ttoilet",
+    "34\tsink",
+    "35\tlamp",
+    "36\tbathtub",
+    "37\tbag",
+    "38\totherstructure",
+    "39\totherfurniture",
+    "40\totherprop",
+]
 
 
 def parse_args():
@@ -145,6 +187,22 @@ def read_scene_graph(root: Path, scene_id: str, name: str = "data") -> dict:
     raise FileNotFoundError(f"Missing scene graph for {scene_id}: {gz_path} / {raw_path}")
 
 
+def make_synthetic_scene_graph(scene_id: str) -> dict:
+    """Small compatibility graph for non-3RScan datasets.
+
+    The downstream Object-X loaders expect the 3RScan-style graph keys to
+    exist, but for ScanNet we only need reconstructed object geometry here.
+    """
+
+    return {
+        "scan_id": scene_id,
+        "objects_id": np.zeros((0,), dtype=np.int64),
+        "object_attributes": [],
+        "bow_vec_object_attr_feats": np.zeros((0, 0), dtype=np.float32),
+        "bow_vec_object_edge_feats": np.zeros((0, 0), dtype=np.float32),
+    }
+
+
 def voxel_to_world(voxel_indices: np.ndarray, mean: np.ndarray, scale: float) -> np.ndarray:
     voxel = voxel_indices.astype(np.float32) * (1.0 / 64.0)
     voxel = voxel * 2.0 - 1.0
@@ -174,6 +232,77 @@ def deterministic_sample(points: np.ndarray, count: int) -> np.ndarray:
     return tiled[:count].astype(np.float32)
 
 
+def has_valid_legacy_scene_data(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        data = np.load(path)
+    except Exception:
+        return False
+    try:
+        files = getattr(data, "files", None)
+        return files is not None and all(
+            name in files for name in ("x", "y", "z", "objectId")
+        )
+    finally:
+        if hasattr(data, "close"):
+            data.close()
+
+
+def write_scene_data_npy(
+    target_root: Path,
+    scene_id: str,
+    ordered_objects: list[dict],
+    max_points_per_object: int = 4096,
+) -> None:
+    """Write the legacy Scan3R scene point file expected by inference.
+
+    `np.load(.../data.npy)` downstream reads zip-style arrays named x/y/z and
+    objectId, so we intentionally store npz content at the historical .npy path.
+    """
+
+    out_path = target_root / "scenes" / scene_id / "data.npy"
+    if has_valid_legacy_scene_data(out_path):
+        print(f"[pred-ready] keeping existing legacy scene data {out_path}")
+        return
+
+    points_parts = []
+    object_id_parts = []
+    for item in ordered_objects:
+        points = item["points_world"].astype(np.float32)
+        if points.shape[0] == 0:
+            continue
+        if max_points_per_object > 0 and points.shape[0] > max_points_per_object:
+            points = deterministic_sample(points, max_points_per_object)
+        obj_id = int(item["obj_id"])
+        points_parts.append(points)
+        object_id_parts.append(
+            np.full((points.shape[0],), obj_id, dtype=np.int32)
+        )
+
+    if points_parts:
+        points = np.concatenate(points_parts, axis=0).astype(np.float32)
+        object_ids = np.concatenate(object_id_parts, axis=0).astype(np.int32)
+    else:
+        points = np.zeros((0, 3), dtype=np.float32)
+        object_ids = np.zeros((0,), dtype=np.int32)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_remove(out_path)
+    with out_path.open("wb") as f:
+        np.savez(
+            f,
+            x=points[:, 0],
+            y=points[:, 1],
+            z=points[:, 2],
+            objectId=object_ids,
+        )
+    print(
+        f"[pred-ready] wrote legacy scene data {out_path} "
+        f"points={points.shape[0]} objects={len(ordered_objects)}"
+    )
+
+
 def build_target_3rscan(scan_data: list[dict], scene_id: str) -> list[dict]:
     for item in scan_data:
         if item["reference"] == scene_id or any(
@@ -190,6 +319,18 @@ def build_target_3rscan(scan_data: list[dict], scene_id: str) -> list[dict]:
     raise ValueError(f"Scene {scene_id} not found in baseline 3RScan.json")
 
 
+def build_synthetic_target_3rscan(scene_id: str, split: str) -> list[dict]:
+    return [
+        {
+            "reference": scene_id,
+            "scans": [],
+            "type": "validation" if split == "val" else split,
+            "ambiguity": [],
+            "generated": True,
+        }
+    ]
+
+
 def write_split_files(files_dir: Path, split: str, scene_id: str) -> None:
     for name in ["train", "val", "test"]:
         payload = f"{scene_id}\n" if name == split else ""
@@ -202,6 +343,32 @@ def pick_existing_dir(*candidates: Path) -> Optional[Path]:
         if candidate.exists():
             return candidate
     return None
+
+
+def pick_existing_file(*candidates: Path) -> Optional[Path]:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def ensure_scannet40_classes(files_dir: Path, baseline_root: Path) -> None:
+    target = files_dir / "scannet40_classes.txt"
+    if target.exists() or target.is_symlink():
+        return
+    source = pick_existing_file(
+        baseline_root / "files" / "scannet40_classes.txt",
+        Path(os.environ.get("OBJECTX_BASELINE_ROOT", "")) / "files" / "scannet40_classes.txt",
+        Path("/work/scratch/pafina/objectx-data-baseline/files/scannet40_classes.txt"),
+    )
+    if source is not None:
+        ensure_symlink(source, target)
+        return
+    print(
+        "[pred-ready] missing scannet40_classes.txt in baseline roots; "
+        "writing embedded ScanNet40 compatibility classes"
+    )
+    target.write_text("\n".join(SCANNET40_CLASS_LINES) + "\n", encoding="utf-8")
 
 
 def stage_scene_mask_snapshot(
@@ -285,9 +452,7 @@ def link_compatibility_inputs(
                 continue
             ensure_symlink(item, dst_item)
 
-    scannet_classes = baseline_root / "files" / "scannet40_classes.txt"
-    if scannet_classes.exists():
-        ensure_symlink(scannet_classes, files_dir / "scannet40_classes.txt")
+    ensure_scannet40_classes(files_dir, baseline_root)
 
     features_dir = pick_existing_dir(
         reconstruction_root / "files" / "Features3D",
@@ -304,8 +469,16 @@ def link_compatibility_inputs(
         )
         stage_scene_mask_snapshot(src_root, files_dir, scene_id, name)
 
-    scan_data = load_json(baseline_root / "files" / "3RScan.json")
-    write_json(files_dir / "3RScan.json", build_target_3rscan(scan_data, scene_id))
+    scan_data_path = baseline_root / "files" / "3RScan.json"
+    if scan_data_path.exists():
+        scan_data = load_json(scan_data_path)
+        write_json(files_dir / "3RScan.json", build_target_3rscan(scan_data, scene_id))
+    else:
+        print(
+            f"[pred-ready] missing {scan_data_path}; writing synthetic 3RScan.json "
+            f"for {scene_id}"
+        )
+        write_json(files_dir / "3RScan.json", build_synthetic_target_3rscan(scene_id, split))
     write_split_files(files_dir, split, scene_id)
     (files_dir / "gs_embeddings").mkdir(parents=True, exist_ok=True)
 
@@ -433,15 +606,6 @@ def build_objects_json(
     scene_id: str,
     ordered_objects: list[dict],
 ) -> tuple[dict, dict[int, dict], list[str]]:
-    all_scans = load_json(baseline_root / "files" / "objects.json")["scans"]
-    baseline_scan = next((item for item in all_scans if item["scan"] == scene_id), None)
-    if baseline_scan is None:
-        raise ValueError(f"Scene {scene_id} not found in baseline objects.json")
-
-    baseline_objects = {
-        int(obj["id"]): copy.deepcopy(obj) for obj in baseline_scan["objects"]
-    }
-    generated_objects = []
     used_semantic_fields = [
         "id",
         "label",
@@ -453,6 +617,28 @@ def build_objects_json(
         "affordances",
         "ply_color",
     ]
+
+    objects_path = baseline_root / "files" / "objects.json"
+    baseline_objects = {}
+    if objects_path.exists():
+        all_scans = load_json(objects_path)["scans"]
+        baseline_scan = next((item for item in all_scans if item["scan"] == scene_id), None)
+        if baseline_scan is not None:
+            baseline_objects = {
+                int(obj["id"]): copy.deepcopy(obj) for obj in baseline_scan["objects"]
+            }
+        else:
+            print(
+                f"[pred-ready] scene {scene_id} not found in {objects_path}; "
+                "using generated object metadata"
+            )
+    else:
+        print(
+            f"[pred-ready] missing {objects_path}; using generated object metadata "
+            f"for {scene_id}"
+        )
+
+    generated_objects = []
 
     for item in ordered_objects:
         obj_id = int(item["obj_id"])
@@ -689,7 +875,11 @@ def main():
     )
     write_json(target_root / "files" / "objects.json", objects_payload)
 
-    baseline_scene_graph = read_scene_graph(baseline_root, scene_id, name="data")
+    try:
+        baseline_scene_graph = read_scene_graph(baseline_root, scene_id, name="data")
+    except FileNotFoundError as exc:
+        print(f"[pred-ready] {exc}; using synthetic scene graph for {scene_id}")
+        baseline_scene_graph = make_synthetic_scene_graph(scene_id)
     generated_scene_graph = build_scene_graph(
         baseline_scene_graph=baseline_scene_graph,
         objects_payload=objects_payload,
@@ -701,6 +891,11 @@ def main():
     write_pkl_gz(
         target_root / "files" / "orig" / "data" / f"{scene_id}.pkl.gz",
         generated_scene_graph,
+    )
+    write_scene_data_npy(
+        target_root=target_root,
+        scene_id=scene_id,
+        ordered_objects=ordered_objects,
     )
 
     link_reconstructed_gs_annotations(

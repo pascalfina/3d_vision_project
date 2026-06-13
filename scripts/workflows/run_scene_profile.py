@@ -381,6 +381,13 @@ def add_cli_arg(parts, flag: str, value):
     parts.extend([flag, str(value)])
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_voxelise_action(repo_root: Path, profile: dict):
     sec = section(profile, "voxelise")
     variant = input_variant_settings(repo_root, profile)
@@ -1191,7 +1198,19 @@ def build_plot_voxelised_action(repo_root: Path, profile: dict):
     )
     mask_root = sec.get("mask_root", data_root)
 
-    label = sec.get("label", f"{profile.get('name', 'scene')}_voxelised")
+    geometry_only = sec.get(
+        "geometry_only",
+        env_flag("OBJECTX_PLOT_VOXELISED_GEOMETRY_ONLY", False),
+    )
+    hide_object_overlay = sec.get(
+        "hide_object_overlay",
+        env_flag("OBJECTX_PLOT_VOXELISED_HIDE_OBJECT_OVERLAY", False),
+    )
+
+    default_label = f"{profile.get('name', 'scene')}_voxelised"
+    if geometry_only:
+        default_label = f"{default_label}_geometry_only"
+    label = sec.get("label", default_label)
     out_dir = sec.get(
         "out_dir",
         f"{os.environ['OBJECTX_REPO_VIS_ROOT']}/interactive_depth_views/{label}",
@@ -1232,6 +1251,8 @@ def build_plot_voxelised_action(repo_root: Path, profile: dict):
     add_cli_arg(cmd, "--max-views", sec.get("max_views", render_sec.get("max_views", 277)))
     add_cli_arg(cmd, "--max-bg-points", sec.get("max_bg_points", render_sec.get("bg_max_points", 3000000)))
     add_cli_arg(cmd, "--max-obj-points", sec.get("max_obj_points", render_sec.get("joint_max_points", 3000000)))
+    add_cli_arg(cmd, "--geometry-only", geometry_only)
+    add_cli_arg(cmd, "--hide-object-overlay", hide_object_overlay)
     add_cli_arg(cmd, "--label", label)
     add_cli_arg(cmd, "--out-dir", out_dir)
     log_path = Path(sec["log"]).expanduser() if sec.get("log") else None

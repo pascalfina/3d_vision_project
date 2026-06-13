@@ -2,7 +2,7 @@
 Full pipeline: SAM2 (masks) + MUSt3R (poses + depth).
 Usage: python run_pipeline.py --config configs/pipeline.yaml
 """
-import argparse, os, time, zipfile, torch, yaml
+import argparse, os, sys, time, zipfile, torch, yaml
 from pathlib import Path
 from utils.io_utils import load_frames_from_scene, select_keyframes, select_keyframe_candidate_groups
 from segment_sam2 import ensure_sam2_postprocess_ready, segment_keyframes, propagate_masks
@@ -591,11 +591,15 @@ def main():
     # Keep the SAM2 Hydra config key unchanged; build_sam2 resolves it inside the sam2 package.
     cfg["must3r"]["checkpoint"] = str(resolve_model_path(cfg["must3r"]["checkpoint"]))
 
+    had_error = False
     for scene_id, scene_dir in get_scene_dirs(cfg):
         try: run_scene(scene_id, scene_dir, cfg)
         except Exception as e:
+            had_error = True
             print(f"[ERROR] {scene_id}: {e}")
             import traceback; traceback.print_exc()
+    if had_error:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

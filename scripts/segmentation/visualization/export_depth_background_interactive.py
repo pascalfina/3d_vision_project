@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument(
         "--background-remove-mode",
         default="loaded",
-        choices=["all", "loaded"],
+        choices=["all", "loaded", "none"],
         help="Which object masks to remove from the depth background.",
     )
     parser.add_argument("--mask-erode-px", type=int, default=2)
@@ -63,6 +63,19 @@ def parse_args():
         default="rgb",
         choices=["rgb", "gray"],
         help="Use original RGB background colors or a neutral gray background for readability.",
+    )
+    parser.add_argument(
+        "--geometry-only",
+        action="store_true",
+        help=(
+            "Render only the lifted depth/XYZ geometry. This disables object "
+            "replacement clouds, object-mask background removal, and the object legend."
+        ),
+    )
+    parser.add_argument(
+        "--hide-object-overlay",
+        action="store_true",
+        help="Do not inject the object legend overlay into the generated HTML.",
     )
     parser.add_argument("--label", default="depth_bg_interactive")
     parser.add_argument("--out-dir", default=None)
@@ -262,7 +275,7 @@ def main():
     data_root = Path(args.data_root)
     mask_root = Path(args.mask_root) if args.mask_root else data_root
     replacement_root = Path(args.replacement_root)
-    obj_ids = resolve_obj_ids(args)
+    obj_ids = [] if args.geometry_only else resolve_obj_ids(args)
     obj_slug = "-".join(str(x) for x in obj_ids[:6])
     out_dir = (
         Path(args.out_dir)
@@ -273,17 +286,29 @@ def main():
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    object_specs = load_object_cloud_specs(
-        replacement_root, args.scan_id, obj_ids
-    )
-    loaded_ids = [int(spec["obj_id"]) for spec in object_specs]
-    remove_obj_ids = obj_ids if args.background_remove_mode == "all" else loaded_ids
+    if args.geometry_only:
+        object_specs = []
+        loaded_ids = []
+        remove_obj_ids = []
+        mask_source = "none"
+    else:
+        object_specs = load_object_cloud_specs(
+            replacement_root, args.scan_id, obj_ids
+        )
+        loaded_ids = [int(spec["obj_id"]) for spec in object_specs]
+        if args.background_remove_mode == "all":
+            remove_obj_ids = obj_ids
+        elif args.background_remove_mode == "loaded":
+            remove_obj_ids = loaded_ids
+        else:
+            remove_obj_ids = []
+        mask_source = args.mask_source
     bg_points, bg_colors, selected_frame_ids = build_background_from_depth(
         data_root=data_root,
         mask_root=mask_root,
         scan_id=args.scan_id,
         remove_obj_ids=remove_obj_ids,
-        mask_source=args.mask_source,
+        mask_source=mask_source,
         pose_mode=args.pose_mode,
         lift_coord_system=args.lift_coord_system,
         frame_selection=args.frame_selection,
@@ -293,13 +318,15 @@ def main():
 
     bg_points, bg_colors = subsample(bg_points, bg_colors, args.max_bg_points)
     bg_colors = maybe_gray_background(bg_colors, args.background_color_mode)
-    object_specs = subsample_object_cloud_specs(
-        object_specs,
-        max_total_points=args.max_obj_points,
-        min_points_per_object=args.min_obj_points_per_object,
-    )
-    obj_points = np.concatenate([spec["points"] for spec in object_specs], axis=0)
-    obj_colors = np.concatenate([spec["colors"] for spec in object_specs], axis=0)
+    if object_specs:
+        object_specs = subsample_object_cloud_specs(
+            object_specs,
+            max_total_points=args.max_obj_points,
+            min_points_per_object=args.min_obj_points_per_object,
+        )
+        obj_points = np.concatenate([spec["points"] for spec in object_specs], axis=0)
+    else:
+        obj_points = np.zeros((0, 3), dtype=np.float32)
 
     bg_cloud = trimesh.points.PointCloud(
         bg_points, colors=(255.0 * bg_colors).astype(np.uint8)
@@ -332,10 +359,11 @@ def main():
         "selected_frame_ids": selected_frame_ids,
         "bg_points": int(len(bg_points)),
         "obj_points": int(len(obj_points)),
-        "mask_source": args.mask_source,
+        "mask_source": mask_source,
         "background_remove_mode": args.background_remove_mode,
         "mask_erode_px": int(args.mask_erode_px),
         "background_color_mode": args.background_color_mode,
+        "geometry_only": bool(args.geometry_only),
         "pose_mode": args.pose_mode,
         "lift_coord_system": args.lift_coord_system,
         "objects": [
@@ -350,7 +378,8 @@ def main():
         ],
         "html": str(html_path),
     }
-    html = inject_overlay(html, build_legend_html(summary))
+    if not args.geometry_only and not args.hide_object_overlay:
+        html = inject_overlay(html, build_legend_html(summary))
     html_path.write_text(html, encoding="utf-8")
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print(html_path)

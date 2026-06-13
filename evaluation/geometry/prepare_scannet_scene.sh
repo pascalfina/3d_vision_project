@@ -12,6 +12,7 @@ SCANNET_DOWNLOAD_TYPES="${SCANNET_DOWNLOAD_TYPES:-.txt _vh_clean_2.ply .sens}"
 SCANNET_DIRECT_DOWNLOAD="${SCANNET_DIRECT_DOWNLOAD:-1}"
 SCANNET_DOWNLOAD_TIMEOUT="${SCANNET_DOWNLOAD_TIMEOUT:-180}"
 SCANNET_DOWNLOAD_RETRIES="${SCANNET_DOWNLOAD_RETRIES:-3}"
+SCANNET_DOWNLOAD_BACKEND="${SCANNET_DOWNLOAD_BACKEND:-auto}"
 SCANNET_CLEAN_STALE_TMP="${SCANNET_CLEAN_STALE_TMP:-1}"
 SCANNET_EXPORT_SENS="${SCANNET_EXPORT_SENS:-1}"
 SCANNET_FRAME_SKIP="${SCANNET_FRAME_SKIP:-1}"
@@ -37,7 +38,7 @@ mkdir -p "$SCANNET_ROOT/scans"
 mkdir -p "$SCAN_DIR"
 
 if [[ "$SCANNET_CLEAN_STALE_TMP" == "1" ]]; then
-  find "$SCAN_DIR" -maxdepth 1 -type f \( -name 'tmp*' -o -name '*.part' \) -delete
+  find "$SCAN_DIR" -maxdepth 1 -type f -name 'tmp*' -delete
 fi
 
 echo "[scannet-prepare] scan=$SCAN_ID root=$SCANNET_ROOT" >&2
@@ -49,7 +50,8 @@ for file_type in $SCANNET_DOWNLOAD_TYPES; do
       --file-type "$file_type" \
       --out-dir "$SCAN_DIR" \
       --timeout "$SCANNET_DOWNLOAD_TIMEOUT" \
-      --retries "$SCANNET_DOWNLOAD_RETRIES"
+      --retries "$SCANNET_DOWNLOAD_RETRIES" \
+      --backend "$SCANNET_DOWNLOAD_BACKEND"
   else
     "$PYTHON_BIN" "$DOWNLOADER" -o "$SCANNET_ROOT" --id "$SCAN_ID" --type "$file_type"
   fi

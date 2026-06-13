@@ -1,6 +1,6 @@
 # Geometry Evaluation Aggregate
 
-- Runs: `107`
+- Runs: `108`
 - Primary threshold: `0.050m`
 
 | Scene | Method | Scope | Acc mean | Acc med | Compl mean | Compl med | P@5cm | R@5cm | F1@5cm |
@@ -43,6 +43,7 @@
 | scene0244_00 | scannet_scene0244_00_must3r | visible_gt | 0.7207 | 0.0670 | 0.0327 | 0.0237 | 0.385 | 0.783 | 0.516 |
 | scene0258_00 | scannet_scene0258_00_must3r | visible_gt | 0.4093 | 0.1429 | 0.0573 | 0.0391 | 0.242 | 0.623 | 0.348 |
 | scene0259_01 | scannet_scene0259_01_must3r | visible_gt | 0.2637 | 0.0681 | 0.0281 | 0.0173 | 0.408 | 0.868 | 0.555 |
+| scene0292_01 | scannet_scene0292_01_must3r | visible_gt | 0.4653 | 0.2044 | 0.0281 | 0.0174 | 0.200 | 0.873 | 0.325 |
 | scene0318_00 | scannet_scene0318_00_must3r | visible_gt | 0.4814 | 0.1134 | 0.0397 | 0.0214 | 0.296 | 0.788 | 0.431 |
 | scene0333_00 | scannet_scene0333_00_must3r | visible_gt | 0.0834 | 0.0616 | 0.0350 | 0.0223 | 0.424 | 0.784 | 0.550 |
 | scene0338_02 | scannet_scene0338_02_must3r | visible_gt | 0.0774 | 0.0361 | 0.0281 | 0.0198 | 0.624 | 0.858 | 0.723 |
@@ -115,10 +116,10 @@
 
 ## Mean Across Runs
 
-- Accuracy mean: `0.6124 m`
-- Accuracy median: `0.2431 m`
+- Accuracy mean: `0.6111 m`
+- Accuracy median: `0.2428 m`
 - Completeness mean: `0.0305 m`
 - Completeness median: `0.0184 m`
-- Precision@5cm: `0.379`
+- Precision@5cm: `0.378`
 - Recall@5cm: `0.871`
-- F1@5cm: `0.508`
+- F1@5cm: `0.506`

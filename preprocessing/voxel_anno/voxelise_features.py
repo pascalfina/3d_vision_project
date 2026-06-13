@@ -152,6 +152,51 @@ def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
     return patch_embeddings
 
 
+def _sample_projected_patchtokens(
+    patch_embeddings: torch.Tensor,
+    projection: torch.Tensor,
+    observed_views: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Sample DINO features in point chunks to avoid allocating views*voxels*C."""
+    num_views, num_points, _ = projection.shape
+    channels = int(patch_embeddings.shape[1])
+    chunk_points = int(os.getenv("OBJECTX_VOXEL_GRID_SAMPLE_CHUNK_POINTS", "4096"))
+    chunk_points = max(1, chunk_points)
+    device = patch_embeddings.device
+    chunks = []
+
+    for start in range(0, num_points, chunk_points):
+        end = min(start + chunk_points, num_points)
+        grid = projection[:, start:end, :].to(device=device, non_blocking=True).unsqueeze(1)
+        sampled = (
+            F.grid_sample(
+                patch_embeddings,
+                grid,
+                mode="bilinear",
+                align_corners=False,
+            )
+            .squeeze(2)
+            .permute(0, 2, 1)
+        )  # Shape: (Nimages, Npoints_chunk, C)
+
+        if observed_views is not None:
+            weights = torch.from_numpy(
+                observed_views[:, start:end].astype(np.float32, copy=False)
+            ).to(device=device, non_blocking=True)[..., None]
+            count = weights.sum(dim=0).clamp_min(1.0)
+            sampled = (sampled * weights).sum(dim=0) / count
+        else:
+            sampled = sampled.mean(dim=0)
+
+        chunks.append(sampled.detach().cpu().numpy())
+        del grid, sampled
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    patchtokens = np.concatenate(chunks, axis=0).reshape(num_points, channels)
+    return patchtokens
+
+
 def _log_rss(prefix: str) -> None:
     rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
     _LOGGER.info("%s | max_rss_mb=%.1f", prefix, rss_mb)
@@ -528,6 +573,7 @@ def _resolve_frame_selection_mode() -> str:
         "area": "top_area",
         "diverse": "diverse_area",
         "diverse_area": "diverse_area",
+        "liftable_diverse_area": "diverse_area",
     }
     return aliases.get(source, "all")
 
@@ -1886,31 +1932,17 @@ def voxelise_features(
                 rendered_obj
             )  # Shape: (Nimages, 1024, 64, 64)
 
-            # STEP 8: Match the embeddings to the projection
-            patchtokens = (
-                F.grid_sample(
-                    patch_embeddings,
-                    projection.cuda().unsqueeze(1),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                .squeeze(2)
-                .permute(0, 2, 1)
-                .cpu()
-                .numpy()
-            )  # Shape: (Nimages, Npoints, 1024)
+            # STEP 8: Match the embeddings to the projection. This is chunked
+            # over voxels so large SAM2 masks do not allocate views*voxels*C.
+            patchtokens = _sample_projected_patchtokens(
+                patch_embeddings,
+                projection,
+                observed_views=observed_views if filter_unobserved else None,
+            )
 
             if filter_unobserved:
-                observation_weights = observed_views.astype(np.float32)[..., None]
-                observation_count = observation_weights.sum(axis=0)
-                patchtokens = np.divide(
-                    (patchtokens * observation_weights).sum(axis=0),
-                    np.clip(observation_count, 1.0, None),
-                )
                 patchtokens = patchtokens[observed_voxels]
                 voxel_grid = voxel_grid[observed_voxels]
-            else:
-                patchtokens = np.mean(patchtokens, axis=0)
 
             patchtokens = patchtokens.astype(np.float16)  # Shape: (Npoints, 1024)
             assert patchtokens.shape[0] == voxel_grid.shape[0]

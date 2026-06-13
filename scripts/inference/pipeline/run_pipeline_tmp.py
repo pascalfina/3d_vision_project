@@ -76,6 +76,16 @@ def stage_scan(src_scan_dir: Path, tmp_scan_dir: Path):
         raise FileNotFoundError(f"Neither sequence.zip nor sequence/ found in {src_scan_dir}")
 
 
+def validate_staged_scan(tmp_scan_dir: Path, scan_id: str):
+    data_path = tmp_scan_dir / "data.npy"
+    if not data_path.exists():
+        raise FileNotFoundError(
+            "Inference staging is missing the legacy Scan3R point file "
+            f"{data_path}. Run build-pred-ready again so ScanNet profiles "
+            "generate scenes/<scan>/data.npy before slat/u3dgs."
+        )
+
+
 def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: list[str]):
     (tmp_root / "scenes").mkdir(parents=True, exist_ok=True)
     (tmp_root / "files").mkdir(parents=True, exist_ok=True)
@@ -159,7 +169,9 @@ def main():
 
     for scan_id in scan_ids:
         print(f"[infer] staging {scan_id}", flush=True)
-        stage_scan(scratch_root / "scenes" / scan_id, tmp_root / "scenes" / scan_id)
+        tmp_scan_dir = tmp_root / "scenes" / scan_id
+        stage_scan(scratch_root / "scenes" / scan_id, tmp_scan_dir)
+        validate_staged_scan(tmp_scan_dir, scan_id)
 
     script = (
         repo_root / "src" / "inference" / ("structured_latent_inference.py" if args.mode == "slat" else "unstructured_latent_inference.py")
