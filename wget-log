@@ -1,0 +1,25 @@
+--2026-06-01 22:56:42--  http://kaldir.vc.in.tum.de/scannet/v1/scans/scene0626_00/scene0626_00.sens
+Resolving kaldir.vc.in.tum.de (kaldir.vc.in.tum.de)... 131.159.98.128
+Connecting to kaldir.vc.in.tum.de (kaldir.vc.in.tum.de)|131.159.98.128|:80... connected.
+HTTP request sent, awaiting response... 301 Moved Permanently
+Location: https://kaldir.vc.in.tum.de:443/scannet/v1/scans/scene0626_00/scene0626_00.sens [following]
+--2026-06-01 22:56:43--  https://kaldir.vc.in.tum.de/scannet/v1/scans/scene0626_00/scene0626_00.sens
+Connecting to kaldir.vc.in.tum.de (kaldir.vc.in.tum.de)|131.159.98.128|:443... connected.
+HTTP request sent, awaiting response... 206 Partial Content
+Length: 361671761 (345M), 326687872 (312M) remaining
+Saving to: ‘/work/courses/3dv/team35/pafina/scannet_under300_data/scans/scene0626_00/scene0626_00.sens.part’
+
+        [ skipping 32768K ]
+ 32768K ,....... ........ ........ ........ 18% 69.3K 72m17s
+ 65536K ........ ........ ........ ........ 27% 64.5K 64m59s
+ 98304K ........ ........ ........ ........ 37% 64.4K 56m56s
+131072K ........ ........ ........ ........ 46% 73.5K 47m7s
+163840K ........ ........ ........ ........ 55% 75.9K 38m3s
+196608K ........ ........ ........ ........ 64% 75.4K 29m38s
+229376K ........ ........ ........ ........ 74% 77.4K 21m29s
+262144K ........ ........ ........ ........ 83% 78.8K 13m34s
+294912K ........ ........ ........ ........ 92% 82.5K 5m51s
+327680K ........ ........ ........         100%  103K=71m27s
+
+2026-06-02 00:08:37 (74.4 KB/s) - ‘/work/courses/3dv/team35/pafina/scannet_under300_data/scans/scene0626_00/scene0626_00.sens.part’ saved [361671761/361671761]
+
