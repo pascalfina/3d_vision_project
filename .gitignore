@@ -67,3 +67,11 @@ dependencies/VLSG/**/time_used*.txt
 *.log
 *.tar
 vis/rendered
+
+final_report
+debug
+dependencies
+models
+plots
+configs/workflows/scene_profiles/custom_video_horizontal_profiles.tsv
+configs/workflows/scene_profiles/custom_video_horizontal_profiles.txt
