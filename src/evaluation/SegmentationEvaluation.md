@@ -19,7 +19,7 @@ export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ```bash
 python src/evaluation/evaluate_sam2object_3d.py \
   --dataset 3RScan \
-  --gt_root /cluster/project/cvg/data/3RScan/scenes \
+  --gt_root ./data/3RScan/scenes \
   --scans 5341b7e3-8a66-2cdd-8709-66a2159f0017 \
   --pred_npy './sam2object/scans/{scan}/results/{scan}_labels_fine_global.npy' \
   --mode both \
@@ -37,7 +37,7 @@ A whole split — replace `--scans ...` with a scan-list file:
 ```bash
 python src/evaluation/evaluate_sam2object_3d.py \
   --dataset scannet \
-  --gt_root /cluster/project/cvg/data/scannet/scans \
+  --gt_root ./data/scannet/scans \
   --split_file objectx_complete_scans_scannet.txt \
   --pred_npy './sam2object_scannet/scans/{scan}/results/{scan}_labels_fine_global.npy' \
   --mode both \
