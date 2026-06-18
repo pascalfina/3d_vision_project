@@ -17,17 +17,68 @@ FALLBACK_EIGEN13 = 13
 FALLBACK_RIO27 = 27
 FALLBACK_PLY_COLOR = "#808080"
 MANIFEST_NAME = "pred_ready_scene_manifest.json"
+SCANNET40_CLASS_LINES = [
+    "1\twall",
+    "2\tfloor",
+    "3\tcabinet",
+    "4\tbed",
+    "5\tchair",
+    "6\tsofa",
+    "7\ttable",
+    "8\tdoor",
+    "9\twindow",
+    "10\tbookshelf",
+    "11\tpicture",
+    "12\tcounter",
+    "13\tblinds",
+    "14\tdesk",
+    "15\tshelves",
+    "16\tcurtain",
+    "17\tdresser",
+    "18\tpillow",
+    "19\tmirror",
+    "20\tfloor mat",
+    "21\tclothes",
+    "22\tceiling",
+    "23\tbooks",
+    "24\trefridgerator",
+    "25\ttelevision",
+    "26\tpaper",
+    "27\ttowel",
+    "28\tshower curtain",
+    "29\tbox",
+    "30\twhiteboard",
+    "31\tperson",
+    "32\tnightstand",
+    "33\ttoilet",
+    "34\tsink",
+    "35\tlamp",
+    "36\tbathtub",
+    "37\tbag",
+    "38\totherstructure",
+    "39\totherfurniture",
+    "40\totherprop",
+]
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-root", required=True)
     parser.add_argument("--reconstruction-root", required=True)
+    parser.add_argument("--reconstruction-scenes-dirname", default="scenes")
     parser.add_argument("--target-root", required=True)
     parser.add_argument("--scene-id", required=True)
     parser.add_argument("--split", default="val", choices=["train", "val", "test"])
     parser.add_argument("--knn", type=int, default=4)
     parser.add_argument("--min-voxels", type=int, default=32)
+    parser.add_argument("--max-scale", type=float, default=0.0)
+    parser.add_argument("--max-extent", type=float, default=0.0)
+    parser.add_argument("--max-center-norm", type=float, default=0.0)
+    parser.add_argument(
+        "--allow-stale-geometry",
+        action="store_true",
+        help="Allow voxel_output_dense.npz older than mean_scale_dense.npz.",
+    )
     parser.add_argument(
         "--point-counts",
         type=int,
@@ -49,6 +100,18 @@ def ensure_symlink(src: Path, dst: Path) -> None:
     safe_remove(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     os.symlink(src, dst)
+
+
+def ensure_copy_file(src: Path, dst: Path) -> None:
+    safe_remove(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+
+
+def ensure_copy_tree(src: Path, dst: Path) -> None:
+    safe_remove(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst)
 
 
 def load_json(path: Path) -> dict:
@@ -74,6 +137,45 @@ def write_pkl_gz(path: Path, payload) -> None:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+def load_current_reconstruction_object_ids(
+    reconstruction_root: Path,
+    scene_id: str,
+) -> Optional[set[int]]:
+    files_dir = reconstruction_root / "files"
+    candidates = [
+        files_dir / "objects_sam2.json",
+        files_dir / "objects.json",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            payload = load_json(path)
+        except Exception as exc:
+            print(f"[pred-ready] warning: failed to parse {path}: {exc}")
+            continue
+
+        scans = payload.get("scans", [])
+        if isinstance(scans, dict):
+            scans = list(scans.values())
+        for scan in scans:
+            scan_name = scan.get("scan") or scan.get("reference")
+            if scan_name != scene_id:
+                continue
+            object_ids = {
+                int(obj["id"])
+                for obj in scan.get("objects", [])
+                if "id" in obj
+            }
+            if object_ids:
+                print(
+                    f"[pred-ready] using current reconstruction registry "
+                    f"{path.name} with {len(object_ids)} ids"
+                )
+                return object_ids
+    return None
+
+
 def read_scene_graph(root: Path, scene_id: str, name: str = "data") -> dict:
     files_dir = root / "files" / "orig" / name
     gz_path = files_dir / f"{scene_id}.pkl.gz"
@@ -83,6 +185,22 @@ def read_scene_graph(root: Path, scene_id: str, name: str = "data") -> dict:
     if raw_path.exists():
         return load_pkl(raw_path)
     raise FileNotFoundError(f"Missing scene graph for {scene_id}: {gz_path} / {raw_path}")
+
+
+def make_synthetic_scene_graph(scene_id: str) -> dict:
+    """Small compatibility graph for non-3RScan datasets.
+
+    The downstream Object-X loaders expect the 3RScan-style graph keys to
+    exist, but for ScanNet we only need reconstructed object geometry here.
+    """
+
+    return {
+        "scan_id": scene_id,
+        "objects_id": np.zeros((0,), dtype=np.int64),
+        "object_attributes": [],
+        "bow_vec_object_attr_feats": np.zeros((0, 0), dtype=np.float32),
+        "bow_vec_object_edge_feats": np.zeros((0, 0), dtype=np.float32),
+    }
 
 
 def voxel_to_world(voxel_indices: np.ndarray, mean: np.ndarray, scale: float) -> np.ndarray:
@@ -114,6 +232,77 @@ def deterministic_sample(points: np.ndarray, count: int) -> np.ndarray:
     return tiled[:count].astype(np.float32)
 
 
+def has_valid_legacy_scene_data(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        data = np.load(path)
+    except Exception:
+        return False
+    try:
+        files = getattr(data, "files", None)
+        return files is not None and all(
+            name in files for name in ("x", "y", "z", "objectId")
+        )
+    finally:
+        if hasattr(data, "close"):
+            data.close()
+
+
+def write_scene_data_npy(
+    target_root: Path,
+    scene_id: str,
+    ordered_objects: list[dict],
+    max_points_per_object: int = 4096,
+) -> None:
+    """Write the legacy Scan3R scene point file expected by inference.
+
+    `np.load(.../data.npy)` downstream reads zip-style arrays named x/y/z and
+    objectId, so we intentionally store npz content at the historical .npy path.
+    """
+
+    out_path = target_root / "scenes" / scene_id / "data.npy"
+    if has_valid_legacy_scene_data(out_path):
+        print(f"[pred-ready] keeping existing legacy scene data {out_path}")
+        return
+
+    points_parts = []
+    object_id_parts = []
+    for item in ordered_objects:
+        points = item["points_world"].astype(np.float32)
+        if points.shape[0] == 0:
+            continue
+        if max_points_per_object > 0 and points.shape[0] > max_points_per_object:
+            points = deterministic_sample(points, max_points_per_object)
+        obj_id = int(item["obj_id"])
+        points_parts.append(points)
+        object_id_parts.append(
+            np.full((points.shape[0],), obj_id, dtype=np.int32)
+        )
+
+    if points_parts:
+        points = np.concatenate(points_parts, axis=0).astype(np.float32)
+        object_ids = np.concatenate(object_id_parts, axis=0).astype(np.int32)
+    else:
+        points = np.zeros((0, 3), dtype=np.float32)
+        object_ids = np.zeros((0,), dtype=np.int32)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_remove(out_path)
+    with out_path.open("wb") as f:
+        np.savez(
+            f,
+            x=points[:, 0],
+            y=points[:, 1],
+            z=points[:, 2],
+            objectId=object_ids,
+        )
+    print(
+        f"[pred-ready] wrote legacy scene data {out_path} "
+        f"points={points.shape[0]} objects={len(ordered_objects)}"
+    )
+
+
 def build_target_3rscan(scan_data: list[dict], scene_id: str) -> list[dict]:
     for item in scan_data:
         if item["reference"] == scene_id or any(
@@ -130,6 +319,18 @@ def build_target_3rscan(scan_data: list[dict], scene_id: str) -> list[dict]:
     raise ValueError(f"Scene {scene_id} not found in baseline 3RScan.json")
 
 
+def build_synthetic_target_3rscan(scene_id: str, split: str) -> list[dict]:
+    return [
+        {
+            "reference": scene_id,
+            "scans": [],
+            "type": "validation" if split == "val" else split,
+            "ambiguity": [],
+            "generated": True,
+        }
+    ]
+
+
 def write_split_files(files_dir: Path, split: str, scene_id: str) -> None:
     for name in ["train", "val", "test"]:
         payload = f"{scene_id}\n" if name == split else ""
@@ -142,6 +343,52 @@ def pick_existing_dir(*candidates: Path) -> Optional[Path]:
         if candidate.exists():
             return candidate
     return None
+
+
+def pick_existing_file(*candidates: Path) -> Optional[Path]:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def ensure_scannet40_classes(files_dir: Path, baseline_root: Path) -> None:
+    target = files_dir / "scannet40_classes.txt"
+    if target.exists() or target.is_symlink():
+        return
+    source = pick_existing_file(
+        baseline_root / "files" / "scannet40_classes.txt",
+        Path(os.environ.get("OBJECTX_BASELINE_ROOT", "")) / "files" / "scannet40_classes.txt",
+        Path("/work/scratch/pafina/objectx-data-baseline/files/scannet40_classes.txt"),
+    )
+    if source is not None:
+        ensure_symlink(source, target)
+        return
+    print(
+        "[pred-ready] missing scannet40_classes.txt in baseline roots; "
+        "writing embedded ScanNet40 compatibility classes"
+    )
+    target.write_text("\n".join(SCANNET40_CLASS_LINES) + "\n", encoding="utf-8")
+
+
+def stage_scene_mask_snapshot(
+    source_root: Path,
+    target_files_dir: Path,
+    scene_id: str,
+    name: str,
+) -> None:
+    src_base = source_root / "files" / name / "obj_id_pkl"
+    if not src_base.exists():
+        return
+    candidates = [
+        src_base / f"{scene_id}.pkl",
+        src_base / f"{scene_id}.pkl.gz",
+    ]
+    src_file = next((path for path in candidates if path.exists()), None)
+    if src_file is None:
+        return
+    dst_file = target_files_dir / name / "obj_id_pkl" / src_file.name
+    ensure_copy_file(src_file, dst_file)
 
 
 def stage_scene(src_scan_dir: Path, dst_scan_dir: Path) -> None:
@@ -173,22 +420,39 @@ def link_compatibility_inputs(
     target_root: Path,
     scene_id: str,
     split: str,
+    reconstruction_scenes_dirname: str = "scenes",
 ) -> None:
     files_dir = target_root / "files"
     scenes_dir = target_root / "scenes"
     files_dir.mkdir(parents=True, exist_ok=True)
     scenes_dir.mkdir(parents=True, exist_ok=True)
 
-    scene_src = reconstruction_root / "scenes" / scene_id
+    scene_src = reconstruction_root / reconstruction_scenes_dirname / scene_id
+    if (
+        reconstruction_scenes_dirname != "scenes"
+        and not scene_src.exists()
+    ):
+        raise FileNotFoundError(
+            f"Missing reconstruction scene directory for {scene_id}: {scene_src}"
+        )
     if not scene_src.exists():
         scene_src = baseline_root / "scenes" / scene_id
     if not scene_src.exists():
         raise FileNotFoundError(f"Missing scene directory for {scene_id}")
     stage_scene(scene_src, scenes_dir / scene_id)
 
-    scannet_classes = baseline_root / "files" / "scannet40_classes.txt"
-    if scannet_classes.exists():
-        ensure_symlink(scannet_classes, files_dir / "scannet40_classes.txt")
+    baseline_scene_src = baseline_root / "scenes" / scene_id
+    if baseline_scene_src.exists() and baseline_scene_src != scene_src:
+        dst_scan_dir = scenes_dir / scene_id
+        for item in baseline_scene_src.iterdir():
+            if item.name in {"sequence", "sequence.zip"}:
+                continue
+            dst_item = dst_scan_dir / item.name
+            if dst_item.exists() or dst_item.is_symlink():
+                continue
+            ensure_symlink(item, dst_item)
+
+    ensure_scannet40_classes(files_dir, baseline_root)
 
     features_dir = pick_existing_dir(
         reconstruction_root / "files" / "Features3D",
@@ -198,15 +462,23 @@ def link_compatibility_inputs(
         ensure_symlink(features_dir, files_dir / "Features3D")
 
     for name in ["gt_projection", "pred_projection", "pred_projection_clean"]:
-        src = pick_existing_dir(
-            reconstruction_root / "files" / name,
-            baseline_root / "files" / name,
+        src_root = (
+            reconstruction_root
+            if (reconstruction_root / "files" / name).exists()
+            else baseline_root
         )
-        if src is not None:
-            ensure_symlink(src, files_dir / name)
+        stage_scene_mask_snapshot(src_root, files_dir, scene_id, name)
 
-    scan_data = load_json(baseline_root / "files" / "3RScan.json")
-    write_json(files_dir / "3RScan.json", build_target_3rscan(scan_data, scene_id))
+    scan_data_path = baseline_root / "files" / "3RScan.json"
+    if scan_data_path.exists():
+        scan_data = load_json(scan_data_path)
+        write_json(files_dir / "3RScan.json", build_target_3rscan(scan_data, scene_id))
+    else:
+        print(
+            f"[pred-ready] missing {scan_data_path}; writing synthetic 3RScan.json "
+            f"for {scene_id}"
+        )
+        write_json(files_dir / "3RScan.json", build_synthetic_target_3rscan(scene_id, split))
     write_split_files(files_dir, split, scene_id)
     (files_dir / "gs_embeddings").mkdir(parents=True, exist_ok=True)
 
@@ -215,6 +487,11 @@ def discover_reconstructed_objects(
     reconstruction_root: Path,
     scene_id: str,
     min_voxels: int,
+    max_scale: float = 0.0,
+    max_extent: float = 0.0,
+    max_center_norm: float = 0.0,
+    allow_stale_geometry: bool = False,
+    valid_object_ids: Optional[set[int]] = None,
 ) -> list[dict]:
     scene_root = reconstruction_root / "files" / "gs_annotations" / scene_id
     if not scene_root.exists():
@@ -224,9 +501,26 @@ def discover_reconstructed_objects(
     for obj_dir in sorted(scene_root.iterdir(), key=lambda p: int(p.name)):
         if not obj_dir.is_dir():
             continue
+        obj_id = int(obj_dir.name)
+        if valid_object_ids is not None and obj_id not in valid_object_ids:
+            print(
+                f"[pred-ready] skipping stale object dir {scene_id}/{obj_id}: "
+                "not present in current reconstruction registry"
+            )
+            continue
         voxel_path = obj_dir / "voxel_output_dense.npz"
         mean_scale_path = obj_dir / "mean_scale_dense.npz"
         if not voxel_path.exists() or not mean_scale_path.exists():
+            continue
+        if (
+            not allow_stale_geometry
+            and voxel_path.stat().st_mtime + 1.0 < mean_scale_path.stat().st_mtime
+        ):
+            print(
+                "[pred-ready] skipping "
+                f"{scene_id}/{obj_dir.name}: stale voxel_output_dense.npz "
+                "is older than mean_scale_dense.npz"
+            )
             continue
 
         voxels = np.load(voxel_path)["arr_0"][:, :3].astype(np.int32)
@@ -236,13 +530,33 @@ def discover_reconstructed_objects(
         mean_scale = np.load(mean_scale_path)
         mean = mean_scale["mean"].astype(np.float32)
         scale = float(mean_scale["scale"])
+        if max_scale > 0.0 and scale > max_scale:
+            print(
+                f"[pred-ready] skipping {scene_id}/{obj_dir.name}: "
+                f"scale={scale:.4f} > max_scale={max_scale:.4f}"
+            )
+            continue
         points_world = voxel_to_world(voxels, mean, scale)
         center = points_world.mean(axis=0).astype(np.float32)
         extent = (points_world.max(axis=0) - points_world.min(axis=0)).astype(np.float32)
+        extent_max = float(extent.max())
+        center_norm = float(np.linalg.norm(center))
+        if max_extent > 0.0 and extent_max > max_extent:
+            print(
+                f"[pred-ready] skipping {scene_id}/{obj_dir.name}: "
+                f"extent_max={extent_max:.4f} > max_extent={max_extent:.4f}"
+            )
+            continue
+        if max_center_norm > 0.0 and center_norm > max_center_norm:
+            print(
+                f"[pred-ready] skipping {scene_id}/{obj_dir.name}: "
+                f"center_norm={center_norm:.4f} > max_center_norm={max_center_norm:.4f}"
+            )
+            continue
 
         objects.append(
             {
-                "obj_id": int(obj_dir.name),
+                "obj_id": obj_id,
                 "obj_dir": obj_dir,
                 "voxel_count": int(voxels.shape[0]),
                 "voxels": voxels,
@@ -292,15 +606,6 @@ def build_objects_json(
     scene_id: str,
     ordered_objects: list[dict],
 ) -> tuple[dict, dict[int, dict], list[str]]:
-    all_scans = load_json(baseline_root / "files" / "objects.json")["scans"]
-    baseline_scan = next((item for item in all_scans if item["scan"] == scene_id), None)
-    if baseline_scan is None:
-        raise ValueError(f"Scene {scene_id} not found in baseline objects.json")
-
-    baseline_objects = {
-        int(obj["id"]): copy.deepcopy(obj) for obj in baseline_scan["objects"]
-    }
-    generated_objects = []
     used_semantic_fields = [
         "id",
         "label",
@@ -312,6 +617,28 @@ def build_objects_json(
         "affordances",
         "ply_color",
     ]
+
+    objects_path = baseline_root / "files" / "objects.json"
+    baseline_objects = {}
+    if objects_path.exists():
+        all_scans = load_json(objects_path)["scans"]
+        baseline_scan = next((item for item in all_scans if item["scan"] == scene_id), None)
+        if baseline_scan is not None:
+            baseline_objects = {
+                int(obj["id"]): copy.deepcopy(obj) for obj in baseline_scan["objects"]
+            }
+        else:
+            print(
+                f"[pred-ready] scene {scene_id} not found in {objects_path}; "
+                "using generated object metadata"
+            )
+    else:
+        print(
+            f"[pred-ready] missing {objects_path}; using generated object metadata "
+            f"for {scene_id}"
+        )
+
+    generated_objects = []
 
     for item in ordered_objects:
         obj_id = int(item["obj_id"])
@@ -465,7 +792,7 @@ def link_reconstructed_gs_annotations(
     for item in ordered_objects:
         obj_id = int(item["obj_id"])
         src = reconstruction_root / "files" / "gs_annotations" / scene_id / str(obj_id)
-        ensure_symlink(src, target_scene_root / str(obj_id))
+        ensure_copy_tree(src, target_scene_root / str(obj_id))
 
 
 def build_manifest(
@@ -523,12 +850,23 @@ def main():
         target_root=target_root,
         scene_id=scene_id,
         split=args.split,
+        reconstruction_scenes_dirname=args.reconstruction_scenes_dirname,
+    )
+
+    current_object_ids = load_current_reconstruction_object_ids(
+        reconstruction_root=reconstruction_root,
+        scene_id=scene_id,
     )
 
     ordered_objects = discover_reconstructed_objects(
         reconstruction_root=reconstruction_root,
         scene_id=scene_id,
         min_voxels=args.min_voxels,
+        max_scale=args.max_scale,
+        max_extent=args.max_extent,
+        max_center_norm=args.max_center_norm,
+        allow_stale_geometry=args.allow_stale_geometry,
+        valid_object_ids=current_object_ids,
     )
     objects_payload, baseline_objects_by_id, copied_semantic_fields = build_objects_json(
         baseline_root=baseline_root,
@@ -537,7 +875,11 @@ def main():
     )
     write_json(target_root / "files" / "objects.json", objects_payload)
 
-    baseline_scene_graph = read_scene_graph(baseline_root, scene_id, name="data")
+    try:
+        baseline_scene_graph = read_scene_graph(baseline_root, scene_id, name="data")
+    except FileNotFoundError as exc:
+        print(f"[pred-ready] {exc}; using synthetic scene graph for {scene_id}")
+        baseline_scene_graph = make_synthetic_scene_graph(scene_id)
     generated_scene_graph = build_scene_graph(
         baseline_scene_graph=baseline_scene_graph,
         objects_payload=objects_payload,
@@ -549,6 +891,11 @@ def main():
     write_pkl_gz(
         target_root / "files" / "orig" / "data" / f"{scene_id}.pkl.gz",
         generated_scene_graph,
+    )
+    write_scene_data_npy(
+        target_root=target_root,
+        scene_id=scene_id,
+        ordered_objects=ordered_objects,
     )
 
     link_reconstructed_gs_annotations(

@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+# Full SAM2Object segmentation pipeline for one scene, followed by ObjectX preparation.
+#
+# Required env vars (set by run_scene_profile.py):
+#   SAMOBJECT_DIR          - path to SAM2Object repo (dependencies/SAM2Object)
+#   SAMOBJECT_VENV         - path to SAM2Object Python venv (activate script)
+#   SAMOBJECT_DATA_ROOT    - root dir for SAM2Object data (intermediate processing)
+#   SAMOBJECT_SCAN_ID      - scene/scan ID to process
+#   SAMOBJECT_MESH_PATH    - path to mesh.refined.v2.obj for this scene
+#   SAMOBJECT_BASELINE_ROOT - baseline data root (scenes/<scan_id>/sequence lives here)
+#   OBJECTX_REPO_ROOT      - repo root (set by run_scene_profile.py)
+#
+# Optional env vars:
+#   SAMOBJECT_CHECKPOINT           (default: $SAMOBJECT_DIR/segtrack/checkpoints/sam2_hiera_large.pt)
+#   SAMOBJECT_MODEL_CFG            (default: sam2_hiera_l.yaml)
+#   SAMOBJECT_PROJECTION_DILATION  (default: 2)
+#   SAMOBJECT_FRAME_SKIP           (default: unset)
+#   VLSG_SPACE                     (default: OBJECTX_REPO_ROOT)
+#   TORCH_HOME
+#   XDG_CACHE_HOME
+
+set -euo pipefail
+
+: "${SAMOBJECT_DIR:?Need SAMOBJECT_DIR}"
+: "${SAMOBJECT_VENV:?Need SAMOBJECT_VENV}"
+: "${SAMOBJECT_DATA_ROOT:?Need SAMOBJECT_DATA_ROOT}"
+: "${SAMOBJECT_SCAN_ID:?Need SAMOBJECT_SCAN_ID}"
+: "${SAMOBJECT_BASELINE_ROOT:?Need SAMOBJECT_BASELINE_ROOT}"
+: "${OBJECTX_REPO_ROOT:?Need OBJECTX_REPO_ROOT}"
+# SAMOBJECT_OUTPUT_ROOT: where prepare writes masks/objects.json (defaults to SAMOBJECT_DATA_ROOT)
+SAMOBJECT_OUTPUT_ROOT="${SAMOBJECT_OUTPUT_ROOT:-$SAMOBJECT_DATA_ROOT}"
+SAMOBJECT_ADAPTER="${SAMOBJECT_ADAPTER:-samobject_graph}"
+
+case "$SAMOBJECT_ADAPTER" in
+  samobject_graph)
+    ;;
+  pi3x_full_samobject)
+    # Pi3X supplies a stable surface + surface superpoints; SAMObject does
+    # the actual object segmentation via its normal 2D tracking + 3D graph.
+    export SAMOBJECT_USE_PI3X_SURFACE="${SAMOBJECT_USE_PI3X_SURFACE:-1}"
+    ;;
+  *)
+    echo "ERROR: Unknown SAMOBJECT_ADAPTER=$SAMOBJECT_ADAPTER"
+    echo "  Supported: samobject_graph, pi3x_full_samobject"
+    exit 1
+    ;;
+esac
+
+USE_PI3X_SURFACE="${SAMOBJECT_USE_PI3X_SURFACE:-${SAMOBJECT_USE_PI3X_MESH:-0}}"
+
+if [[ -z "$USE_PI3X_SURFACE" || "$USE_PI3X_SURFACE" == "0" ]]; then
+  : "${SAMOBJECT_MESH_PATH:?Need SAMOBJECT_MESH_PATH unless SAMOBJECT_ADAPTER=pi3x_full_samobject}"
+fi
+
+PROJECTION_DILATION="${SAMOBJECT_PROJECTION_DILATION:-2}"
+GRAPH_VIEW_FREQ="${SAMOBJECT_VIEW_FREQ:-3}"
+GRAPH_THRES_MERGE="${SAMOBJECT_THRES_MERGE:-200}"
+GRAPH_THRES_CONNECT="${SAMOBJECT_THRES_CONNECT:-0.9,0.3,5}"
+GRAPH_MAX_NEIGHBOR_DISTANCE="${SAMOBJECT_MAX_NEIGHBOR_DISTANCE:-2}"
+GRAPH_MAX_KNN_DISTANCE="${SAMOBJECT_MAX_KNN_DISTANCE:-0}"
+GRAPH_SIMILAR_METRIC="${SAMOBJECT_SIMILAR_METRIC:-2-norm}"
+GRAPH_DIS_DECAY="${SAMOBJECT_DIS_DECAY:-0.5}"
+
+# Paths used across all steps
+BASELINE_SCENE_DIR="$SAMOBJECT_BASELINE_ROOT/scenes/$SAMOBJECT_SCAN_ID"
+SAM_RESULTS_DIR="$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/results"
+
+echo "========== SAM2Object pipeline =========="
+echo "  scan_id      : $SAMOBJECT_SCAN_ID"
+echo "  data_root    : $SAMOBJECT_DATA_ROOT"
+echo "  baseline     : $SAMOBJECT_BASELINE_ROOT"
+echo "  sam2obj repo : $SAMOBJECT_DIR"
+echo "  adapter      : $SAMOBJECT_ADAPTER"
+echo "  pi3x surface : $USE_PI3X_SURFACE"
+echo "  checkpoint   : ${SAMOBJECT_CHECKPOINT:-$OBJECTX_REPO_ROOT/models/sam2ckpt/sam2_hiera_large.pt}"
+echo "  model_cfg    : ${SAMOBJECT_MODEL_CFG:-sam2_hiera_l.yaml}"
+echo "========================================="
+
+# Activate SAM2Object venv
+# shellcheck source=/dev/null
+source "$SAMOBJECT_VENV"
+
+export VLSG_SPACE="${VLSG_SPACE:-$OBJECTX_REPO_ROOT}"
+export PYTHONPATH="$VLSG_SPACE:${PYTHONPATH:-}:$VLSG_SPACE/dependencies/gaussian-splatting"
+
+# Make torch CUDA libs findable (needed for SAM2 _C extension)
+_TORCH_LIB="$(python -c 'import torch, os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"
+export LD_LIBRARY_PATH="/cluster/data/cuda/12.8.0/lib64:${_TORCH_LIB}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Env vars that all SAM2Object Python scripts read
+export DATASET="3RScan"
+export SCAN_IDS="$SAMOBJECT_SCAN_ID"
+export DATA_ROOT_DIR="$SAMOBJECT_DATA_ROOT"
+
+# Checkpoint: SAM2Object repo uses SAM2 (not SAM2.1) configs
+export SAMOBJECT_CHECKPOINT="${SAMOBJECT_CHECKPOINT:-$OBJECTX_REPO_ROOT/models/sam2ckpt/sam2_hiera_large.pt}"
+export SAMOBJECT_MODEL_CFG="${SAMOBJECT_MODEL_CFG:-sam2_hiera_l.yaml}"
+
+# Where sam2object.py should look for its 3D scene points.
+# Default: baseline/GT 3RScan scene files. Pi3X path below can override this.
+export SAMOBJECT_3RSCAN_SCENES_DIR="$SAMOBJECT_BASELINE_ROOT/scenes"
+
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+mkdir -p "$SAMOBJECT_DATA_ROOT/files"
+
+# ── STEP 0a: Symlink sequence so SAM2Object scripts can find it ───────────────
+echo "========== STEP 0a: Setup scene data symlinks =========="
+SCENE_DATA_DIR="$SAMOBJECT_DATA_ROOT/scenes/$SAMOBJECT_SCAN_ID"
+mkdir -p "$SCENE_DATA_DIR"
+
+# Resolve the sequence source: prefer SAMOBJECT_SOURCE_SEQUENCE_DIR, then baseline
+_SEQ_SRC="${SAMOBJECT_SOURCE_SEQUENCE_DIR:-}"
+if [[ -z "$_SEQ_SRC" ]]; then
+  _SEQ_SRC="$BASELINE_SCENE_DIR/sequence"
+fi
+
+if [[ ! -e "$SCENE_DATA_DIR/sequence" ]]; then
+  if [[ ! -d "$_SEQ_SRC" ]]; then
+    echo "ERROR: sequence source not found: $_SEQ_SRC"
+    echo "  Set source_sequence_dir in your scene profile samobject section."
+    exit 1
+  fi
+  ln -s "$_SEQ_SRC" "$SCENE_DATA_DIR/sequence"
+  echo "  Linked sequence: $_SEQ_SRC"
+else
+  if [[ -L "$SCENE_DATA_DIR/sequence" ]]; then
+    _CUR_SEQ_TARGET="$(readlink -f "$SCENE_DATA_DIR/sequence")"
+    _DESIRED_SEQ_TARGET="$(readlink -f "$_SEQ_SRC")"
+    if [[ "$_CUR_SEQ_TARGET" != "$_DESIRED_SEQ_TARGET" ]]; then
+      rm -f "$SCENE_DATA_DIR/sequence"
+      ln -s "$_SEQ_SRC" "$SCENE_DATA_DIR/sequence"
+      echo "  Relinked sequence: $_SEQ_SRC"
+    else
+      echo "  sequence dir already present."
+    fi
+  else
+    echo "  sequence dir already present."
+  fi
+fi
+
+# Write scene ID list file for scripts that need it
+SCENE_IDS_FILE="$SAMOBJECT_DATA_ROOT/files/sam2object_resplit_scans.txt"
+echo "$SAMOBJECT_SCAN_ID" > "$SCENE_IDS_FILE"
+
+# ── STEP 0b-clean: Reset stale segtrack outputs for this scene ────────────────
+SEGTRACK_OUTPUT_SCENE_DIR="$SAMOBJECT_DIR/segtrack/outputs/$SAMOBJECT_SCAN_ID"
+if [[ "${SAMOBJECT_CLEAN_SEGTRACK_OUTPUTS:-1}" != "0" && -d "$SEGTRACK_OUTPUT_SCENE_DIR" ]]; then
+  echo "========== STEP 0b-clean: Reset segtrack outputs =========="
+  echo "  Removing stale segtrack outputs: $SEGTRACK_OUTPUT_SCENE_DIR"
+  rm -rf "$SEGTRACK_OUTPUT_SCENE_DIR"
+fi
+
+# ── STEP 0b: Prepare posed_images and color_images_cluster ────────────────────
+echo "========== STEP 0b: Prepare image data =========="
+
+cd "$SAMOBJECT_DIR/segtrack"
+
+POSED_SCENE_DIR="$SAMOBJECT_DATA_ROOT/posed_images/$SAMOBJECT_SCAN_ID"
+COLOR_CLUSTER_SCENE_DIR="$SAMOBJECT_DATA_ROOT/color_images_cluster/$SAMOBJECT_SCAN_ID"
+MASK2D_SCENE_DIR="$SAMOBJECT_DATA_ROOT/2D_masks/$SAMOBJECT_SCAN_ID/semantic-sam"
+
+if [[ "${SAMOBJECT_REFRESH_POSED_IMAGES:-1}" != "0" && -d "$POSED_SCENE_DIR" ]]; then
+  echo "  Refreshing posed_images scene dir: $POSED_SCENE_DIR"
+  rm -rf "$POSED_SCENE_DIR"
+fi
+echo "  Running get_posed_images.py..."
+python dataprocess/get_posed_images.py
+
+if [[ "${SAMOBJECT_REFRESH_COLOR_CLUSTER:-1}" != "0" && -d "$COLOR_CLUSTER_SCENE_DIR" ]]; then
+  echo "  Refreshing color_images_cluster scene dir: $COLOR_CLUSTER_SCENE_DIR"
+  rm -rf "$COLOR_CLUSTER_SCENE_DIR"
+fi
+echo "  Running extract_only_jpg.py..."
+python dataprocess/extract_only_jpg.py
+
+# ── STEP 0c: Create SAMObject 3D support scene / superpoints ──────────────────
+echo "========== STEP 0c: Create superpoints =========="
+SUPERPOINTS_DIR="$SAMOBJECT_DATA_ROOT/superpoints/$SAMOBJECT_SCAN_ID"
+SUPERPOINTS_FILE="$SUPERPOINTS_DIR/superpoint.pts"
+SEGS_JSON="$BASELINE_SCENE_DIR/mesh.refined.0.010000.segs.v2.json"
+
+if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" ]]; then
+  echo "  Pi3X mode active: building stable Pi3X SAMObject scene."
+  _PI3X_SEQ_DIR="${SAMOBJECT_PI3X_SEQ_DIR:-${SAMOBJECT_SOURCE_SEQUENCE_DIR:-}}"
+  if [[ -z "$_PI3X_SEQ_DIR" ]]; then
+    echo "ERROR: SAMOBJECT_PI3X_SEQ_DIR or SAMOBJECT_SOURCE_SEQUENCE_DIR must be set for Pi3X SAMObject mode."
+    exit 1
+  fi
+  PI3X_SCENE_DIR="$SAMOBJECT_DATA_ROOT/scenes/$SAMOBJECT_SCAN_ID"
+  mkdir -p "$PI3X_SCENE_DIR"
+  python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/build_pi3x_samobject_scene.py" \
+    --sequence-dir "$_PI3X_SEQ_DIR" \
+    --out-ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \
+    --superpoint-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+    --superpoint-neighbors-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.seg_neighbors.v2.json" \
+    --debug-json-out "$PI3X_SCENE_DIR/pi3x_samobject_scene_stats.json" \
+    --conf-thr "${SAMOBJECT_PI3X_CONF_THR:-0.10}" \
+    --pixel-stride "${SAMOBJECT_PI3X_PIXEL_STRIDE:-2}" \
+    --voxel-size "${SAMOBJECT_PI3X_SURFACE_VOXEL_SIZE:-0.05}" \
+    --min-views-per-voxel "${SAMOBJECT_PI3X_MIN_VIEWS_PER_VOXEL:-2}" \
+    --min-points-per-voxel "${SAMOBJECT_PI3X_MIN_POINTS_PER_VOXEL:-2}" \
+    --normal-k "${SAMOBJECT_PI3X_SUPERPOINT_NORMAL_K:-24}" \
+    --superpoint-radius "${SAMOBJECT_PI3X_SUPERPOINT_RADIUS:-0.09}" \
+    --normal-angle-deg "${SAMOBJECT_PI3X_SUPERPOINT_NORMAL_ANGLE_DEG:-45}" \
+    --color-distance-thr "${SAMOBJECT_PI3X_SUPERPOINT_COLOR_DISTANCE_THR:-0.35}" \
+    --min-superpoint-points "${SAMOBJECT_PI3X_MIN_SUPERPOINT_POINTS:-8}" \
+    --max-superpoint-points "${SAMOBJECT_PI3X_MAX_SUPERPOINT_POINTS:-512}" \
+    --adjacency-radius "${SAMOBJECT_PI3X_SUPERPOINT_ADJ_RADIUS:-0.12}" \
+    --adjacency-normal-angle-deg "${SAMOBJECT_PI3X_SUPERPOINT_ADJ_NORMAL_ANGLE_DEG:-75}" \
+    --adjacency-color-distance-thr "${SAMOBJECT_PI3X_SUPERPOINT_ADJ_COLOR_DISTANCE_THR:-0.70}"
+  if [[ "${SAMOBJECT_WRITE_SUPERPOINT_DEBUG_PLY:-1}" != "0" ]]; then
+    python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/visualize_samobject_superpoints.py" \
+      --ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \
+      --superpoint-json "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+      --out-ply "$PI3X_SCENE_DIR/labels.instances.superpoints_debug.ply" \
+      --seed "${SAMOBJECT_SUPERPOINT_DEBUG_SEED:-13}"
+  fi
+  export SAMOBJECT_3RSCAN_SCENES_DIR="$SAMOBJECT_DATA_ROOT/scenes"
+  rm -f "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/points.pts"
+  rm -f "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/results/${SAMOBJECT_SCAN_ID}_points.npy"
+  rm -f "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/results/${SAMOBJECT_SCAN_ID}_labels_fine_global.npy"
+else
+  if [[ ! -f "$SUPERPOINTS_FILE" ]]; then
+    if [[ ! -f "$SEGS_JSON" ]]; then
+      echo "ERROR: segs.json not found at $SEGS_JSON"
+      exit 1
+    fi
+    python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/create_3rscan_superpoints.py" \
+      --segs_json "$SEGS_JSON" \
+      --out_dir   "$SUPERPOINTS_DIR"
+  else
+    echo "  superpoints already exist, skipping."
+  fi
+fi
+
+# ── STEP 1: 2D tracking ──────────────────────────────────────────────────────
+echo "========== STEP 1: SAM2Object 2D tracking =========="
+# seg_tracking.py reads:
+#   SAM2OBJECT_DIR -> PROJECT_DIR (repo dir, used for checkpoints + output path)
+#   DATA_ROOT_DIR -> OUTPUT_PATH (base for color_images_cluster)
+#   SCAN_IDS, DATASET (set above)
+export SAM2OBJECT_DIR="$SAMOBJECT_DIR"
+cd "$SAMOBJECT_DIR/segtrack"
+python seg_tracking.py
+
+# ── STEP 2: Mask conversion ──────────────────────────────────────────────────
+echo "========== STEP 2: mask_convert =========="
+# mask_convert.py reads:
+#   SAM2OBJECT_DIR -> base_dir (segtrack outputs, used to READ masks)
+#   DATA_ROOT_DIR -> DATA_PATH (destination for 2D_masks)
+export SAM2OBJECT_DIR="$SAMOBJECT_DIR/segtrack/outputs"
+cd "$SAMOBJECT_DIR/segtrack"
+if [[ "${SAMOBJECT_REFRESH_2D_MASKS:-1}" != "0" && -d "$MASK2D_SCENE_DIR" ]]; then
+  echo "  Refreshing 2D mask dir: $MASK2D_SCENE_DIR"
+  rm -rf "$MASK2D_SCENE_DIR"
+fi
+python mask_convert.py
+
+_FILTER_MASKS_DEFAULT=0
+if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" ]]; then
+  _FILTER_MASKS_DEFAULT=1
+fi
+if [[ "${SAMOBJECT_FILTER_GRAPH_MASKS:-$_FILTER_MASKS_DEFAULT}" != "0" ]]; then
+  echo "========== STEP 2b: Filter scene-level masks for SAMObject graph =========="
+  python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/filter_samobject_masks_for_graph.py" \
+    --mask-dir "$MASK2D_SCENE_DIR" \
+    --debug-json-out "$SAMOBJECT_DATA_ROOT/scans/$SAMOBJECT_SCAN_ID/results/${SAMOBJECT_SCAN_ID}_mask_filter_stats.json" \
+    --max-area-ratio "${SAMOBJECT_MASK_MAX_AREA_RATIO:-0.45}" \
+    --max-positive-fraction "${SAMOBJECT_MASK_MAX_POSITIVE_FRACTION:-0.85}"
+fi
+
+if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" && "${SAMOBJECT_REFINE_SUPERPOINTS_WITH_MASKS:-1}" != "0" ]]; then
+  echo "========== STEP 2c: Refine Pi3X superpoints with SAMObject masks =========="
+  PI3X_SCENE_DIR="$SAMOBJECT_DATA_ROOT/scenes/$SAMOBJECT_SCAN_ID"
+  python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/refine_pi3x_superpoints_with_sam_masks.py" \
+    --ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \
+    --posed-images-dir "$SAMOBJECT_DATA_ROOT/posed_images/$SAMOBJECT_SCAN_ID" \
+    --mask-dir "$MASK2D_SCENE_DIR" \
+    --superpoint-json-in "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+    --superpoint-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+    --superpoint-neighbors-json-out "$PI3X_SCENE_DIR/mesh.refined.0.010000.seg_neighbors.v2.json" \
+    --debug-json-out "$PI3X_SCENE_DIR/pi3x_mask_aware_superpoints_stats.json" \
+    --view-stride "${SAMOBJECT_MASK_AWARE_VIEW_STRIDE:-1}" \
+    --vis-rtol "${SAMOBJECT_MASK_AWARE_VIS_RTOL:-0.15}" \
+    --min-observations "${SAMOBJECT_MASK_AWARE_MIN_OBSERVATIONS:-2}" \
+    --min-dominant-ratio "${SAMOBJECT_MASK_AWARE_DOMINANT_RATIO:-0.45}" \
+    --min-split-points "${SAMOBJECT_MASK_AWARE_MIN_SPLIT_POINTS:-6}" \
+    --min-signature-fraction "${SAMOBJECT_MASK_AWARE_MIN_SIGNATURE_FRACTION:-0.12}" \
+    --ambiguous-split-fraction "${SAMOBJECT_MASK_AWARE_AMBIGUOUS_SPLIT_FRACTION:-0.25}" \
+    --adjacency-radius "${SAMOBJECT_PI3X_SUPERPOINT_ADJ_RADIUS:-0.12}" \
+    --adjacency-k "${SAMOBJECT_MASK_AWARE_ADJ_K:-24}" \
+    --edge-min-signature-points "${SAMOBJECT_MASK_AWARE_EDGE_MIN_SIGNATURE_POINTS:-6}" \
+    --edge-min-positive-ratio "${SAMOBJECT_MASK_AWARE_EDGE_MIN_POSITIVE_RATIO:-0.60}" \
+    --edge-min-total-fraction "${SAMOBJECT_MASK_AWARE_EDGE_MIN_TOTAL_FRACTION:-0.10}" \
+    --edge-weak-conflict-min-points "${SAMOBJECT_MASK_AWARE_EDGE_WEAK_CONFLICT_MIN_POINTS:-6}" \
+    --edge-weak-conflict-positive-ratio "${SAMOBJECT_MASK_AWARE_EDGE_WEAK_CONFLICT_POSITIVE_RATIO:-0.60}" \
+    --prune-signature-conflicts "${SAMOBJECT_MASK_AWARE_PRUNE_SIGNATURE_CONFLICTS:-0}" \
+    --prune-ambiguous-edges "${SAMOBJECT_MASK_AWARE_PRUNE_AMBIGUOUS_EDGES:-0}" \
+    --ambiguous-edge-keep-radius "${SAMOBJECT_MASK_AWARE_AMBIGUOUS_EDGE_KEEP_RADIUS:-0.07}"
+  if [[ "${SAMOBJECT_WRITE_SUPERPOINT_DEBUG_PLY:-1}" != "0" ]]; then
+    python "$OBJECTX_REPO_ROOT/preprocessing/segmentation/visualize_samobject_superpoints.py" \
+      --ply "$PI3X_SCENE_DIR/labels.instances.annotated.v2.ply" \
+      --superpoint-json "$PI3X_SCENE_DIR/mesh.refined.0.010000.segs.v2.json" \
+      --out-ply "$PI3X_SCENE_DIR/labels.instances.superpoints_debug.ply" \
+      --seed "${SAMOBJECT_SUPERPOINT_DEBUG_SEED:-13}"
+  fi
+fi
+
+# ── STEP 3: Graph clustering 3D ──────────────────────────────────────────────
+echo "========== STEP 3: Graph Clustering 3D =========="
+cd "$SAMOBJECT_DIR/graphclustering"
+
+if [[ -d "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_pred_mask" ]]; then
+  rm -rf "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_pred_mask"
+fi
+rm -f \
+  "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}.txt" \
+  "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_points.npy" \
+  "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_labels_fine_global.npy"
+
+GRAPH_ARGS=(
+  sam2object.py
+  --base_dir "$SAMOBJECT_DATA_ROOT"
+  --scene_id "$SAMOBJECT_SCAN_ID"
+  --mask_name "semantic-sam"
+  --view_freq "$GRAPH_VIEW_FREQ"
+  --thres_merge "$GRAPH_THRES_MERGE"
+  --thres_connect "$GRAPH_THRES_CONNECT"
+  --max_neighbor_distance "$GRAPH_MAX_NEIGHBOR_DISTANCE"
+  --max_knn_distance "$GRAPH_MAX_KNN_DISTANCE"
+  --similar_metric "$GRAPH_SIMILAR_METRIC"
+  --dis_decay "$GRAPH_DIS_DECAY"
+)
+if [[ -n "${SAMOBJECT_FROM_POINTS_THR:-}" && ( -z "$USE_PI3X_SURFACE" || "$USE_PI3X_SURFACE" == "0" ) ]]; then
+  GRAPH_ARGS+=(--from_points_thres "$SAMOBJECT_FROM_POINTS_THR")
+fi
+if [[ -n "${SAMOBJECT_GRAPH_PROCESS_NUM:-}" ]]; then
+  GRAPH_ARGS+=(--process_num "$SAMOBJECT_GRAPH_PROCESS_NUM")
+elif [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" ]]; then
+  GRAPH_ARGS+=(--process_num 1)
+fi
+python "${GRAPH_ARGS[@]}"
+
+# ── STEP 4: Prepare for ObjectX ──────────────────────────────────────────────
+echo "========== STEP 4: Prepare SAM2Object output for ObjectX =========="
+cd "$OBJECTX_REPO_ROOT"
+
+PREPARE_ARGS=(
+  --root_dir        "$SAMOBJECT_DATA_ROOT"
+  --output_root_dir "$SAMOBJECT_OUTPUT_ROOT"
+  --scan_id         "$SAMOBJECT_SCAN_ID"
+  --sam_points      "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_points.npy"
+  --sam_labels      "$SAM_RESULTS_DIR/${SAMOBJECT_SCAN_ID}_labels_fine_global.npy"
+  --projection_dilation "$PROJECTION_DILATION"
+)
+if [[ -n "$USE_PI3X_SURFACE" && "$USE_PI3X_SURFACE" != "0" ]]; then
+  _PI3X_SEQ_DIR="${SAMOBJECT_PI3X_SEQ_DIR:-${SAMOBJECT_SOURCE_SEQUENCE_DIR:-}}"
+  if [[ -z "$_PI3X_SEQ_DIR" ]]; then
+    echo "ERROR: SAMOBJECT_PI3X_SEQ_DIR or SAMOBJECT_SOURCE_SEQUENCE_DIR must be set for --use_pi3x_surface"
+    exit 1
+  fi
+  PREPARE_ARGS+=(--use_pi3x_surface --pi3x_seq_dir "$_PI3X_SEQ_DIR")
+  if [[ "${SAMOBJECT_EXPORT_CLEAN_COMPONENTS:-0}" != "0" ]]; then
+    PREPARE_ARGS+=(
+      --clean_components
+      --component_radius "${SAMOBJECT_EXPORT_COMPONENT_RADIUS:-0.10}"
+      --component_min_points "${SAMOBJECT_EXPORT_COMPONENT_MIN_POINTS:-24}"
+      --component_min_fraction "${SAMOBJECT_EXPORT_COMPONENT_MIN_FRACTION:-0.03}"
+      --component_max_removed_fraction "${SAMOBJECT_EXPORT_COMPONENT_MAX_REMOVED_FRACTION:-0.20}"
+    )
+  fi
+  if [[ "${SAMOBJECT_EXPORT_CLEAN_MASK_TAILS:-0}" != "0" ]]; then
+    PREPARE_ARGS+=(
+      --clean_mask_tails
+      --mask_tail_view_stride "${SAMOBJECT_EXPORT_MASK_TAIL_VIEW_STRIDE:-1}"
+      --mask_tail_vis_rtol "${SAMOBJECT_EXPORT_MASK_TAIL_VIS_RTOL:-0.15}"
+      --mask_tail_min_observations "${SAMOBJECT_EXPORT_MASK_TAIL_MIN_OBSERVATIONS:-2}"
+      --mask_tail_dominant_ratio "${SAMOBJECT_EXPORT_MASK_TAIL_DOMINANT_RATIO:-0.45}"
+      --mask_tail_core_radius "${SAMOBJECT_EXPORT_MASK_TAIL_CORE_RADIUS:-0.20}"
+      --mask_tail_core_min_points "${SAMOBJECT_EXPORT_MASK_TAIL_CORE_MIN_POINTS:-32}"
+      --mask_tail_core_min_fraction "${SAMOBJECT_EXPORT_MASK_TAIL_CORE_MIN_FRACTION:-0.05}"
+      --mask_tail_signature_keep_fraction "${SAMOBJECT_EXPORT_MASK_TAIL_SIGNATURE_KEEP_FRACTION:-0.75}"
+      --mask_tail_max_signatures "${SAMOBJECT_EXPORT_MASK_TAIL_MAX_SIGNATURES:-8}"
+      --mask_tail_max_removed_fraction "${SAMOBJECT_EXPORT_MASK_TAIL_MAX_REMOVED_FRACTION:-0.25}"
+      --mask_tail_large_core_min_points "${SAMOBJECT_EXPORT_MASK_TAIL_LARGE_CORE_MIN_POINTS:-512}"
+      --mask_tail_large_core_max_removed_fraction "${SAMOBJECT_EXPORT_MASK_TAIL_LARGE_CORE_MAX_REMOVED_FRACTION:-0.50}"
+    )
+  fi
+else
+  PREPARE_ARGS+=(--mesh_path "$SAMOBJECT_MESH_PATH")
+fi
+if [[ -n "${SAMOBJECT_FRAME_SKIP:-}" ]]; then
+  PREPARE_ARGS+=(--frame_skip "$SAMOBJECT_FRAME_SKIP")
+fi
+
+python preprocessing/segmentation/prepare_sam2object_for_objectx.py "${PREPARE_ARGS[@]}"
+
+echo "========== DONE =========="

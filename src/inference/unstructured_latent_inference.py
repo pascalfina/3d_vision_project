@@ -547,18 +547,28 @@ class SceneGraph2UnstructuredLatentPipeline:
             self.save_scene(scene_representation, scan_id)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            try:
-                self.save_render_orbit(
-                    scan_id,
-                    scene_representation,
-                    num_objects=len(selected_reconstruction),
+            skip_orbit = self._get_env_bool(
+                "OBJECTX_VIS_SKIP_ORBIT",
+                self._get_env_bool("OBJECTX_VIS_SKIP_GS", False),
+            )
+            if skip_orbit:
+                _LOGGER.info(
+                    f"Skipping orbit rendering for {scan_id[0]} "
+                    "because OBJECTX_VIS_SKIP_ORBIT=1"
                 )
-            except (torch.OutOfMemoryError, RuntimeError) as exc:
-                _LOGGER.warning(
-                    f"Skipping orbit rendering for {scan_id[0]} due to GPU error: {exc}"
-                )
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+            else:
+                try:
+                    self.save_render_orbit(
+                        scan_id,
+                        scene_representation,
+                        num_objects=len(selected_reconstruction),
+                    )
+                except (torch.OutOfMemoryError, RuntimeError) as exc:
+                    _LOGGER.warning(
+                        f"Skipping orbit rendering for {scan_id[0]} due to GPU error: {exc}"
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
             if self._get_env_bool("OBJECTX_VIS_SKIP_GS", False):
                 _LOGGER.info(
                     f"Skipping rendered_gs output for {scan_id[0]} "

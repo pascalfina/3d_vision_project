@@ -41,6 +41,10 @@ def resolve_mask_source() -> str:
         "gt_projection": "gt_projection",
         "pred": "pred_projection",
         "pred_projection": "pred_projection",
+        "sam2": "sam2_projection",
+        "sam2_projection": "sam2_projection",
+        "sam3": "sam3_projection",
+        "sam3_projection": "sam3_projection",
     }
     return aliases.get(source, source)
 
@@ -72,12 +76,23 @@ def stage_scan(src_scan_dir: Path, tmp_scan_dir: Path):
         raise FileNotFoundError(f"Neither sequence.zip nor sequence/ found in {src_scan_dir}")
 
 
+def validate_staged_scan(tmp_scan_dir: Path, scan_id: str):
+    data_path = tmp_scan_dir / "data.npy"
+    if not data_path.exists():
+        raise FileNotFoundError(
+            "Inference staging is missing the legacy Scan3R point file "
+            f"{data_path}. Run build-pred-ready again so ScanNet profiles "
+            "generate scenes/<scan>/data.npy before slat/u3dgs."
+        )
+
+
 def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: list[str]):
     (tmp_root / "scenes").mkdir(parents=True, exist_ok=True)
     (tmp_root / "files").mkdir(parents=True, exist_ok=True)
 
     # Link persistent metadata and preprocessed artifacts.
     mask_dirname = resolve_mask_source()
+    mask_root = Path(os.environ.get("OBJECTX_MASK_ROOT", str(scratch_root)))
     link_names = [
         "3RScan.json",
         "objects.json",
@@ -93,7 +108,11 @@ def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: l
         if src.exists():
             os.symlink(src, dst)
 
-    mask_src = scratch_root / "files" / mask_dirname
+    mask_src = mask_root / "files" / mask_dirname
+    if not mask_src.exists():
+        fallback_mask_src = scratch_root / "files" / mask_dirname
+        if fallback_mask_src.exists():
+            mask_src = fallback_mask_src
     if mask_src.exists():
         actual_dst = tmp_root / "files" / mask_dirname
         safe_unlink(actual_dst)
@@ -103,7 +122,26 @@ def prepare_tmp_root(scratch_root: Path, tmp_root: Path, split: str, scan_ids: l
         if alias_dst != actual_dst:
             safe_unlink(alias_dst)
             os.symlink(mask_src, alias_dst)
-    print(f"[infer] using mask source {mask_dirname}", flush=True)
+    else:
+        print(
+            f"[infer] WARNING mask source {mask_dirname} not found in "
+            f"{mask_root / 'files' / mask_dirname} or {scratch_root / 'files' / mask_dirname}",
+            flush=True,
+        )
+    print(f"[infer] using mask source {mask_dirname} from {mask_src}", flush=True)
+
+    missing_masks = []
+    for scan_id in scan_ids:
+        pkl = tmp_root / "files" / "gt_projection" / "obj_id_pkl" / f"{scan_id}.pkl"
+        pkl_gz = tmp_root / "files" / "gt_projection" / "obj_id_pkl" / f"{scan_id}.pkl.gz"
+        if not pkl.exists() and not pkl_gz.exists():
+            missing_masks.append(str(pkl))
+    if missing_masks:
+        raise FileNotFoundError(
+            "Inference staging did not provide required gt_projection masks. "
+            "Object-X inference expects files/gt_projection/obj_id_pkl/<scan>.pkl "
+            f"inside tmp root {tmp_root}. Missing examples: {missing_masks[:5]}"
+        )
 
     # Write one-line split file for targeted inference, or mirror the requested split.
     split_file = tmp_root / "files" / f"{split}_resplit_scans.txt"
@@ -131,7 +169,9 @@ def main():
 
     for scan_id in scan_ids:
         print(f"[infer] staging {scan_id}", flush=True)
-        stage_scan(scratch_root / "scenes" / scan_id, tmp_root / "scenes" / scan_id)
+        tmp_scan_dir = tmp_root / "scenes" / scan_id
+        stage_scan(scratch_root / "scenes" / scan_id, tmp_scan_dir)
+        validate_staged_scan(tmp_scan_dir, scan_id)
 
     script = (
         repo_root / "src" / "inference" / ("structured_latent_inference.py" if args.mode == "slat" else "unstructured_latent_inference.py")

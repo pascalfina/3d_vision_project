@@ -38,6 +38,10 @@ def resolve_mask_source() -> str:
         "gt_projection": "gt_projection",
         "pred": "pred_projection",
         "pred_projection": "pred_projection",
+        "sam2": "sam2_projection",
+        "sam2_projection": "sam2_projection",
+        "sam3": "sam3_projection",
+        "sam3_projection": "sam3_projection",
     }
     return aliases.get(source, source)
 
@@ -134,8 +138,36 @@ def ensure_symlink(src: Path, dst: Path):
     os.symlink(src, dst)
 
 
+def _candidate_object_filenames() -> list[str]:
+    candidates = []
+    for value in [
+        os.environ.get("OBJECTX_VOXEL_OBJECTS_FILENAME"),
+        os.environ.get("OBJECTX_SEG_OBJECTS_FILENAME"),
+        "objects.json",
+    ]:
+        name = (value or "").strip()
+        if name and name not in candidates:
+            candidates.append(name)
+    return candidates
+
+
+def resolve_objects_info_file(scratch_root: Path) -> Path:
+    for name in _candidate_object_filenames():
+        path = scratch_root / "files" / name
+        if path.exists():
+            return path
+    joined = ", ".join(_candidate_object_filenames())
+    raise FileNotFoundError(
+        f"Could not find any object registry file in {scratch_root / 'files'}; "
+        f"tried: {joined}"
+    )
+
+
 def bootstrap_scratch_root(
-    scratch_root: Path, baseline_root: Optional[Path], mask_dirname: str
+    scratch_root: Path,
+    baseline_root: Optional[Path],
+    mask_dirname: str,
+    scene_source_dirname: str,
 ) -> None:
     if baseline_root is None:
         return
@@ -167,7 +199,11 @@ def bootstrap_scratch_root(
             ensure_symlink(src, dst)
 
     scenes_dst = scratch_root / "scenes"
-    if not scenes_dst.exists() and (baseline_root / "scenes").exists():
+    if (
+        scene_source_dirname == "scenes"
+        and not scenes_dst.exists()
+        and (baseline_root / "scenes").exists()
+    ):
         ensure_symlink(baseline_root / "scenes", scenes_dst)
 
 
@@ -192,12 +228,16 @@ def main():
     (tmp_root / "files").mkdir(parents=True, exist_ok=True)
 
     mask_dirname = resolve_mask_source()
+    scene_source_dirname = (
+        os.environ.get("OBJECTX_SCENE_SOURCE_DIRNAME", "scenes").strip() or "scenes"
+    )
     baseline_root_env = os.environ.get("OBJECTX_BASELINE_ROOT", "").strip()
     baseline_root = Path(baseline_root_env) if baseline_root_env else None
     bootstrap_scratch_root(
         scratch_root=scratch_root,
         baseline_root=baseline_root,
         mask_dirname=mask_dirname,
+        scene_source_dirname=scene_source_dirname,
     )
 
     for name in [
@@ -241,6 +281,21 @@ def main():
                 alias_dst.unlink()
         os.symlink(src, alias_dst)
     print(f"[2.5] using mask source {mask_dirname}", flush=True)
+    print(f"[2.5] using scene source {scene_source_dirname}", flush=True)
+    objects_info_path = resolve_objects_info_file(scratch_root)
+    objects_info_name = objects_info_path.name
+    ensure_symlink(objects_info_path, tmp_root / "files" / objects_info_name)
+    ensure_symlink(objects_info_path, tmp_root / "files" / "objects.json")
+    print(f"[2.5] using object registry {objects_info_name}", flush=True)
+    for key in [
+        "OBJECTX_VOXEL_DEPTH_SOURCE",
+        "OBJECTX_VOXEL_REQUIRE_XYZ",
+        "OBJECTX_VOXEL_POSE_MODE",
+        "OBJECTX_VOXEL_OBJECT_SOURCE",
+        "OBJECTX_VOXEL_OBJECTS_FILENAME",
+        "OBJECTX_SCENE_SOURCE_DIRNAME",
+    ]:
+        print(f"[2.5] env {key}={os.environ.get(key, '')}", flush=True)
     print(
         f"[2.5] using cache root {os.environ['OBJECTX_CACHE_ROOT']} "
         f"(hub={os.environ['OBJECTX_DINOV2_HUB_DIR']})",
@@ -279,14 +334,14 @@ def main():
         ]
     )
 
-    all_obj_info = json.load(open(scratch_root / "files" / "objects.json"))["scans"]
+    all_obj_info = json.load(open(objects_info_path))["scans"]
     obj_lookup = {entry["scan"]: entry for entry in all_obj_info}
     scan_ids = load_scan_ids(scratch_root, args.split)
     target_scene_id = (os.environ.get("OBJECTX_SCENE_ID") or "").strip()
     if target_scene_id:
         if target_scene_id not in obj_lookup:
             raise ValueError(
-                f"OBJECTX_SCENE_ID={target_scene_id} not found in files/objects.json"
+                f"OBJECTX_SCENE_ID={target_scene_id} not found in files/{objects_info_name}"
             )
         if target_scene_id not in scan_ids:
             print(
@@ -299,6 +354,12 @@ def main():
         scan_ids = scan_ids[: args.max_scans]
 
     total = len(scan_ids)
+    scene_source_root = scratch_root / scene_source_dirname
+    if not scene_source_root.exists():
+        raise FileNotFoundError(
+            f"Scene source directory does not exist: {scene_source_root} "
+            f"(OBJECTX_SCENE_SOURCE_DIRNAME={scene_source_dirname})"
+        )
     for idx, scan_id in enumerate(scan_ids, start=1):
         obj_data = obj_lookup[scan_id]
         if all_outputs_exist(scratch_root, obj_data) and not args.override:
@@ -306,8 +367,13 @@ def main():
                 print(f"[2.5] {idx}/{total} (skip existing) {scan_id}", flush=True)
             continue
 
-        src_scan_dir = scratch_root / "scenes" / scan_id
+        src_scan_dir = scene_source_root / scan_id
         tmp_scan_dir = tmp_root / "scenes" / scan_id
+
+        if not src_scan_dir.exists():
+            raise FileNotFoundError(
+                f"Scene directory for {scan_id} not found in {scene_source_root}"
+            )
 
         print(f"[2.5] {idx}/{total} {args.split} {scan_id}", flush=True)
         stage_scan(src_scan_dir, tmp_scan_dir)

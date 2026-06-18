@@ -44,13 +44,7 @@ def parse_args():
     )
     parser.add_argument(
         "--selection-file",
-        default=str(
-            REPO_ROOT
-            / "scripts"
-            / "segmentation"
-            / "archive"
-            / "object_level_pilot_selection.json"
-        ),
+        required=True,
         help="JSON file listing objects as scan_id/obj_id pairs.",
     )
     parser.add_argument(

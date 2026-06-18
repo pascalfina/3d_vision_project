@@ -7,6 +7,7 @@ test/
 
 # checkpoint
 checkpoint/*
+models/*
 
 # implementation
 implementation/*
@@ -17,22 +18,17 @@ __pycache__/
 
 # out
 **/outputs/
+!evaluation/outputs/
+evaluation/outputs/**
+!evaluation/outputs/**/
+!evaluation/outputs/**/geometry_summary.*
 **/output/
 **/out/
 **/tmp*/
 **/vis/
 !vis/
 vis/*
-!vis/rendered/
-!vis/rendered_gs/
-vis/rendered/*
-vis/rendered_gs/*
-!vis/rendered/*.mp4
-!vis/rendered/*.mov
-!vis/rendered/*.gif
-!vis/rendered_gs/*.mp4
-!vis/rendered_gs/*.mov
-!vis/rendered_gs/*.gif
+debug/
 
 # temporary files
 logs/
@@ -43,14 +39,19 @@ runs/
 .venv
 .venv/
 .venv_objx/
+configs/workflows/local_paths.env
 training_out/
 config.yaml
-.codex-backups/
+.codex*
+3dv/
+
 
 # cluster / local debug
 debug.txt
 slurm-*.out
 slurm-*.err
+*.log
+*.tar
 
 # caches
 .pytest_cache/
@@ -58,14 +59,18 @@ slurm-*.err
 .ruff_cache/
 
 # vendored dependency build artifacts
-dependencies/**/build/
-dependencies/**/__pycache__/
-dependencies/VLSG/**/log_file_*.txt
-dependencies/VLSG/**/time_used*.txt
-
-
-*.log
-*.tar
+dependencies/**
+!dependencies/must3r/
+!dependencies/must3r/**
+!dependencies/mast3r/
+!dependencies/mast3r/**
+!dependencies/pi3/
+!dependencies/pi3/**
+dependencies/pi3/**/__pycache__/
+dependencies/pi3/**/*.pyc
+dependencies/pi3/**/build/
+dependencies/pi3/**/*.egg-info/
+dependencies/pi3/**/*.so
 vis/rendered
 
 final_report
@@ -75,3 +80,13 @@ models
 plots
 configs/workflows/scene_profiles/custom_video_horizontal_profiles.tsv
 configs/workflows/scene_profiles/custom_video_horizontal_profiles.txt
+final_report/3dv_report.zip
+
+final_report
+
+configs/workflows/scene_profiles/custom_video_horizontal_profiles.tsv
+configs/workflows/scene_profiles/custom_video_horizontal_profiles.txt
+plots/combination_pascals_room.png
+plots/geom_pascals_room.png
+plots/pascals_messy_room_geometry_vs_masks_side_by_side.pdf
+plots/pascals_messy_room_geometry_vs_masks_side_by_side.png

@@ -1,0 +1,46 @@
+{
+  "legacy": {
+    "description": "Current tested path: legacy metadata, legacy depth/poses, GT masks by default.",
+    "mask_source": "gt_projection",
+    "run_segment_inputs": false,
+    "run_sam2": false,
+    "run_must3r": false,
+    "run_registry": false,
+    "mask_output_dirname": "gt_projection",
+    "objects_filename": "objects.json",
+    "scenes_dirname": "scenes"
+  },
+  "legacy+sam": {
+    "description": "Legacy path with SAM2 replacing only the segmentation masks.",
+    "mask_source": "sam2_projection",
+    "run_segment_inputs": true,
+    "run_sam2": true,
+    "run_must3r": false,
+    "run_registry": true,
+    "mask_output_dirname": "sam2_projection",
+    "objects_filename": "objects_sam2.json",
+    "scenes_dirname": "scenes_sam2"
+  },
+  "legacy+sam+must3r": {
+    "description": "Legacy path with SAM2 masks and MUSt3R-predicted depth/poses.",
+    "mask_source": "sam2_projection",
+    "run_segment_inputs": true,
+    "run_sam2": true,
+    "run_must3r": true,
+    "run_registry": true,
+    "mask_output_dirname": "sam2_projection",
+    "objects_filename": "objects_sam2.json",
+    "scenes_dirname": "scenes_sam2_must3r"
+  },
+  "legacy+sam+mast3r_sfm+must3r_poses": {
+    "description": "Hybrid: MUSt3R temporally-smooth poses + MASt3R-SfM per-frame depths (sim3 rescaled), SAM2 masks.",
+    "mask_source": "sam2_projection",
+    "run_segment_inputs": false,
+    "run_sam2": false,
+    "run_must3r": false,
+    "run_registry": false,
+    "mask_output_dirname": "sam2_projection",
+    "objects_filename": "objects_sam2.json",
+    "scenes_dirname": "scenes_sam2_mast3r_sfm_must3r"
+  }
+}

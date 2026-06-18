@@ -1,0 +1,57 @@
+dataset:
+  root: "/cluster/project/cvg/data/3RScan"               # Change
+  scene_id: "20c993b7-698f-29c5-847d-c8cb8a685f5a"       # or "all" fir everything
+  image_subdir: "sequence"
+  image_ext: ".color.jpg"
+  resize: [960, 540]
+
+keyframes:
+  strategy: "stride"             # "stride" | "uniform" | "all"
+  stride: 500
+
+sam2:
+  model_cfg:  "configs/sam2.1/sam2.1_hiera_l.yaml"
+  checkpoint: "models/sam2ckpt/sam2.1_hiera_large.pt"
+  points_per_side: 32
+  pred_iou_thresh: 0.86
+  stability_score_thresh: 0.92
+  min_mask_region_area: 200
+  max_obj_ids: 50
+
+must3r:
+  checkpoint: "models/must3r/MUSt3R_512.pth"
+  resolution: 512
+  min_conf_thr: 1.5
+  output_pointmaps: true
+
+mast3r_sfm:
+  checkpoint: "models/mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
+  resolution: 512
+  min_conf_thr: 0.5
+  scene_graph: "swin-15"
+  shared_intrinsics: true
+  lr1: 0.07
+  niter1: 300
+  lr2: 0.01
+  niter2: 300
+  opt_depth: true
+  matching_conf_thr: 0.0
+  loss_dust3r_w: 0.01
+  subsample: 8
+  depth_mask_mode: "hard"
+  save_raw_depth: true
+  save_confidence_maps: true
+  output_pointmaps: false
+
+steps:
+  run_must3r: true
+  run_sam2: true
+  run_registry: true
+
+output:
+  root: null
+  scenes_dirname: "scenes_predicted"
+  mask_dirname: "gt_projection_predicted"
+  objects_filename: "objects_predicted.json"
+  vis_dirname: "vis"
+  visualize: true

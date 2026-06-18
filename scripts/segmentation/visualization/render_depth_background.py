@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import colorsys
 import json
 import os
 import shutil
@@ -8,6 +9,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Optional
 
 import imageio.v2 as imageio
 import matplotlib
@@ -32,6 +34,11 @@ def parse_args():
         )
     )
     parser.add_argument("--data-root", required=True)
+    parser.add_argument(
+        "--mask-root",
+        default=None,
+        help="Optional root to load object masks from. Defaults to --data-root.",
+    )
     parser.add_argument("--replacement-root", required=True)
     parser.add_argument("--scan-id", required=True)
     parser.add_argument("--obj-id", dest="obj_ids", action="append", type=int, default=[])
@@ -113,15 +120,23 @@ def stage_scan(src_scan_dir: Path, dst_scan_dir: Path) -> None:
 
 
 def resolve_scene_root(data_root: Path, scan_id: str, stage_root: Path) -> Path:
-    info = data_root / "scenes" / scan_id / "sequence" / "_info.txt"
-    if info.exists():
-        return data_root
-    scan_dir = data_root / "scenes" / scan_id
-    if (scan_dir / "sequence.zip").exists() or (scan_dir / "sequence").exists():
-        staged = stage_root / "scenes" / scan_id
-        if not (staged / "sequence" / "_info.txt").exists():
+    scene_dirnames = []
+    for env_key in ("OBJECTX_VIS_SCENES_DIRNAME", "OBJECTX_SCENES_DIRNAME"):
+        value = os.getenv(env_key, "").strip()
+        if value and value not in scene_dirnames:
+            scene_dirnames.append(value)
+    if "scenes" not in scene_dirnames:
+        scene_dirnames.append("scenes")
+
+    for scene_dirname in scene_dirnames:
+        scan_dir = data_root / scene_dirname / scan_id
+        info = scan_dir / "sequence" / "_info.txt"
+        if scene_dirname == "scenes" and info.exists():
+            return data_root
+        if (scan_dir / "sequence.zip").exists() or (scan_dir / "sequence").exists():
+            staged = stage_root / "scenes" / scan_id
             stage_scan(scan_dir, staged)
-        return stage_root
+            return stage_root
     raise FileNotFoundError(f"Could not resolve staged scene for {scan_id}")
 
 
@@ -132,10 +147,10 @@ def voxel_to_world(voxel_indices: np.ndarray, mean: np.ndarray, scale: float) ->
 
 
 def subsample(points: np.ndarray, colors: np.ndarray, max_points: int):
-    if len(points) <= max_points:
+    if max_points <= 0 or len(points) <= max_points:
         return points, colors
-    step = max(1, len(points) // max_points)
-    return points[::step], colors[::step]
+    indices = np.linspace(0, len(points) - 1, num=max_points, dtype=np.int64)
+    return points[indices], colors[indices]
 
 
 def load_object_points(root: Path, scan_id: str, obj_id: int):
@@ -145,9 +160,19 @@ def load_object_points(root: Path, scan_id: str, obj_id: int):
     return voxel_to_world(vox, ms["mean"].astype(np.float32), float(ms["scale"]))
 
 
-def load_objects_with_colors(root: Path, scan_id: str, obj_ids: list[int]):
-    palette = plt.get_cmap("tab20")
-    pts_all, cols_all, loaded = [], [], []
+def generate_object_color(index: int) -> np.ndarray:
+    # Use a golden-ratio hue sequence so neighboring objects remain visually distinct.
+    hue = (0.618033988749895 * index) % 1.0
+    saturation = 0.72 + 0.18 * ((index % 3) / 2.0)
+    value = 0.88 + 0.10 * ((index % 2))
+    return np.array(
+        colorsys.hsv_to_rgb(hue, min(saturation, 0.95), min(value, 0.98)),
+        dtype=np.float32,
+    )
+
+
+def load_object_cloud_specs(root: Path, scan_id: str, obj_ids: list[int]):
+    specs = []
     for idx, obj_id in enumerate(obj_ids):
         obj_dir = root / "files" / "gs_annotations" / scan_id / str(obj_id)
         if not (obj_dir / "voxel_output_dense.npz").exists():
@@ -155,13 +180,29 @@ def load_objects_with_colors(root: Path, scan_id: str, obj_ids: list[int]):
         if not (obj_dir / "mean_scale_dense.npz").exists():
             continue
         pts = load_object_points(root, scan_id, obj_id)
-        color = np.array(palette(idx % 20)[:3], dtype=np.float32)
+        color = generate_object_color(idx)
+        specs.append(
+            {
+                "obj_id": int(obj_id),
+                "points": pts,
+                "color": color,
+                "point_count": int(len(pts)),
+            }
+        )
+    if not specs:
+        raise FileNotFoundError(f"No replacement objects found for {scan_id}: {obj_ids}")
+    return specs
+
+
+def load_objects_with_colors(root: Path, scan_id: str, obj_ids: list[int]):
+    pts_all, cols_all, loaded = [], [], []
+    for spec in load_object_cloud_specs(root, scan_id, obj_ids):
+        pts = spec["points"]
+        color = spec["color"]
         cols = np.tile(color[None, :], (len(pts), 1))
         pts_all.append(pts)
         cols_all.append(cols)
-        loaded.append(int(obj_id))
-    if not pts_all:
-        raise FileNotFoundError(f"No replacement objects found for {scan_id}: {obj_ids}")
+        loaded.append(int(spec["obj_id"]))
     return np.concatenate(pts_all, axis=0), np.concatenate(cols_all, axis=0), loaded
 
 
@@ -189,13 +230,63 @@ def erode_mask(mask: np.ndarray, pixels: int) -> np.ndarray:
     return (np.asarray(eroded, dtype=np.uint8) > 0).astype(np.uint8)
 
 
-def filter_points_with_colors(points: np.ndarray, colors: np.ndarray):
+def _filter_by_background_voxel_support(
+    points: np.ndarray,
+    colors: np.ndarray,
+    frame_indices: Optional[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    voxel_size = float(os.getenv("OBJECTX_VIS_BG_VOXEL_SIZE", "0.0"))
+    min_points = int(os.getenv("OBJECTX_VIS_BG_MIN_POINTS_PER_VOXEL", "0"))
+    min_views = int(os.getenv("OBJECTX_VIS_BG_MIN_VIEWS_PER_VOXEL", "0"))
+    if voxel_size <= 0.0 or (min_points <= 1 and min_views <= 1):
+        return points, colors, frame_indices
+    if points.shape[0] < 64:
+        return points, colors, frame_indices
+
+    voxel = np.floor(points / voxel_size).astype(np.int64)
+    _, inverse, counts = np.unique(
+        voxel, axis=0, return_inverse=True, return_counts=True
+    )
+    keep_voxel = np.ones_like(counts, dtype=bool)
+    if min_points > 1:
+        keep_voxel &= counts >= min_points
+    if min_views > 1 and frame_indices is not None:
+        pairs = np.stack([inverse, frame_indices.astype(np.int64, copy=False)], axis=1)
+        unique_pairs = np.unique(pairs, axis=0)
+        view_counts = np.bincount(unique_pairs[:, 0], minlength=counts.shape[0])
+        keep_voxel &= view_counts >= min_views
+
+    keep = keep_voxel[inverse]
+    min_keep_fraction = float(os.getenv("OBJECTX_VIS_BG_MIN_KEEP_FRACTION", "0.03"))
+    min_keep = max(32, int(min_keep_fraction * points.shape[0]))
+    if int(keep.sum()) < min_keep:
+        print(
+            "[depthbg] voxel-support filter skipped: "
+            f"would keep {int(keep.sum())}/{int(points.shape[0])} points"
+        )
+        return points, colors, frame_indices
+
+    print(
+        "[depthbg] voxel-support filter kept "
+        f"{int(keep.sum())}/{int(points.shape[0])} points "
+        f"(voxel_size={voxel_size}, min_points={min_points}, min_views={min_views})"
+    )
+    next_frame_indices = frame_indices[keep] if frame_indices is not None else None
+    return points[keep], colors[keep], next_frame_indices
+
+
+def filter_points_with_colors(
+    points: np.ndarray,
+    colors: np.ndarray,
+    frame_indices: Optional[np.ndarray] = None,
+):
     if len(points) == 0:
         return points.astype(np.float32), colors.astype(np.float32)
 
     keep = np.all(np.isfinite(points), axis=1)
     filtered_points = points[keep]
     filtered_colors = colors[keep]
+    filtered_frame_indices = frame_indices[keep] if frame_indices is not None else None
     if filtered_points.shape[0] < 64:
         return filtered_points.astype(np.float32), filtered_colors.astype(np.float32)
 
@@ -208,6 +299,8 @@ def filter_points_with_colors(points: np.ndarray, colors: np.ndarray):
         if keep.sum() >= max(32, int(0.2 * filtered_points.shape[0])):
             filtered_points = filtered_points[keep]
             filtered_colors = filtered_colors[keep]
+            if filtered_frame_indices is not None:
+                filtered_frame_indices = filtered_frame_indices[keep]
 
     if filtered_points.shape[0] >= 64:
         center = np.median(filtered_points, axis=0)
@@ -218,15 +311,24 @@ def filter_points_with_colors(points: np.ndarray, colors: np.ndarray):
         if keep.sum() >= max(32, int(0.2 * filtered_points.shape[0])):
             filtered_points = filtered_points[keep]
             filtered_colors = filtered_colors[keep]
+            if filtered_frame_indices is not None:
+                filtered_frame_indices = filtered_frame_indices[keep]
+
+    filtered_points, filtered_colors, _ = _filter_by_background_voxel_support(
+        filtered_points,
+        filtered_colors,
+        filtered_frame_indices,
+    )
 
     return filtered_points.astype(np.float32), filtered_colors.astype(np.float32)
 
 
 def build_background_from_depth(
     data_root: Path,
+    mask_root: Optional[Path],
     scan_id: str,
-    remove_obj_ids: list[int],
-    mask_source: str,
+    remove_obj_ids: Optional[list[int]],
+    mask_source: Optional[str],
     pose_mode: str,
     lift_coord_system: str,
     frame_selection: str,
@@ -237,22 +339,57 @@ def build_background_from_depth(
         stage_root = Path(tmpdir)
         scene_root = resolve_scene_root(data_root, scan_id, stage_root)
         scenes_dir = scene_root / "scenes"
+        mask_data_root = mask_root if mask_root is not None else data_root
 
         frame_ids = scan3r.load_frame_idxs(data_dir=str(scenes_dir), scan_id=scan_id)
+        # Subsampled backends (e.g. Pi3X with frame_stride > 1) leave the
+        # original color.jpg files but only emit pose.txt for the kept
+        # subset. Drop frames that have no pose so the loader does not
+        # crash on missing files.
+        sequence_dir_str = str(scenes_dir / scan_id / "sequence")
+        pose_present_ids = [
+            fid
+            for fid in frame_ids
+            if (scenes_dir / scan_id / "sequence" / f"frame-{fid}.pose.txt").exists()
+        ]
+        if len(pose_present_ids) < len(frame_ids):
+            print(
+                f"[depthbg] subsampled backend: keeping {len(pose_present_ids)}/"
+                f"{len(frame_ids)} frames with pose.txt"
+            )
+            frame_ids = pose_present_ids
         extrinsics = scan3r.load_frame_poses(
             data_dir=str(scene_root), scan_id=scan_id, frame_idxs=frame_ids
         )
         depth_intrinsics = scan3r.load_intrinsics(data_dir=str(scenes_dir), scan_id=scan_id, type="depth")
         depth_shift = vf._load_depth_shift(str(scenes_dir), scan_id)
-        masks = scan3r.load_masks(str(data_root), scan_id, mask_source=mask_source)
+        remove_obj_ids = list(remove_obj_ids or [])
+        use_masks = bool(remove_obj_ids) and (mask_source or "").strip().lower() not in {
+            "",
+            "none",
+            "off",
+            "disabled",
+        }
+        masks = (
+            scan3r.load_masks(str(mask_data_root), scan_id, mask_source=mask_source)
+            if use_masks
+            else None
+        )
 
         vis_frame_ids = []
         vis_masks = []
         for frame_id in frame_ids:
-            union_mask = np.isin(
-                masks[frame_id], np.array(remove_obj_ids, dtype=np.int32)
-            ).astype(np.uint8)
-            union_mask = erode_mask(union_mask, mask_erode_px)
+            if masks is None:
+                union_mask = np.zeros((1, 1), dtype=np.uint8)
+            else:
+                frame_mask = masks.get(frame_id)
+                if frame_mask is None:
+                    union_mask = np.zeros((1, 1), dtype=np.uint8)
+                else:
+                    union_mask = np.isin(
+                        frame_mask, np.array(remove_obj_ids, dtype=np.int32)
+                    ).astype(np.uint8)
+                    union_mask = erode_mask(union_mask, mask_erode_px)
             # We want background, so keep frames that contain at least some non-object pixels.
             if union_mask.size > 0:
                 vis_frame_ids.append(frame_id)
@@ -262,6 +399,7 @@ def build_background_from_depth(
             {
                 "OBJECTX_VOXEL_FRAME_SELECTION": frame_selection,
                 "OBJECTX_VOXEL_LIFT_COORD_SYSTEM": lift_coord_system,
+                "OBJECTX_VOXEL_POSE_MODE": pose_mode,
             }
         ):
             selected_frame_ids, selected_masks = vf._select_object_frames(
@@ -269,6 +407,12 @@ def build_background_from_depth(
                 vis_masks,
                 extrinsics=extrinsics,
                 max_views=max_views,
+            )
+            dropped_ids = vf._compute_scene_pose_jump_dropped(frame_ids, extrinsics)
+            selected_frame_ids, selected_masks = vf._filter_frames_by_pose_jumps(
+                selected_frame_ids,
+                selected_masks,
+                dropped_ids=dropped_ids,
             )
 
         depth_width = int(depth_intrinsics["width"])
@@ -278,50 +422,130 @@ def build_background_from_depth(
         pixel_stride = max(1, int(os.getenv("OBJECTX_VOXEL_LIFT_PIXEL_STRIDE", "1")))
         coord_system = lift_coord_system.strip().lower()
 
+        vis_depth_source = os.getenv("OBJECTX_VIS_DEPTH_SOURCE", "").strip().lower()
+        if vis_depth_source:
+            depth_source = vis_depth_source
+        else:
+            depth_source = (
+                os.getenv("OBJECTX_VOXEL_DEPTH_SOURCE", "default").strip().lower()
+            )
+        prefer_raw = depth_source in {"raw_if_available", "must3r_raw_if_available"}
+        prefer_xyz = depth_source in {
+            "must3r_xyz_if_available",
+            "xyz_if_available",
+            "xyz",
+        }
+        raw_conf_thr = float(os.getenv("OBJECTX_VIS_RAW_DEPTH_CONF_THR", "0.15"))
+        raw_depth_max = float(os.getenv("OBJECTX_VIS_RAW_DEPTH_MAX", "0.0"))
+
         lifted_points = []
         lifted_colors = []
-        for frame_id, union_mask in zip(selected_frame_ids, selected_masks):
-            depth_map = scan3r.load_depth_map(
-                str(scenes_dir / scan_id / "sequence" / f"frame-{frame_id}.depth.pgm"),
-                depth_shift,
-            )
+        lifted_frame_indices = []
+        xyz_frames_used = 0
+        intrinsic_frames_used = 0
+        for frame_index, (frame_id, union_mask) in enumerate(
+            zip(selected_frame_ids, selected_masks)
+        ):
+            sequence_dir = scenes_dir / scan_id / "sequence"
+            raw_path = sequence_dir / f"frame-{frame_id}.depth_raw.npy"
+            conf_path = sequence_dir / f"frame-{frame_id}.conf.npy"
+            xyz_path = sequence_dir / f"frame-{frame_id}.xyz.npy"
+
+            xyz_map = None
+            if prefer_xyz and xyz_path.exists():
+                xyz_map = np.load(str(xyz_path)).astype(np.float32)
+                xyz_map[~np.isfinite(xyz_map)] = 0.0
+                if raw_conf_thr > 0.0 and conf_path.exists():
+                    conf_map = np.load(str(conf_path)).astype(np.float32)
+                    if conf_map.shape[:2] == xyz_map.shape[:2]:
+                        xyz_map[conf_map < raw_conf_thr] = 0.0
+                if raw_depth_max > 0.0:
+                    xyz_map[xyz_map[..., 2] > raw_depth_max] = 0.0
+
+            if xyz_map is None:
+                if prefer_raw and raw_path.exists():
+                    depth_map = np.load(str(raw_path)).astype(np.float32)
+                    if raw_conf_thr > 0.0 and conf_path.exists():
+                        conf_map = np.load(str(conf_path)).astype(np.float32)
+                        if conf_map.shape != depth_map.shape:
+                            conf_map = np.array(
+                                Image.fromarray(conf_map).resize(
+                                    (depth_map.shape[1], depth_map.shape[0]),
+                                    resample=Image.BILINEAR,
+                                ),
+                                dtype=np.float32,
+                            )
+                        depth_map = np.where(conf_map >= raw_conf_thr, depth_map, 0.0)
+                else:
+                    depth_map = scan3r.load_depth_map(
+                        str(sequence_dir / f"frame-{frame_id}.depth.pgm"),
+                        depth_shift,
+                    )
+                if raw_depth_max > 0.0:
+                    depth_map = np.where(depth_map <= raw_depth_max, depth_map, 0.0)
+
             bg_mask = 1 - union_mask.astype(np.uint8)
+            if xyz_map is not None:
+                map_height, map_width = xyz_map.shape[:2]
+            else:
+                map_height, map_width = depth_height, depth_width
             mask_depth = np.array(
                 Image.fromarray((bg_mask > 0).astype(np.uint8)).resize(
-                    (depth_width, depth_height), resample=Image.NEAREST
+                    (map_width, map_height), resample=Image.NEAREST
                 ),
                 dtype=bool,
             )
             y, x = np.nonzero(mask_depth)
             if x.size == 0:
                 continue
-            depth = depth_map[y, x]
-            valid = depth > 0.0
-            if not np.any(valid):
-                continue
-            x = x[valid]
-            y = y[valid]
-            depth = depth[valid].astype(np.float32)
 
-            if pixel_stride > 1:
-                x = x[::pixel_stride]
-                y = y[::pixel_stride]
-                depth = depth[::pixel_stride]
-
-            pixels = np.stack(
-                [
-                    x.astype(np.float32),
-                    y.astype(np.float32),
-                    np.ones_like(x, dtype=np.float32),
-                ],
-                axis=0,
-            )
-            if coord_system in {"scan3r", "kitti"}:
-                x3 = (x.astype(np.float32) - intrinsic[0, 2]) * depth / intrinsic[0, 0]
-                y3 = (y.astype(np.float32) - intrinsic[1, 2]) * depth / intrinsic[1, 1]
-                cam_points = np.stack([depth, -x3, -y3], axis=0)
+            if xyz_map is not None:
+                cam_xyz = xyz_map[y, x].astype(np.float32)
+                valid = (
+                    np.isfinite(cam_xyz).all(axis=1)
+                    & (np.abs(cam_xyz).sum(axis=1) > 0.0)
+                    & (cam_xyz[:, 2] > 0.0)
+                )
+                if not np.any(valid):
+                    continue
+                x = x[valid]
+                y = y[valid]
+                cam_xyz = cam_xyz[valid]
+                if pixel_stride > 1:
+                    x = x[::pixel_stride]
+                    y = y[::pixel_stride]
+                    cam_xyz = cam_xyz[::pixel_stride]
+                cam_points = cam_xyz.T
+                xyz_frames_used += 1
             else:
-                cam_points = (intrinsic_inv @ pixels) * depth[None, :]
+                depth = depth_map[y, x]
+                valid = depth > 0.0
+                if not np.any(valid):
+                    continue
+                x = x[valid]
+                y = y[valid]
+                depth = depth[valid].astype(np.float32)
+
+                if pixel_stride > 1:
+                    x = x[::pixel_stride]
+                    y = y[::pixel_stride]
+                    depth = depth[::pixel_stride]
+
+                pixels = np.stack(
+                    [
+                        x.astype(np.float32),
+                        y.astype(np.float32),
+                        np.ones_like(x, dtype=np.float32),
+                    ],
+                    axis=0,
+                )
+                if coord_system in {"scan3r", "kitti"}:
+                    x3 = (x.astype(np.float32) - intrinsic[0, 2]) * depth / intrinsic[0, 0]
+                    y3 = (y.astype(np.float32) - intrinsic[1, 2]) * depth / intrinsic[1, 1]
+                    cam_points = np.stack([depth, -x3, -y3], axis=0)
+                else:
+                    cam_points = (intrinsic_inv @ pixels) * depth[None, :]
+                intrinsic_frames_used += 1
 
             if pose_mode == "invert":
                 camera_to_world = np.linalg.inv(extrinsics[frame_id])
@@ -332,12 +556,25 @@ def build_background_from_depth(
                 camera_to_world[:3, :3].astype(np.float32) @ cam_points
                 + camera_to_world[:3, 3:4].astype(np.float32)
             )
+            # Load color at the same resolution as the xyz/depth map we
+            # indexed with (y, x). Pi3X writes xyz at its native net size
+            # (e.g. 476x266), which differs from the Tango depth grid
+            # (224x172).
             color_image = load_color_frame_array(
-                scenes_dir, scan_id, frame_id, depth_width, depth_height
+                scenes_dir, scan_id, frame_id, map_width, map_height
             )
             point_colors = color_image[y, x]
-            lifted_points.append(world_points.T)
+            frame_points = world_points.T
+            lifted_points.append(frame_points)
             lifted_colors.append(point_colors)
+            lifted_frame_indices.append(
+                np.full(frame_points.shape[0], frame_index, dtype=np.int32)
+            )
+
+        print(
+            f"[depthbg] lifted frames: xyz={xyz_frames_used} "
+            f"pinhole={intrinsic_frames_used}"
+        )
 
         if not lifted_points:
             return (
@@ -348,7 +585,12 @@ def build_background_from_depth(
 
         bg_points = np.concatenate(lifted_points, axis=0).astype(np.float32)
         bg_colors = np.concatenate(lifted_colors, axis=0).astype(np.float32)
-        bg_points, bg_colors = filter_points_with_colors(bg_points, bg_colors)
+        bg_frame_indices = np.concatenate(lifted_frame_indices, axis=0)
+        bg_points, bg_colors = filter_points_with_colors(
+            bg_points,
+            bg_colors,
+            bg_frame_indices,
+        )
         return bg_points, bg_colors, selected_frame_ids
 
 
@@ -414,6 +656,7 @@ def save_contact_sheet(frames, out_file: Path):
 def main():
     args = parse_args()
     data_root = Path(args.data_root)
+    mask_root = Path(args.mask_root) if args.mask_root else data_root
     replacement_root = Path(args.replacement_root)
     obj_ids = resolve_obj_ids(args)
     obj_slug = "-".join(str(x) for x in obj_ids[:6])
@@ -432,6 +675,7 @@ def main():
     remove_obj_ids = obj_ids if args.background_remove_mode == "all" else loaded_ids
     bg_points, bg_colors, selected_frame_ids = build_background_from_depth(
         data_root=data_root,
+        mask_root=mask_root,
         scan_id=args.scan_id,
         remove_obj_ids=remove_obj_ids,
         mask_source=args.mask_source,
@@ -473,6 +717,7 @@ def main():
 
     summary = {
         "data_root": str(data_root),
+        "mask_root": str(mask_root),
         "replacement_root": str(replacement_root),
         "scan_id": args.scan_id,
         "obj_ids": obj_ids,

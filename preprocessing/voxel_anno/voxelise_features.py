@@ -25,30 +25,116 @@ from utils import visualisation as vis
 _LOGGER = logging.getLogger(__name__)
 
 
+def _lookup_mask_frame(mask: Dict, frame_id):
+    if not isinstance(mask, dict):
+        return None
+
+    candidates = []
+    if isinstance(frame_id, str):
+        candidates.append(frame_id)
+        if frame_id.isdigit():
+            frame_idx = int(frame_id)
+            candidates.extend([frame_idx, f"{frame_idx:06d}", str(frame_idx)])
+    else:
+        candidates.append(frame_id)
+        try:
+            frame_idx = int(frame_id)
+        except (TypeError, ValueError):
+            frame_idx = None
+        if frame_idx is not None:
+            candidates.extend([f"{frame_idx:06d}", str(frame_idx)])
+
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate in mask:
+            return mask[candidate]
+    return None
+
+
 def _load_dino_model(model_name: str):
+    local_hub_candidates = []
     local_hub_dir = os.getenv("OBJECTX_DINOV2_HUB_DIR")
+    if local_hub_dir:
+        local_hub_candidates.append(local_hub_dir)
     if not local_hub_dir:
         torch_home = os.getenv("TORCH_HOME")
         if torch_home:
             local_hub_dir = osp.join(torch_home, "hub", "facebookresearch_dinov2_main")
+            local_hub_candidates.append(local_hub_dir)
     if not local_hub_dir:
         cache_root = os.getenv("OBJECTX_CACHE_ROOT")
         if cache_root:
             local_hub_dir = osp.join(
                 cache_root, "torch", "hub", "facebookresearch_dinov2_main"
             )
+            local_hub_candidates.append(local_hub_dir)
     if not local_hub_dir:
         fallback_cache = "/work/scratch/pafina/objectx-cache/torch/hub/facebookresearch_dinov2_main"
         if osp.isdir(fallback_cache):
             local_hub_dir = fallback_cache
+        local_hub_candidates.append(fallback_cache)
     if not local_hub_dir:
         local_hub_dir = osp.expanduser("~/.cache/torch/hub/facebookresearch_dinov2_main")
+        local_hub_candidates.append(local_hub_dir)
     if osp.isdir(local_hub_dir):
+        _ensure_dinov2_py39_compat(local_hub_dir)
         _LOGGER.info("Loading DINOv2 from local hub cache: %s", local_hub_dir)
         return torch.hub.load(local_hub_dir, model_name, source="local")
 
     _LOGGER.info("Loading DINOv2 from torch hub repo")
-    return torch.hub.load("facebookresearch/dinov2", model_name)
+    try:
+        return torch.hub.load("facebookresearch/dinov2", model_name)
+    except TypeError:
+        # torch.hub may have just downloaded a Python-3.10+ DINOv2 main checkout
+        # before failing on PEP 604 annotations. Patch that fresh cache and retry.
+        for candidate in local_hub_candidates:
+            if candidate and osp.isdir(candidate):
+                _ensure_dinov2_py39_compat(candidate)
+                _LOGGER.info("Retrying DINOv2 from patched local hub cache: %s", candidate)
+                return torch.hub.load(candidate, model_name, source="local")
+        raise
+
+
+def _ensure_dinov2_py39_compat(local_hub_dir: str) -> None:
+    """Patch the cached DINOv2 checkout so it imports on Python 3.9.
+
+    The current `facebookresearch/dinov2` main branch uses PEP 604 union
+    annotations (`float | None`) in files imported by the backbone hub entry.
+    Those annotations are valid only in Python 3.10+, while voxelise runs in
+    our Python 3.9 environment.
+    """
+    if os.sys.version_info >= (3, 10):
+        return
+
+    patch_specs = {
+        osp.join(local_hub_dir, "dinov2", "layers", "attention.py"): [
+            ("from torch import nn, Tensor", "from typing import Optional\nfrom torch import nn, Tensor"),
+            (
+                "self, init_attn_std: float | None = None, init_proj_std: float | None = None, factor: float = 1.0",
+                "self, init_attn_std: Optional[float] = None, init_proj_std: Optional[float] = None, factor: float = 1.0",
+            ),
+        ],
+        osp.join(local_hub_dir, "dinov2", "layers", "block.py"): [
+            ("init_attn_std: float | None = None,", "init_attn_std: Optional[float] = None,"),
+            ("init_proj_std: float | None = None,", "init_proj_std: Optional[float] = None,"),
+            ("init_fc_std: float | None = None,", "init_fc_std: Optional[float] = None,"),
+        ],
+    }
+
+    for path, replacements in patch_specs.items():
+        if not osp.isfile(path):
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        patched = text
+        for old, new in replacements:
+            patched = patched.replace(old, new)
+        if patched != text:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(patched)
 
 
 def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
@@ -66,9 +152,171 @@ def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
     return patch_embeddings
 
 
+def _sample_projected_patchtokens(
+    patch_embeddings: torch.Tensor,
+    projection: torch.Tensor,
+    observed_views: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Sample DINO features in point chunks to avoid allocating views*voxels*C."""
+    num_views, num_points, _ = projection.shape
+    channels = int(patch_embeddings.shape[1])
+    chunk_points = int(os.getenv("OBJECTX_VOXEL_GRID_SAMPLE_CHUNK_POINTS", "4096"))
+    chunk_points = max(1, chunk_points)
+    device = patch_embeddings.device
+    chunks = []
+
+    for start in range(0, num_points, chunk_points):
+        end = min(start + chunk_points, num_points)
+        grid = projection[:, start:end, :].to(device=device, non_blocking=True).unsqueeze(1)
+        sampled = (
+            F.grid_sample(
+                patch_embeddings,
+                grid,
+                mode="bilinear",
+                align_corners=False,
+            )
+            .squeeze(2)
+            .permute(0, 2, 1)
+        )  # Shape: (Nimages, Npoints_chunk, C)
+
+        if observed_views is not None:
+            weights = torch.from_numpy(
+                observed_views[:, start:end].astype(np.float32, copy=False)
+            ).to(device=device, non_blocking=True)[..., None]
+            count = weights.sum(dim=0).clamp_min(1.0)
+            sampled = (sampled * weights).sum(dim=0) / count
+        else:
+            sampled = sampled.mean(dim=0)
+
+        chunks.append(sampled.detach().cpu().numpy())
+        del grid, sampled
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    patchtokens = np.concatenate(chunks, axis=0).reshape(num_points, channels)
+    return patchtokens
+
+
 def _log_rss(prefix: str) -> None:
     rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
     _LOGGER.info("%s | max_rss_mb=%.1f", prefix, rss_mb)
+
+
+_XYZ_DEPTH_SOURCES = {
+    "must3r_xyz_if_available",
+    "xyz_if_available",
+    "xyz",
+}
+
+
+def _xyz_mode_enabled() -> bool:
+    return (
+        os.getenv("OBJECTX_VOXEL_DEPTH_SOURCE", "default").strip().lower()
+        in _XYZ_DEPTH_SOURCES
+    )
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    }
+
+
+def _is_low_lift_points_error(e: Exception) -> bool:
+    return isinstance(e, ValueError) and (
+        "Too few lifted points" in str(e)
+        or "No valid 3D points after lifting masked depth" in str(e)
+    )
+
+
+def _load_object_depth_map(
+    root_dir: str,
+    scan_id: str,
+    frame_id: str,
+    depth_shift: float,
+) -> np.ndarray:
+    depth_source = (
+        os.getenv("OBJECTX_VOXEL_DEPTH_SOURCE", "default").strip().lower()
+    )
+    sequence_dir = osp.join(root_dir, "scenes", scan_id, "sequence")
+    if depth_source in _XYZ_DEPTH_SOURCES:
+        # xyz-mode path: return z-component of the stored per-pixel camera-frame
+        # point map so TSDF / tolerance-check code that reads a scalar depth keeps
+        # working. Full 3D lift uses _load_object_xyz_map instead of this scalar.
+        xyz_path = osp.join(sequence_dir, f"frame-{frame_id}.xyz.npy")
+        if osp.exists(xyz_path):
+            xyz_map = np.load(xyz_path).astype(np.float32)
+            depth_map = xyz_map[..., 2].copy()
+            depth_map[~np.isfinite(depth_map)] = 0.0
+            depth_map[depth_map <= 0.0] = 0.0
+            raw_conf_thr = float(
+                os.getenv("OBJECTX_VOXEL_RAW_DEPTH_CONF_THR", "0.15")
+            )
+            if raw_conf_thr > 0.0:
+                conf_path = osp.join(
+                    sequence_dir, f"frame-{frame_id}.conf.npy"
+                )
+                if osp.exists(conf_path):
+                    conf_map = np.load(conf_path).astype(np.float32)
+                    if conf_map.shape == depth_map.shape:
+                        depth_map = np.where(
+                            conf_map >= raw_conf_thr, depth_map, 0.0
+                        )
+            return depth_map
+    if depth_source in {"must3r_raw_if_available", "raw_if_available"}:
+        raw_path = osp.join(sequence_dir, f"frame-{frame_id}.depth_raw.npy")
+        if osp.exists(raw_path):
+            depth_map = np.load(raw_path).astype(np.float32)
+            raw_conf_thr = float(
+                os.getenv("OBJECTX_VOXEL_RAW_DEPTH_CONF_THR", "0.15")
+            )
+            if raw_conf_thr > 0.0:
+                conf_path = osp.join(
+                    sequence_dir, f"frame-{frame_id}.conf.npy"
+                )
+                if osp.exists(conf_path):
+                    conf_map = np.load(conf_path).astype(np.float32)
+                    if conf_map.shape == depth_map.shape:
+                        depth_map = np.where(
+                            conf_map >= raw_conf_thr, depth_map, 0.0
+                        )
+            return depth_map
+    return scan3r.load_depth_map(
+        osp.join(sequence_dir, f"frame-{frame_id}.depth.pgm"),
+        depth_shift,
+    )
+
+
+def _load_object_xyz_map(
+    root_dir: str,
+    scan_id: str,
+    frame_id: str,
+) -> Optional[np.ndarray]:
+    """Load per-pixel camera-frame XYZ map written by the MUSt3R wrapper.
+
+    Returns (H, W, 3) float32 with the same confidence masking applied as
+    _load_object_depth_map; returns None if xyz file is absent so callers can
+    fall back to the intrinsic-lift code path.
+    """
+    sequence_dir = osp.join(root_dir, "scenes", scan_id, "sequence")
+    xyz_path = osp.join(sequence_dir, f"frame-{frame_id}.xyz.npy")
+    if not osp.exists(xyz_path):
+        return None
+    xyz = np.load(xyz_path).astype(np.float32)
+    xyz[~np.isfinite(xyz)] = 0.0
+    raw_conf_thr = float(os.getenv("OBJECTX_VOXEL_RAW_DEPTH_CONF_THR", "0.15"))
+    if raw_conf_thr > 0.0:
+        conf_path = osp.join(sequence_dir, f"frame-{frame_id}.conf.npy")
+        if osp.exists(conf_path):
+            conf_map = np.load(conf_path).astype(np.float32)
+            if conf_map.shape[:2] == xyz.shape[:2]:
+                invalid = conf_map < raw_conf_thr
+                xyz[invalid] = 0.0
+    return xyz
 
 
 def _save_featured_voxel(
@@ -100,7 +348,7 @@ def _project_to_image(
     extrinsics: torch.Tensor,
     intrinsics: torch.Tensor,
     grid_size: tuple[int] = (64, 64, 64),
-):
+):  
     voxel_size = 1.0 / grid_size[0]
     voxel = voxel.float() * voxel_size
     assert voxel.min() >= 0.0 and voxel.max() <= 1.0
@@ -109,7 +357,7 @@ def _project_to_image(
     assert voxel.min() >= -1.0 and voxel.max() <= 1.0
     voxel = voxel * scale + mean
     uv, linear_depth = utils3d.torch.project_cv(
-        voxel.float(), extrinsics.float(), intrinsics.float()
+        voxel.float(), extrinsics=extrinsics.float(), intrinsics=intrinsics.float()
     )
     return uv, linear_depth
 
@@ -183,6 +431,7 @@ def _compute_voxel_observations(
 def _segment_mesh(
     mesh: o3d.geometry.TriangleMesh, annos: np.ndarray, obj_id: int, scan_id: str
 ):
+    
     faces = np.asarray(mesh.triangles)
     vertices = np.asarray(mesh.vertices)
     vertex_mask = annos == obj_id
@@ -324,8 +573,13 @@ def _resolve_frame_selection_mode() -> str:
         "area": "top_area",
         "diverse": "diverse_area",
         "diverse_area": "diverse_area",
+        "liftable_diverse_area": "diverse_area",
     }
     return aliases.get(source, "all")
+
+
+def _resolve_pose_mode() -> str:
+    return scan3r.resolve_pose_mode(os.getenv("OBJECTX_VOXEL_POSE_MODE") or "raw")
 
 
 def _normalize_scores(values: np.ndarray) -> np.ndarray:
@@ -340,8 +594,68 @@ def _normalize_scores(values: np.ndarray) -> np.ndarray:
 
 
 def _camera_center_from_extrinsic(extrinsic: np.ndarray) -> np.ndarray:
-    camera_to_world = np.linalg.inv(extrinsic)
-    return camera_to_world[:3, 3].astype(np.float32)
+    return scan3r.camera_center_from_pose(extrinsic, pose_mode=_resolve_pose_mode())
+
+
+def _compute_scene_pose_jump_dropped(
+    frame_ids: list[str],
+    extrinsics: Dict[str, np.ndarray],
+) -> set[str]:
+    max_translation = float(os.getenv("OBJECTX_VOXEL_POSE_JUMP_MAX_TRANSLATION", "0"))
+    max_z_translation = float(os.getenv("OBJECTX_VOXEL_POSE_JUMP_MAX_Z_TRANSLATION", "0"))
+    max_rotation_deg = float(os.getenv("OBJECTX_VOXEL_POSE_JUMP_MAX_ROTATION_DEG", "0"))
+    relative_factor = float(os.getenv("OBJECTX_VOXEL_POSE_JUMP_RELATIVE_FACTOR", "0"))
+    if (
+        max_translation <= 0.0
+        and max_z_translation <= 0.0
+        and max_rotation_deg <= 0.0
+        and relative_factor <= 0.0
+    ):
+        return set()
+
+    ordered_ids = [fid for fid in frame_ids if fid in extrinsics]
+    if len(ordered_ids) < 2:
+        return set()
+
+    pose_filter = scan3r.detect_pose_jump_outliers(
+        ordered_ids,
+        extrinsics,
+        pose_mode=_resolve_pose_mode(),
+        max_translation=max_translation,
+        max_z_translation=max_z_translation,
+        max_rotation_deg=max_rotation_deg,
+        relative_step_factor=relative_factor,
+    )
+    dropped_ids = set(pose_filter["dropped_frame_ids"])
+    preview = ",".join(pose_filter["dropped_frame_ids"][: min(8, len(dropped_ids))])
+    _LOGGER.info(
+        "[2.5] scene pose_jump_filter kept=%s/%s dropped=%s median_step=%.4f p95_step=%.4f limit=%.4f ids=%s",
+        len(ordered_ids) - len(dropped_ids),
+        len(ordered_ids),
+        len(dropped_ids),
+        float(pose_filter["median_step"]),
+        float(pose_filter["raw_step_p95"]),
+        float(pose_filter["translation_limit"]),
+        preview,
+    )
+    return dropped_ids
+
+
+def _filter_frames_by_pose_jumps(
+    frame_ids: list[str],
+    masks: list[np.ndarray],
+    dropped_ids: set[str],
+) -> tuple[list[str], list[np.ndarray]]:
+    if not dropped_ids:
+        return frame_ids, masks
+    filtered_ids = []
+    filtered_masks = []
+    for frame_id, mask in zip(frame_ids, masks):
+        if frame_id in dropped_ids:
+            continue
+        filtered_ids.append(frame_id)
+        filtered_masks.append(mask)
+    return filtered_ids, filtered_masks
 
 
 def _select_object_frames(
@@ -479,25 +793,11 @@ def _resolve_object_source() -> str:
 def _resolve_pose_camera_to_world(
     extrinsics: Dict[str, np.ndarray], frame_ids: list[str]
 ) -> list[np.ndarray]:
-    mode = (os.getenv("OBJECTX_VOXEL_POSE_MODE") or "raw").strip().lower()
-    aliases = {
-        "raw": "raw",
-        "direct": "raw",
-        "camera_to_world": "raw",
-        "cam2world": "raw",
-        "invert": "invert",
-        "inverse": "invert",
-        "world_to_camera": "invert",
-        "world2cam": "invert",
-    }
-    mode = aliases.get(mode, mode)
-    if mode not in {"raw", "invert"}:
-        raise ValueError(
-            f"Unsupported OBJECTX_VOXEL_POSE_MODE={mode!r}; expected 'raw' or 'invert'"
-        )
-    if mode == "raw":
-        return [np.array(extrinsics[frame_id], copy=True) for frame_id in frame_ids]
-    return [np.linalg.inv(extrinsics[frame_id]) for frame_id in frame_ids]
+    pose_mode = _resolve_pose_mode()
+    return [
+        scan3r.pose_to_camera_to_world(extrinsics[frame_id], pose_mode=pose_mode)
+        for frame_id in frame_ids
+    ]
 
 
 def _invert_pose_list(poses: list[np.ndarray]) -> list[np.ndarray]:
@@ -527,11 +827,155 @@ def _normalize_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, float
     return normalized, center.astype(np.float32), float(scale)
 
 
-def _filter_lifted_points(points: np.ndarray) -> np.ndarray:
-    if points.shape[0] < 64:
+def _filter_point_cloud_object_points(
+    points: np.ndarray, scan_id: str, obj_id: int
+) -> np.ndarray:
+    """Trim sparse point-cloud object outliers before 64^3 voxelization.
+
+    The Pi3X/SAMObject path exports point-cloud objects rather than watertight
+    meshes.  A few mislabeled wall/slab tail points can dominate mean/scale and
+    make the final voxelized object look much longer than the actual support.
+    This filter is intentionally bounded by a minimum keep fraction so it cannot
+    silently collapse an object.
+    """
+    enabled = os.getenv("OBJECTX_VOXEL_POINT_CLOUD_FILTER_OUTLIERS", "0").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    }
+    if not enabled or points.shape[0] < 64:
         return points
 
+    filtered = points.astype(np.float32, copy=False)
+    original_count = int(filtered.shape[0])
+    min_keep_fraction = float(
+        os.getenv("OBJECTX_VOXEL_POINT_CLOUD_FILTER_MIN_KEEP_FRACTION", "0.50")
+    )
+    min_keep = max(32, int(original_count * min_keep_fraction))
+
+    lower_q = float(os.getenv("OBJECTX_VOXEL_POINT_CLOUD_TRIM_LOW_Q", "0.0"))
+    upper_q = float(os.getenv("OBJECTX_VOXEL_POINT_CLOUD_TRIM_HIGH_Q", "100.0"))
+    if 0.0 <= lower_q < upper_q <= 100.0:
+        lower = np.percentile(filtered, lower_q, axis=0)
+        upper = np.percentile(filtered, upper_q, axis=0)
+        keep = np.all((filtered >= lower) & (filtered <= upper), axis=1)
+        if int(keep.sum()) >= min_keep:
+            filtered = filtered[keep]
+        else:
+            _LOGGER.info(
+                "[2.5] object %s/%s point_cloud_trim skipped keep=%s/%s min_keep=%s q=%.2f-%.2f",
+                scan_id,
+                obj_id,
+                int(keep.sum()),
+                original_count,
+                int(min_keep),
+                lower_q,
+                upper_q,
+            )
+
+    keep_radius_q = float(os.getenv("OBJECTX_VOXEL_POINT_CLOUD_KEEP_RADIUS_Q", "100.0"))
+    if 0.0 < keep_radius_q < 100.0 and filtered.shape[0] >= 64:
+        center = np.median(filtered, axis=0)
+        distances = np.linalg.norm(filtered - center[None, :], axis=1)
+        keep_radius = float(np.percentile(distances, keep_radius_q))
+        keep = distances <= keep_radius
+        if int(keep.sum()) >= min_keep:
+            filtered = filtered[keep]
+        else:
+            _LOGGER.info(
+                "[2.5] object %s/%s point_cloud_radius skipped keep=%s/%s min_keep=%s q=%.2f",
+                scan_id,
+                obj_id,
+                int(keep.sum()),
+                original_count,
+                int(min_keep),
+                keep_radius_q,
+            )
+
+    if filtered.shape[0] != original_count:
+        _LOGGER.info(
+            "[2.5] object %s/%s point_cloud_filter kept=%s/%s trim_q=%.2f-%.2f radius_q=%.2f",
+            scan_id,
+            obj_id,
+            int(filtered.shape[0]),
+            original_count,
+            lower_q,
+            upper_q,
+            keep_radius_q,
+        )
+    return filtered.astype(np.float32, copy=False)
+
+
+def _filter_lifted_points_by_support(
+    points: np.ndarray, view_indices: Optional[np.ndarray]
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    voxel_size = float(os.getenv("OBJECTX_VOXEL_LIFT_SUPPORT_VOXEL_SIZE", "0"))
+    min_points = int(os.getenv("OBJECTX_VOXEL_LIFT_MIN_POINTS_PER_VOXEL", "0"))
+    min_views = int(os.getenv("OBJECTX_VOXEL_LIFT_MIN_VIEWS_PER_VOXEL", "0"))
+    if (
+        voxel_size <= 0.0
+        or (min_points <= 1 and min_views <= 1)
+        or points.shape[0] < 64
+    ):
+        return points, view_indices
+
+    coords = np.floor(points.astype(np.float64) / voxel_size).astype(np.int64)
+    _, inverse = np.unique(coords, axis=0, return_inverse=True)
+    point_counts = np.bincount(inverse)
+    keep_voxels = point_counts >= max(1, min_points)
+
+    if min_views > 1:
+        if view_indices is None:
+            return points, view_indices
+        pairs = np.stack([inverse, view_indices.astype(np.int64)], axis=1)
+        unique_pairs = np.unique(pairs, axis=0)
+        view_counts = np.bincount(unique_pairs[:, 0], minlength=point_counts.shape[0])
+        keep_voxels &= view_counts >= min_views
+
+    keep = keep_voxels[inverse]
+    min_keep_fraction = float(os.getenv("OBJECTX_VOXEL_LIFT_SUPPORT_MIN_KEEP_FRACTION", "0.05"))
+    min_keep = max(32, int(points.shape[0] * min_keep_fraction))
+    if keep.sum() < min_keep:
+        strict_filter = _env_flag("OBJECTX_VOXEL_LIFT_STRICT_SUPPORT_FILTER")
+        _LOGGER.info(
+            "[2.5] lifted support filter %s keep=%s/%s min_keep=%s voxel_size=%.4f min_points=%s min_views=%s",
+            "strict-kept" if strict_filter else "skipped",
+            int(keep.sum()),
+            int(points.shape[0]),
+            int(min_keep),
+            float(voxel_size),
+            int(min_points),
+            int(min_views),
+        )
+        if strict_filter:
+            filtered_points = points[keep]
+            filtered_views = view_indices[keep] if view_indices is not None else None
+            return filtered_points, filtered_views
+        return points, view_indices
+
+    filtered_points = points[keep]
+    filtered_views = view_indices[keep] if view_indices is not None else None
+    _LOGGER.info(
+        "[2.5] lifted support filter kept %s/%s points voxel_size=%.4f min_points=%s min_views=%s",
+        int(filtered_points.shape[0]),
+        int(points.shape[0]),
+        float(voxel_size),
+        int(min_points),
+        int(min_views),
+    )
+    return filtered_points, filtered_views
+
+
+def _filter_lifted_points_with_views(
+    points: np.ndarray, view_indices: Optional[np.ndarray] = None
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    if points.shape[0] < 64:
+        return points, view_indices
+
     filtered = points
+    filtered_views = view_indices
     lower_q = float(os.getenv("OBJECTX_VOXEL_LIFT_TRIM_LOW_Q", "1.0"))
     upper_q = float(os.getenv("OBJECTX_VOXEL_LIFT_TRIM_HIGH_Q", "99.0"))
     if 0.0 <= lower_q < upper_q <= 100.0:
@@ -540,6 +984,8 @@ def _filter_lifted_points(points: np.ndarray) -> np.ndarray:
         keep = np.all((filtered >= lower) & (filtered <= upper), axis=1)
         if keep.sum() >= max(32, int(0.2 * filtered.shape[0])):
             filtered = filtered[keep]
+            if filtered_views is not None:
+                filtered_views = filtered_views[keep]
 
     if filtered.shape[0] >= 64:
         center = np.median(filtered, axis=0)
@@ -549,8 +995,17 @@ def _filter_lifted_points(points: np.ndarray) -> np.ndarray:
         keep = distances <= keep_radius
         if keep.sum() >= max(32, int(0.2 * filtered.shape[0])):
             filtered = filtered[keep]
+            if filtered_views is not None:
+                filtered_views = filtered_views[keep]
 
-    return filtered.astype(np.float32, copy=False)
+    filtered, filtered_views = _filter_lifted_points_by_support(
+        filtered.astype(np.float32, copy=False), filtered_views
+    )
+    return filtered.astype(np.float32, copy=False), filtered_views
+
+
+def _filter_lifted_points(points: np.ndarray) -> np.ndarray:
+    return _filter_lifted_points_with_views(points)[0]
 
 
 def _normalize_points_with_reference(
@@ -619,11 +1074,16 @@ def _lift_masked_points(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> np.ndarray:
     if len(selected_masks) != len(selected_depths) or len(selected_masks) != len(
         pose_camera_to_world
     ):
         raise ValueError("Mismatched mask/depth/pose lengths for lifted object path")
+    if selected_xyz_maps is not None and len(selected_xyz_maps) != len(
+        selected_masks
+    ):
+        raise ValueError("Mismatched xyz/mask lengths for lifted object path")
 
     depth_width = int(depth_intrinsics["width"])
     depth_height = int(depth_intrinsics["height"])
@@ -633,18 +1093,60 @@ def _lift_masked_points(
     coord_system = os.getenv("OBJECTX_VOXEL_LIFT_COORD_SYSTEM", "pinhole").strip().lower()
 
     lifted_points = []
-    for obj_mask, depth_map, camera_to_world in zip(
-        selected_masks, selected_depths, pose_camera_to_world
+    lifted_view_indices = []
+    xyz_frames_used = 0
+    intrinsic_frames_used = 0
+    for i, (obj_mask, depth_map, camera_to_world) in enumerate(
+        zip(selected_masks, selected_depths, pose_camera_to_world)
     ):
+        xyz_map = None
+        if selected_xyz_maps is not None:
+            candidate = selected_xyz_maps[i]
+            if (
+                candidate is not None
+                and candidate.ndim == 3
+                and candidate.shape[2] == 3
+            ):
+                xyz_map = candidate
+
+        if xyz_map is not None:
+            map_height, map_width = xyz_map.shape[:2]
+        else:
+            map_height, map_width = depth_height, depth_width
         mask_depth = np.array(
             Image.fromarray((obj_mask > 0).astype(np.uint8)).resize(
-                (depth_width, depth_height), resample=Image.NEAREST
+                (map_width, map_height), resample=Image.NEAREST
             ),
             dtype=bool,
         )
         y, x = np.nonzero(mask_depth)
         if x.size == 0:
             continue
+
+        if xyz_map is not None:
+            cam_xyz = xyz_map[y, x].astype(np.float32)
+            valid = (
+                np.isfinite(cam_xyz).all(axis=1)
+                & (np.abs(cam_xyz).sum(axis=1) > 0.0)
+                & (cam_xyz[:, 2] > 0.0)
+            )
+            if not np.any(valid):
+                continue
+            cam_xyz = cam_xyz[valid]
+            if pixel_stride > 1:
+                cam_xyz = cam_xyz[::pixel_stride]
+            world_points = (
+                camera_to_world[:3, :3].astype(np.float32) @ cam_xyz.T
+                + camera_to_world[:3, 3:4].astype(np.float32)
+            )
+            world_points = world_points.T
+            lifted_points.append(world_points)
+            lifted_view_indices.append(
+                np.full(world_points.shape[0], i, dtype=np.int32)
+            )
+            xyz_frames_used += 1
+            continue
+
         depth = depth_map[y, x]
         valid = depth > 0.0
         if not np.any(valid):
@@ -676,18 +1178,36 @@ def _lift_masked_points(
             camera_to_world[:3, :3].astype(np.float32) @ cam_points
             + camera_to_world[:3, 3:4].astype(np.float32)
         )
-        lifted_points.append(world_points.T)
+        world_points = world_points.T
+        lifted_points.append(world_points)
+        lifted_view_indices.append(np.full(world_points.shape[0], i, dtype=np.int32))
+        intrinsic_frames_used += 1
 
     if not lifted_points:
         return np.zeros((0, 3), dtype=np.float32)
     lifted_points = np.concatenate(lifted_points, axis=0).astype(np.float32)
-    filtered_points = _filter_lifted_points(lifted_points)
+    lifted_view_indices_arr = np.concatenate(lifted_view_indices, axis=0)
+    filtered_points, _ = _filter_lifted_points_with_views(
+        lifted_points, lifted_view_indices_arr
+    )
     _LOGGER.info(
-        "[2.5] lifted points filtered %s -> %s using coord_system=%s",
+        "[2.5] lifted points filtered %s -> %s (xyz_frames=%s pinhole_frames=%s coord_system=%s)",
         int(lifted_points.shape[0]),
         int(filtered_points.shape[0]),
+        xyz_frames_used,
+        intrinsic_frames_used,
         coord_system,
     )
+    if (
+        _env_flag("OBJECTX_VOXEL_REQUIRE_XYZ")
+        and selected_xyz_maps is not None
+        and xyz_frames_used == 0
+        and intrinsic_frames_used > 0
+    ):
+        raise RuntimeError(
+            "OBJECTX_VOXEL_REQUIRE_XYZ=1 but no selected frame used xyz.npy; "
+            "refusing silent pinhole/TSDF fallback"
+        )
     return filtered_points
 
 
@@ -698,12 +1218,14 @@ def _prepare_lifted_geometry(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     lifted_points = _lift_masked_points(
         selected_masks=selected_masks,
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
     _LOGGER.info(
         "[2.5] object %s/%s lifted_points=%s",
@@ -762,6 +1284,7 @@ def _build_lifted_object_voxel_grid(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     lifted_points, normalized_points, mean, scale = _prepare_lifted_geometry(
         scan_id=scan_id,
@@ -770,6 +1293,7 @@ def _build_lifted_object_voxel_grid(
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
     voxel_grid = _voxelize_normalized_points(normalized_points, dilate_iters=1)
     voxel_grid = _finalize_object_voxel_grid(
@@ -796,6 +1320,7 @@ def _build_tsdf_object_voxel_grid(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     lifted_points, normalized_points, mean, scale = _prepare_lifted_geometry(
         scan_id=scan_id,
@@ -804,6 +1329,7 @@ def _build_tsdf_object_voxel_grid(
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
     _LOGGER.info(
         "[2.5] object %s/%s lifted_points=%s before TSDF",
@@ -970,6 +1496,7 @@ def _build_hybrid_object_voxel_grid(
     selected_depths: list[np.ndarray],
     pose_camera_to_world: list[np.ndarray],
     depth_intrinsics: dict,
+    selected_xyz_maps: Optional[list[Optional[np.ndarray]]] = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     lifted_voxel_grid, mean, scale = _build_lifted_object_voxel_grid(
         scan_id=scan_id,
@@ -978,7 +1505,18 @@ def _build_hybrid_object_voxel_grid(
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
+    if selected_xyz_maps is not None and any(xyz is not None for xyz in selected_xyz_maps):
+        _LOGGER.info(
+            "[2.5] object %s/%s hybrid_xyz_mode lifted=%s tsdf=skipped "
+            "(intrinsic-free MUSt3R XYZ maps are not compatible with pinhole TSDF)",
+            scan_id,
+            obj_id,
+            int(lifted_voxel_grid.shape[0]),
+        )
+        return lifted_voxel_grid, mean, scale
+
     tsdf_voxel_grid, _, _ = _build_tsdf_object_voxel_grid(
         scan_id=scan_id,
         obj_id=obj_id,
@@ -986,6 +1524,7 @@ def _build_hybrid_object_voxel_grid(
         selected_depths=selected_depths,
         pose_camera_to_world=pose_camera_to_world,
         depth_intrinsics=depth_intrinsics,
+        selected_xyz_maps=selected_xyz_maps,
     )
     merged = np.concatenate([lifted_voxel_grid, tsdf_voxel_grid], axis=0)
     merged = _finalize_object_voxel_grid(
@@ -1022,9 +1561,26 @@ def voxelise_features(
 
     scenes_dir = osp.join(root_dir, "scenes")
     frame_idxs = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
+    # Filter out frames that have no pose file: this happens when Pi3X (or
+    # any other backend) runs with a frame_stride > 1, leaving the original
+    # color.jpg from the zip but writing pose/xyz only for the kept subset.
+    sequence_dir = osp.join(scenes_dir, scan_id, "sequence")
+    pose_present_idxs = [
+        fid
+        for fid in frame_idxs
+        if osp.exists(osp.join(sequence_dir, f"frame-{fid}.pose.txt"))
+    ]
+    if len(pose_present_idxs) < len(frame_idxs):
+        _LOGGER.info(
+            "[2.5] subsampled backend detected: keeping %d/%d frames with pose.txt",
+            len(pose_present_idxs),
+            len(frame_idxs),
+        )
+        frame_idxs = pose_present_idxs
     extrinsics = scan3r.load_frame_poses(
         data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
+    pose_jump_dropped_ids = _compute_scene_pose_jump_dropped(frame_idxs, extrinsics)
     intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
     filter_unobserved = os.getenv("OBJECTX_VOXEL_FILTER_UNOBSERVED", "0").lower() not in {
         "0",
@@ -1039,6 +1595,8 @@ def voxelise_features(
     depth_abs_tol = float(os.getenv("OBJECTX_VOXEL_DEPTH_ABS_TOL", "0.05"))
     depth_rel_tol = float(os.getenv("OBJECTX_VOXEL_DEPTH_REL_TOL", "0.02"))
     depth_map_cache = {}
+    xyz_map_cache: Dict[str, Optional[np.ndarray]] = {}
+    xyz_mode = _xyz_mode_enabled()
     requires_depth = filter_unobserved or object_source in {
         "lifted_masks",
         "tsdf_masks",
@@ -1093,6 +1651,15 @@ def voxelise_features(
             os.makedirs(osp.dirname(voxel_path), exist_ok=True)
             os.makedirs(osp.dirname(mean_scale_path), exist_ok=True)
 
+            if args.override and not args.dry_run:
+                for stale_path in (voxel_path, mean_scale_path):
+                    if osp.exists(stale_path):
+                        os.remove(stale_path)
+                        _LOGGER.info(
+                            "[2.5] removed stale output before override: %s",
+                            stale_path,
+                        )
+
             if (
                 osp.exists(mean_scale_path)
                 and osp.exists(voxel_path)
@@ -1101,14 +1668,17 @@ def voxelise_features(
             ):
                 _LOGGER.info(f"Skipping {scan_id} ({obj['id']})")
                 continue
-
+            
             obj_id = int(obj["id"])
             # STEP 1: Select frames where the current object is visible according to the
             # current mask source.
             selected_frame_ids = []
             selected_masks = []
             for frame_id in frame_idxs:
-                obj_mask = np.where(mask[frame_id] == int(obj_id), 1, 0)
+                frame_mask = _lookup_mask_frame(mask, frame_id)
+                if frame_mask is None:
+                    continue
+                obj_mask = np.where(np.asarray(frame_mask) == int(obj_id), 1, 0)
                 if obj_mask.sum() > 0:
                     selected_frame_ids.append(frame_id)
                     selected_masks.append(obj_mask)
@@ -1133,6 +1703,11 @@ def voxelise_features(
                 extrinsics=extrinsics,
                 max_views=max_views,
             )
+            selected_frame_ids, selected_masks = _filter_frames_by_pose_jumps(
+                selected_frame_ids,
+                selected_masks,
+                dropped_ids=pose_jump_dropped_ids,
+            )
             min_selected_frames = int(os.getenv("OBJECTX_VOXEL_MIN_SELECTED_FRAMES", "0"))
             if len(selected_frame_ids) < max(0, min_selected_frames):
                 _LOGGER.info(
@@ -1146,6 +1721,7 @@ def voxelise_features(
 
             rendered_obj = []
             selected_depths = []
+            selected_xyz_maps: list[Optional[np.ndarray]] = []
             for frame_id, obj_mask in zip(selected_frame_ids, selected_masks):
                 image = Image.open(
                     f"{root_dir}/scenes/{scan_id}/sequence/frame-{frame_id}.color.jpg"
@@ -1154,17 +1730,21 @@ def voxelise_features(
                 rendered_obj.append(image_t * torch.from_numpy(obj_mask[None, :, :]))
                 if requires_depth:
                     if frame_id not in depth_map_cache:
-                        depth_map_cache[frame_id] = scan3r.load_depth_map(
-                            osp.join(
-                                root_dir,
-                                "scenes",
-                                scan_id,
-                                "sequence",
-                                f"frame-{frame_id}.depth.pgm",
-                            ),
-                            depth_shift,
+                        depth_map_cache[frame_id] = _load_object_depth_map(
+                            root_dir=root_dir,
+                            scan_id=scan_id,
+                            frame_id=frame_id,
+                            depth_shift=depth_shift,
                         )
                     selected_depths.append(depth_map_cache[frame_id])
+                    if xyz_mode:
+                        if frame_id not in xyz_map_cache:
+                            xyz_map_cache[frame_id] = _load_object_xyz_map(
+                                root_dir=root_dir,
+                                scan_id=scan_id,
+                                frame_id=frame_id,
+                            )
+                        selected_xyz_maps.append(xyz_map_cache[frame_id])
 
             rendered_obj = torch.stack(rendered_obj).float()
             pose_camera_to_world = _resolve_pose_camera_to_world(
@@ -1174,6 +1754,35 @@ def voxelise_features(
                 f"[2.5] object {scan_id}/{obj_id} selected_frames={len(selected_frame_ids)}"
             )
 
+            xyz_maps_arg = selected_xyz_maps if xyz_mode else None
+            if xyz_mode and requires_depth:
+                xyz_loaded = sum(xyz is not None for xyz in selected_xyz_maps)
+                xyz_shapes = sorted(
+                    {
+                        tuple(xyz.shape)
+                        for xyz in selected_xyz_maps
+                        if xyz is not None
+                    }
+                )
+                depth_shapes = sorted({tuple(depth.shape) for depth in selected_depths})
+                _LOGGER.info(
+                    "[2.5] object %s/%s xyz_precheck depth_source=%s require_xyz=%s "
+                    "loaded=%s/%s xyz_shapes=%s depth_shapes=%s root=%s",
+                    scan_id,
+                    obj_id,
+                    os.getenv("OBJECTX_VOXEL_DEPTH_SOURCE", ""),
+                    int(_env_flag("OBJECTX_VOXEL_REQUIRE_XYZ")),
+                    int(xyz_loaded),
+                    int(len(selected_xyz_maps)),
+                    xyz_shapes,
+                    depth_shapes,
+                    root_dir,
+                )
+                if _env_flag("OBJECTX_VOXEL_REQUIRE_XYZ") and xyz_loaded == 0:
+                    raise RuntimeError(
+                        "OBJECTX_VOXEL_REQUIRE_XYZ=1 but no xyz.npy maps were loaded "
+                        f"for selected frames; first_frames={selected_frame_ids[:8]}"
+                    )
             # STEP 2/3: Build object geometry and voxel grid from the selected source.
             if object_source == "lifted_masks":
                 voxel_grid, mean, scale = _build_lifted_object_voxel_grid(
@@ -1183,6 +1792,7 @@ def voxelise_features(
                     selected_depths=selected_depths,
                     pose_camera_to_world=pose_camera_to_world,
                     depth_intrinsics=depth_intrinsics,
+                    selected_xyz_maps=xyz_maps_arg,
                 )
             elif object_source == "tsdf_masks":
                 voxel_grid, mean, scale = _build_tsdf_object_voxel_grid(
@@ -1192,6 +1802,7 @@ def voxelise_features(
                     selected_depths=selected_depths,
                     pose_camera_to_world=pose_camera_to_world,
                     depth_intrinsics=depth_intrinsics,
+                    selected_xyz_maps=xyz_maps_arg,
                 )
             elif object_source == "hybrid_masks":
                 voxel_grid, mean, scale = _build_hybrid_object_voxel_grid(
@@ -1201,19 +1812,55 @@ def voxelise_features(
                     selected_depths=selected_depths,
                     pose_camera_to_world=pose_camera_to_world,
                     depth_intrinsics=depth_intrinsics,
+                    selected_xyz_maps=xyz_maps_arg,
                 )
             else:
-                segmented_mesh = _segment_mesh(mesh, annos, obj_id, scan_id)
-                mean, scale = _normalize_segmented_mesh(segmented_mesh)
-                voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh_within_bounds(
-                    segmented_mesh,
-                    1 / 64,
-                    min_bound=(-0.5, -0.5, -0.5),
-                    max_bound=(0.5, 0.5, 0.5),
-                )
-                voxel_grid = _dilate_voxels(voxel_grid)
+                if len(mesh.triangles) == 0:
+                    # Point-cloud PLY (e.g. Pi3X mesh): extract vertices for this object and voxelize
+                    all_vertices = np.asarray(mesh.vertices, dtype=np.float32)
+                    obj_pts = all_vertices[annos == obj_id]
+                    if len(obj_pts) == 0:
+                        _LOGGER.info("Skipping %s (%s): no vertices in point cloud PLY", scan_id, obj_id)
+                        continue
+                    obj_pts = _filter_point_cloud_object_points(obj_pts, scan_id, obj_id)
+                    if len(obj_pts) == 0:
+                        _LOGGER.info("Skipping %s (%s): no vertices after point cloud filtering", scan_id, obj_id)
+                        continue
+                    mean = obj_pts.mean(axis=0)
+                    obj_pts = obj_pts - mean
+                    scale = float(np.max(np.abs(obj_pts)))
+                    if scale < 1e-8:
+                        _LOGGER.info("Skipping %s (%s): degenerate scale in point cloud PLY", scan_id, obj_id)
+                        continue
+                    normalized_points = np.clip(obj_pts / (2 * scale), -0.5 + 1e-6, 0.5 - 1e-6)
+                    point_cloud_dilate_iters = int(
+                        os.getenv("OBJECTX_VOXEL_POINT_CLOUD_DILATE_ITERS", "1")
+                    )
+                    voxel_grid = _voxelize_normalized_points(
+                        normalized_points,
+                        dilate_iters=point_cloud_dilate_iters,
+                    )
+                    _LOGGER.info(
+                        "[2.5] object %s/%s point_cloud_voxels=%s dilate_iters=%s",
+                        scan_id,
+                        obj_id,
+                        int(voxel_grid.shape[0]),
+                        point_cloud_dilate_iters,
+                    )
+                else:
+                    segmented_mesh = _segment_mesh(mesh, annos, obj_id, scan_id)
+                    mean, scale = _normalize_segmented_mesh(segmented_mesh)
+                    voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh_within_bounds(
+                        segmented_mesh,
+                        1 / 64,
+                        min_bound=(-0.5, -0.5, -0.5),
+                        max_bound=(0.5, 0.5, 0.5),
+                    )
+                    voxel_grid = _dilate_voxels(voxel_grid)
 
             # STEP 4: Save mean and scale (Scene composition)
+            os.makedirs(osp.dirname(voxel_path), exist_ok=True)
+            os.makedirs(osp.dirname(mean_scale_path), exist_ok=True)
             if not args.dry_run:
                 np.savez(mean_scale_path, mean=mean, scale=scale)
                 _LOGGER.info(f"Saved mean and scale to {mean_scale_path}")
@@ -1285,31 +1932,17 @@ def voxelise_features(
                 rendered_obj
             )  # Shape: (Nimages, 1024, 64, 64)
 
-            # STEP 8: Match the embeddings to the projection
-            patchtokens = (
-                F.grid_sample(
-                    patch_embeddings,
-                    projection.cuda().unsqueeze(1),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                .squeeze(2)
-                .permute(0, 2, 1)
-                .cpu()
-                .numpy()
-            )  # Shape: (Nimages, Npoints, 1024)
+            # STEP 8: Match the embeddings to the projection. This is chunked
+            # over voxels so large SAM2 masks do not allocate views*voxels*C.
+            patchtokens = _sample_projected_patchtokens(
+                patch_embeddings,
+                projection,
+                observed_views=observed_views if filter_unobserved else None,
+            )
 
             if filter_unobserved:
-                observation_weights = observed_views.astype(np.float32)[..., None]
-                observation_count = observation_weights.sum(axis=0)
-                patchtokens = np.divide(
-                    (patchtokens * observation_weights).sum(axis=0),
-                    np.clip(observation_count, 1.0, None),
-                )
                 patchtokens = patchtokens[observed_voxels]
                 voxel_grid = voxel_grid[observed_voxels]
-            else:
-                patchtokens = np.mean(patchtokens, axis=0)
 
             patchtokens = patchtokens.astype(np.float16)  # Shape: (Npoints, 1024)
             assert patchtokens.shape[0] == voxel_grid.shape[0]
@@ -1332,7 +1965,18 @@ def voxelise_features(
                 )
                 _log_rss(f"[2.5] saved voxel {scan_id}/{obj_id}")
         except (FileNotFoundError, RuntimeError, ValueError) as e:
-            _LOGGER.exception(f"Error processing {scan_id} ({obj_id}): {e}")
+            low_lift_error = _is_low_lift_points_error(e)
+            if low_lift_error:
+                _LOGGER.warning(
+                    "Skipping %s (%s) due to object quality threshold: %s",
+                    scan_id,
+                    obj_id,
+                    e,
+                )
+            else:
+                _LOGGER.exception(f"Error processing {scan_id} ({obj_id}): {e}")
+            if _env_flag("OBJECTX_VOXEL_REQUIRE_XYZ") and not low_lift_error:
+                raise
         finally:
             for name in [
                 "segmented_mesh",
@@ -1375,11 +2019,13 @@ def process_data(
 
     scan_type = cfg.autoencoder.encoder.scan_type
     resplit = "resplit_" if cfg.data.resplit else ""
+
     scan_ids_filename = (
         f"{split}_{resplit}scans.txt"
         if scan_type == "scan"
         else f"{split}_scans_subscenes.txt"
     )
+
     objects_info_file = osp.join(root_dir, "files", "objects.json")
     all_obj_info = common.load_json(objects_info_file)
 
@@ -1387,27 +2033,7 @@ def process_data(
         osp.join(root_dir, "files", scan_ids_filename), dtype=str
     )
     subscan_ids_processed = []
-
-    subRescan_ids_generated = {}
-    scans_dir = cfg.data.root_dir
-    scans_files_dir = osp.join(scans_dir, "files")
-
-    all_scan_data = common.load_json(osp.join(scans_files_dir, "3RScan.json"))
-
-    for scan_data in all_scan_data:
-        ref_scan_id = scan_data["reference"]
-        if ref_scan_id in subscan_ids_generated:
-            rescan_ids = [scan["reference"] for scan in scan_data["scans"]]
-            subRescan_ids_generated[ref_scan_id] = [ref_scan_id] + rescan_ids
-
-    subscan_ids_generated = subRescan_ids_generated
-
-    all_subscan_ids = [
-        subscan_id
-        for scan_id in subscan_ids_generated
-        for subscan_id in subscan_ids_generated[scan_id]
-    ]
-
+    all_subscan_ids = subscan_ids_generated
     for subscan_id in tqdm(all_subscan_ids):
         obj_data = next(
             obj_data

@@ -8,16 +8,17 @@ RESET_TMP="${RESET_TMP:-0}"
 SPLIT="${SPLIT:-train}"
 MAX_SCANS="${MAX_SCANS:-0}"
 CACHE_ROOT="${OBJECTX_CACHE_ROOT:-/work/scratch/pafina/objectx-cache}"
-
-if [[ ! -d "$REPO_ROOT/.venv_objx" ]]; then
-  echo "Missing venv at $REPO_ROOT/.venv_objx" >&2
-  exit 1
-fi
-
-source "$REPO_ROOT/.venv_objx/bin/activate"
+source "$REPO_ROOT/scripts/activate_objectx_env.sh"
 
 if [[ "$RESET_TMP" == "1" ]]; then
   rm -rf "$TMP_VOX_ROOT"
+fi
+
+# Older runs left /work/scratch/.../objectx-cache as a symlink into a deleted
+# cache tree. Replace that broken link with a real directory so cache setup and
+# downstream torch/matplotlib caches work again.
+if [[ -L "$CACHE_ROOT" && ! -e "$CACHE_ROOT" ]]; then
+  rm -f "$CACHE_ROOT"
 fi
 
 mkdir -p "$TMP_VOX_ROOT/scenes" "$TMP_VOX_ROOT/files"
@@ -31,10 +32,15 @@ export MPLCONFIGDIR="$CACHE_ROOT/matplotlib"
 export OBJECTX_DINOV2_HUB_DIR="$TORCH_HOME/hub/facebookresearch_dinov2_main"
 
 cd "$REPO_ROOT"
+VOXELISE_EXTRA_ARGS=()
+if [[ "${OBJECTX_VOXEL_OVERRIDE:-0}" == "1" ]]; then
+  VOXELISE_EXTRA_ARGS+=(--override)
+fi
 python -u scripts/voxel_annotations/pipeline/run_scanwise_voxelise_tmp.py \
   --repo-root "$REPO_ROOT" \
   --scratch-root "$SCRATCH_ROOT" \
   --tmp-root "$TMP_VOX_ROOT" \
   --config "$REPO_ROOT/preprocessing/voxel_anno/voxel_anno.yaml" \
   --split "$SPLIT" \
-  --max-scans "$MAX_SCANS"
+  --max-scans "$MAX_SCANS" \
+  "${VOXELISE_EXTRA_ARGS[@]}"
