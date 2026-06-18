@@ -96,6 +96,25 @@ def make_output_dirs(cfg, scene_id):
     return dirs
 
 
+def link_sequence_inputs(src_seq, dst_seq, image_ext):
+    src_seq = Path(src_seq)
+    dst_seq = Path(dst_seq)
+    try:
+        if src_seq.resolve() == dst_seq.resolve():
+            return
+    except FileNotFoundError:
+        pass
+    dst_seq.mkdir(parents=True, exist_ok=True)
+    for src in sorted(src_seq.glob(f"*{image_ext}")):
+        dst = dst_seq / src.name
+        if not dst.exists() and not dst.is_symlink():
+            os.symlink(src, dst)
+    src_info = src_seq / "_info.txt"
+    dst_info = dst_seq / "_info.txt"
+    if src_info.exists() and not dst_info.exists() and not dst_info.is_symlink():
+        os.symlink(src_info, dst_info)
+
+
 def ensure_sequence_input(cfg, scene_id, dirs):
     source_root = source_root_from_cfg(cfg)
     image_subdir = cfg["dataset"].get("image_subdir", "sequence")
@@ -103,12 +122,17 @@ def ensure_sequence_input(cfg, scene_id, dirs):
 
     scene_root = source_root / "scenes" / scene_id
     src_seq = scene_root / image_subdir
+    dst_seq = Path(dirs["depth"])
     if src_seq.exists():
+        link_sequence_inputs(src_seq, dst_seq, image_ext)
         return str(src_seq)
 
     src_zip = scene_root / f"{image_subdir}.zip"
-    dst_seq = Path(dirs["depth"])
     if list(dst_seq.glob(f"*{image_ext}")):
+        src_info = scene_root / image_subdir / "_info.txt"
+        dst_info = dst_seq / "_info.txt"
+        if src_info.exists() and not dst_info.exists() and not dst_info.is_symlink():
+            os.symlink(src_info, dst_info)
         return str(dst_seq)
 
     if src_zip.exists():

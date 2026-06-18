@@ -72,3 +72,13 @@ dependencies/pi3/**/build/
 dependencies/pi3/**/*.egg-info/
 dependencies/pi3/**/*.so
 vis/rendered
+final_report/3dv_report.zip
+
+final_report
+
+configs/workflows/scene_profiles/custom_video_horizontal_profiles.tsv
+configs/workflows/scene_profiles/custom_video_horizontal_profiles.txt
+plots/combination_pascals_room.png
+plots/geom_pascals_room.png
+plots/pascals_messy_room_geometry_vs_masks_side_by_side.pdf
+plots/pascals_messy_room_geometry_vs_masks_side_by_side.png
