@@ -2,7 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SCRATCH_ROOT="${DATA_ROOT_DIR:-/work/scratch/pafina/objectx-data-baseline}"
+USER_ROOT="${OBJECTX_USER_ROOT:-/work/scratch/${USER:-$(id -un)}}"
+SCRATCH_ROOT="${DATA_ROOT_DIR:-${OBJECTX_BASELINE_ROOT:-$USER_ROOT/objectx-data-baseline}}"
 TMP_INFER_ROOT="${TMP_INFER_ROOT:-/tmp/${USER}-objectx-infer}"
 RESET_TMP="${RESET_TMP:-1}"
 SPLIT="${SPLIT:-val}"

@@ -72,7 +72,15 @@ def _load_dino_model(model_name: str):
             )
             local_hub_candidates.append(local_hub_dir)
     if not local_hub_dir:
-        fallback_cache = "/work/scratch/pafina/objectx-cache/torch/hub/facebookresearch_dinov2_main"
+        user = os.environ.get("USER") or osp.basename(osp.expanduser("~"))
+        user_root = os.environ.get("OBJECTX_USER_ROOT", f"/work/scratch/{user}")
+        fallback_cache = osp.join(
+            user_root,
+            "objectx-cache",
+            "torch",
+            "hub",
+            "facebookresearch_dinov2_main",
+        )
         if osp.isdir(fallback_cache):
             local_hub_dir = fallback_cache
         local_hub_candidates.append(fallback_cache)

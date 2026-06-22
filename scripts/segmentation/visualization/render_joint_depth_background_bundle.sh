@@ -200,8 +200,17 @@ if [[ -z "$JOINT_PLY" ]]; then
     JOINT_PLY="$REPO_ROOT/vis/${SCAN_ID}_joint.ply"
 fi
 
+PRED_READY_MANIFEST="$REPLACEMENT_ROOT/files/pred_ready_scene_manifest.json"
+if [[ -n "$MANIFEST" && ! -f "$MANIFEST" && -f "$PRED_READY_MANIFEST" ]]; then
+    echo "Manifest not found at $MANIFEST; using $PRED_READY_MANIFEST"
+    MANIFEST="$PRED_READY_MANIFEST"
+fi
+
 if [[ -z "$MANIFEST" ]]; then
-    MANIFEST="$(python - <<PY
+    if [[ -f "$PRED_READY_MANIFEST" ]]; then
+        MANIFEST="$PRED_READY_MANIFEST"
+    else
+        MANIFEST="$(python - <<PY
 import json
 from pathlib import Path
 
@@ -218,6 +227,7 @@ for path in sorted(debug_dir.glob("*manifest*.json")):
 print(candidates[0] if candidates else "")
 PY
 )"
+    fi
 fi
 
 if [[ -z "$MANIFEST" ]]; then

@@ -154,6 +154,10 @@ def main():
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print(
+        f"[render] building background from up to {args.max_views} views",
+        flush=True,
+    )
     bg_points, bg_colors, selected_frame_ids = build_background_from_depth(
         data_root=data_root,
         mask_root=mask_root,
@@ -166,16 +170,31 @@ def main():
         max_views=args.max_views,
         mask_erode_px=args.mask_erode_px,
     )
+    print(
+        f"[render] loading joint PLY: {joint_ply}",
+        flush=True,
+    )
     joint_points, joint_colors, joint_stats = load_joint_points(
         joint_ply,
         opacity_min=args.joint_opacity_min,
         opacity_quantile=args.joint_opacity_quantile,
         scale_quantile=args.joint_scale_quantile,
     )
+    print(
+        "[render] loaded "
+        f"background={len(bg_points):,} joint={len(joint_points):,} points; "
+        "subsampling for preview",
+        flush=True,
+    )
 
     bg_points, bg_colors = subsample(bg_points, bg_colors, args.bg_max_points)
     joint_points, joint_colors = subsample(
         joint_points, joint_colors, args.joint_max_points
+    )
+    print(
+        f"[render] preview points background={len(bg_points):,} "
+        f"joint={len(joint_points):,}",
+        flush=True,
     )
     center, half_extent = compute_bounds(
         bg_points, joint_points, args.fit_mode, args.fit_margin
@@ -184,6 +203,11 @@ def main():
     rendered = []
     preview = []
     for frame_idx in range(args.num_frames):
+        if frame_idx == 0 or (frame_idx + 1) % max(1, args.num_frames // 6) == 0:
+            print(
+                f"[render] orbit frame {frame_idx + 1}/{args.num_frames}",
+                flush=True,
+            )
         azim = 360.0 * frame_idx / args.num_frames
         frame = render_frame(
             bg_points,
@@ -209,6 +233,7 @@ def main():
             preview.append((frame_idx, frame))
 
     video_path = out_dir / f"{args.scan_id}_joint_depth_bg_{args.label.replace(' ', '_')}.mp4"
+    print(f"[render] writing video: {video_path}", flush=True)
     imageio.mimsave(video_path, rendered, fps=args.fps)
     save_contact_sheet(preview, out_dir / "contact_sheet.png")
 
@@ -230,6 +255,7 @@ def main():
         center=bounds.mean(axis=0),
     )
     html_path = out_dir / f"{args.scan_id}_interactive_{args.label.replace(' ', '_')}.html"
+    print(f"[render] writing interactive HTML: {html_path}", flush=True)
     html_path.write_text(trimesh.viewer.scene_to_html(scene), encoding="utf-8")
 
     summary = {

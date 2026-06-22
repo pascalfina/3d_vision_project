@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import getpass
 import json
 import os
 import shlex
@@ -92,7 +93,7 @@ def load_local_paths_env(repo_root: Path) -> None:
 
 
 def set_base_path_defaults(repo_root: Path) -> None:
-    user = os.environ.get("USER", "pafina")
+    user = os.environ.get("USER") or getpass.getuser()
     os.environ.setdefault("OBJECTX_REPO_ROOT", str(repo_root))
     os.environ.setdefault("OBJECTX_USER_ROOT", f"/work/scratch/{user}")
     os.environ.setdefault("OBJECTX_TEAM_ROOT", f"/work/courses/3dv/team35/{user}")
@@ -105,9 +106,31 @@ def set_derived_path_defaults() -> None:
     os.environ.setdefault("OBJECTX_REPO_DEBUG_ROOT", f"{os.environ['OBJECTX_REPO_ROOT']}/debug")
     os.environ.setdefault("OBJECTX_REPO_VIS_ROOT", f"{os.environ['OBJECTX_REPO_ROOT']}/vis")
     os.environ.setdefault("OBJECTX_WORKFLOW_LOG_ROOT", f"{user_root}/object-x/logs")
+    os.environ.setdefault("OBJECTX_CACHE_ROOT", f"{user_root}/objectx-cache")
+    os.environ.setdefault(
+        "OBJECTX_PI3X_WEIGHTS",
+        f"{team_root}/models/pi3/Pi3X.safetensors",
+    )
+    os.environ.setdefault(
+        "OBJECTX_SAMOBJECT_VENV",
+        f"{team_root}/.venv_sam2object/bin/activate",
+    )
+    os.environ.setdefault("OBJECTX_SAMOBJECT_DATA_ROOT", f"{user_root}/sam2object")
 
     # Scene/profile roots. Override these in configs/workflows/local_paths.env
     # when running on another account or storage layout.
+    os.environ.setdefault(
+        "OBJECTX_DEMO_PI3X_RECON_ROOT",
+        f"{user_root}/objectx-data-fullscene-8f0f144b-pi3x",
+    )
+    os.environ.setdefault(
+        "OBJECTX_DEMO_MUST3R_RECON_ROOT",
+        f"{user_root}/objectx-data-fullscene-8f0f144b-hybrid-sam2mask-must3r",
+    )
+    os.environ.setdefault(
+        "OBJECTX_DEMO_PI3X_PREDREADY_ROOT",
+        f"{user_root}/objectx-data-fullscene-8f0f144b-predready-sam2-pi3x-v1",
+    )
     os.environ.setdefault(
         "OBJECTX_CABINET_SAM2_RECON_ROOT",
         f"{user_root}/objectx-data-fullscene-cabinet-hybrid-sam2mask",

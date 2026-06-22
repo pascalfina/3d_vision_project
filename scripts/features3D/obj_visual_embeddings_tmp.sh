@@ -3,14 +3,15 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VLSG_DEP_SPACE="${VLSG_DEP_SPACE:-$REPO_ROOT/dependencies/VLSG}"
-SCRATCH_ROOT="${DATA_ROOT_DIR:-${Data_ROOT_DIR:-/work/scratch/pafina/objectx-data-baseline}}"
+USER_ROOT="${OBJECTX_USER_ROOT:-/work/scratch/${USER:-$(id -un)}}"
+SCRATCH_ROOT="${DATA_ROOT_DIR:-${Data_ROOT_DIR:-${OBJECTX_BASELINE_ROOT:-$USER_ROOT/objectx-data-baseline}}}"
 TMP_FEAT3D_ROOT="${TMP_FEAT3D_ROOT:-/tmp/${USER}-objectx-feat3d}"
 RESET_TMP="${RESET_TMP:-0}"
 SPLIT="${SPLIT:-train}"
 MAX_SCANS="${MAX_SCANS:-0}"
 SCENE_ID="${SCENE_ID:-}"
 OBJECTX_SCENE_SOURCE_DIRNAME="${OBJECTX_SCENE_SOURCE_DIRNAME:-scenes}"
-CACHE_ROOT="${OBJECTX_CACHE_ROOT:-/work/scratch/pafina/objectx-cache}"
+CACHE_ROOT="${OBJECTX_CACHE_ROOT:-$USER_ROOT/objectx-cache}"
 source "$REPO_ROOT/scripts/activate_objectx_env.sh"
 export VLSG_SPACE="$VLSG_DEP_SPACE"
 

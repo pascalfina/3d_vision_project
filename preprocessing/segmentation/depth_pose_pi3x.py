@@ -34,8 +34,8 @@ from utils.io_utils import (
 from utils import scan3r
 
 
-_DEFAULT_PI3X_WEIGHTS = (
-    "/work/courses/3dv/team35/pafina/models/pi3/Pi3X.safetensors"
+_DEFAULT_PI3X_WEIGHTS = str(
+    Path(__file__).resolve().parents[2] / "models" / "pi3" / "Pi3X.safetensors"
 )
 
 

@@ -359,7 +359,6 @@ def ensure_scannet40_classes(files_dir: Path, baseline_root: Path) -> None:
     source = pick_existing_file(
         baseline_root / "files" / "scannet40_classes.txt",
         Path(os.environ.get("OBJECTX_BASELINE_ROOT", "")) / "files" / "scannet40_classes.txt",
-        Path("/work/scratch/pafina/objectx-data-baseline/files/scannet40_classes.txt"),
     )
     if source is not None:
         ensure_symlink(source, target)

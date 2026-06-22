@@ -42,9 +42,28 @@ conda env create -f environment.yaml
 conda activate object-x
 ```
 
-3. Configure a scene profile. The active profile for the SAM2Object + Pi3X variant is:
+3. Set the two storage roots in `configs/workflows/local_paths.env`:
+
+```bash
+export OBJECTX_USER_ROOT="/work/scratch/${USER}"
+export OBJECTX_TEAM_ROOT="/work/courses/3dv/team35/${USER}"
 ```
-configs/workflows/scene_profiles/oven_legacy_sam2_pi3x.json
+
+These paths can point to any accessible storage locations. `OBJECTX_USER_ROOT`
+is used for personal datasets, caches, and intermediate outputs;
+`OBJECTX_TEAM_ROOT` is used for models, shared environments, and larger shared
+outputs. All remaining workflow paths are derived from these two roots
+automatically.
+
+The file is loaded by the workflow runner and ignored by Git, so these values
+only need to be set once per installation. If a specific resource does not
+follow the expected directory layout, its derived variable can still be
+overridden in the same file.
+
+4. Configure a scene profile. The example below uses the 3RScan scene
+`8f0f144b-55de-28ce-8053-2828b87a0cc9` with the SAM2Object + Pi3X profile:
+```
+configs/workflows/scene_profiles/scene_8f0f144b_sam2_pi3x.json
 ```
 
 ## Running the Pipeline
@@ -55,20 +74,29 @@ All stages are run through the workflow wrapper. Do not call individual scripts 
 bash scripts/workflows/run_scene_profile.sh <profile> <action>
 ```
 
-The full sequence for the current branch (`Sam2Object_and_Pi3X`):
+The full sequence for scene
+`8f0f144b-55de-28ce-8053-2828b87a0cc9` is:
 
 ```bash
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x must3r
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x pi3x
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x geom-debug      # optional
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x samobject
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x voxelise
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x build-pred-ready
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x plot-voxelised  # optional
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x features3d
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x slat
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x u3dgs
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x render
+export OBJECTX_USER_ROOT="/work/scratch/${USER}"
+export OBJECTX_TEAM_ROOT="/work/courses/3dv/team35/${USER}"
+
+export SAMOBJECT_CHECKPOINT="$PWD/models/sam2ckpt/sam2_hiera_base_plus.pt"
+export SAMOBJECT_MODEL_CFG="sam2_hiera_b+.yaml"
+
+PROFILE=scene_8f0f144b_sam2_pi3x
+
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" must3r
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" pi3x
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" geom-debug      # optional
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" samobject
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" voxelise
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" build-pred-ready
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" plot-voxelised  # optional
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" features3d
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" slat
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" u3dgs
+bash scripts/workflows/run_scene_profile.sh "$PROFILE" render
 ```
 
 ## Project Organisation
@@ -80,7 +108,7 @@ bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x render
 ├── configs
 │   └── workflows
 │       └── scene_profiles
-│           └── oven_legacy_sam2_pi3x.json
+│           └── scene_8f0f144b_sam2_pi3x.json
 ├── scripts
 │   └── workflows
 │       └── run_scene_profile.sh
@@ -107,10 +135,12 @@ bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x render
 ## Notes
 
 - MUSt3R must run before Pi3X: the current Pi3X setup uses MUSt3R poses as external priors.
+- The example scene must exist below `OBJECTX_BASELINE_ROOT`. Output and cache
+  locations can be changed centrally in `configs/workflows/local_paths.env`.
 - To switch the SAM2Object checkpoint without editing Python code:
 ```bash
 export SAMOBJECT_CHECKPOINT=/path/to/sam2_hiera_base_plus.pt
 export SAMOBJECT_MODEL_CFG=sam2_hiera_b+.yaml
-bash scripts/workflows/run_scene_profile.sh oven_legacy_sam2_pi3x samobject
+bash scripts/workflows/run_scene_profile.sh scene_8f0f144b_sam2_pi3x samobject
 ```
 - The workflow wrapper is the intended entrypoint. Avoid calling stage scripts directly unless debugging internals.

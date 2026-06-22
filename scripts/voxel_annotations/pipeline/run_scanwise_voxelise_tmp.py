@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import getpass
 import json
 import logging
 import os
@@ -47,7 +48,12 @@ def resolve_mask_source() -> str:
 
 
 def ensure_cache_env() -> None:
-    cache_root = os.environ.get("OBJECTX_CACHE_ROOT") or "/work/scratch/pafina/objectx-cache"
+    user_root = os.environ.get("OBJECTX_USER_ROOT") or (
+        f"/work/scratch/{os.environ.get('USER') or getpass.getuser()}"
+    )
+    cache_root = os.environ.get("OBJECTX_CACHE_ROOT") or str(
+        Path(user_root) / "objectx-cache"
+    )
     torch_home = os.environ.get("TORCH_HOME") or str(Path(cache_root) / "torch")
     xdg_cache = os.environ.get("XDG_CACHE_HOME") or str(Path(cache_root) / "xdg")
     mpl_cache = os.environ.get("MPLCONFIGDIR") or str(Path(cache_root) / "matplotlib")

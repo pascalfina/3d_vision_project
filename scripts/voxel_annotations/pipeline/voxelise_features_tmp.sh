@@ -2,12 +2,13 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SCRATCH_ROOT="${DATA_ROOT_DIR:-/work/scratch/pafina/objectx-data-baseline}"
+USER_ROOT="${OBJECTX_USER_ROOT:-/work/scratch/${USER:-$(id -un)}}"
+SCRATCH_ROOT="${DATA_ROOT_DIR:-${OBJECTX_BASELINE_ROOT:-$USER_ROOT/objectx-data-baseline}}"
 TMP_VOX_ROOT="${TMP_VOX_ROOT:-/tmp/${USER}-objectx-voxelise}"
 RESET_TMP="${RESET_TMP:-0}"
 SPLIT="${SPLIT:-train}"
 MAX_SCANS="${MAX_SCANS:-0}"
-CACHE_ROOT="${OBJECTX_CACHE_ROOT:-/work/scratch/pafina/objectx-cache}"
+CACHE_ROOT="${OBJECTX_CACHE_ROOT:-$USER_ROOT/objectx-cache}"
 source "$REPO_ROOT/scripts/activate_objectx_env.sh"
 
 if [[ "$RESET_TMP" == "1" ]]; then

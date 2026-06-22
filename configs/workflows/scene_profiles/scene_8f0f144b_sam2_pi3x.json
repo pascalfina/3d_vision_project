@@ -6,12 +6,12 @@
   "mask_source": "sam2_projection",
   "roots": {
     "baseline": "${OBJECTX_BASELINE_ROOT}",
-    "reconstruction": "/work/scratch/pafina/objectx-data-fullscene-8f0f144b-pi3x",
-    "pred_ready": "/work/scratch/pafina/objectx-data-fullscene-8f0f144b-predready-sam2-pi3x-v1"
+    "reconstruction": "${OBJECTX_DEMO_PI3X_RECON_ROOT}",
+    "pred_ready": "${OBJECTX_DEMO_PI3X_PREDREADY_ROOT}"
   },
   "artifacts": {
-    "manifest": "${OBJECTX_REPO_DEBUG_ROOT}/8f0f144b_fullscene_pi3x_manifest.json",
-    "joint_ply": "${OBJECTX_REPO_VIS_ROOT}/8f0f144b-55de-28ce-8053-2828b87a0cc9_joint_pi3x.ply"
+    "manifest": "${OBJECTX_DEMO_PI3X_PREDREADY_ROOT}/files/pred_ready_scene_manifest.json",
+    "joint_ply": "${OBJECTX_REPO_VIS_ROOT}/8f0f144b-55de-28ce-8053-2828b87a0cc9_joint.ply"
   },
   "segment_inputs": {
     "config": "preprocessing/segmentation/pipeline.yaml",
@@ -19,7 +19,7 @@
     "run_sam2": true,
     "run_registry": true,
     "input_root": "${OBJECTX_BASELINE_ROOT}",
-    "output_root": "/work/scratch/pafina/objectx-data-fullscene-8f0f144b-pi3x",
+    "output_root": "${OBJECTX_DEMO_PI3X_RECON_ROOT}",
     "mask_dirname": "sam2_projection",
     "objects_filename": "objects_sam2.json",
     "scenes_dirname": "scenes_sam2_pi3x",
@@ -95,7 +95,7 @@
     "run_sam2": false,
     "run_registry": false,
     "input_root": "${OBJECTX_BASELINE_ROOT}",
-    "output_root": "/work/scratch/pafina/objectx-data-fullscene-8f0f144b-hybrid-sam2mask-must3r",
+    "output_root": "${OBJECTX_DEMO_MUST3R_RECON_ROOT}",
     "mask_dirname": "sam2_projection",
     "objects_filename": "objects_sam2.json",
     "scenes_dirname": "scenes_sam2_must3r",
@@ -143,7 +143,7 @@
     "run_sam2": false,
     "run_registry": false,
     "input_root": "${OBJECTX_BASELINE_ROOT}",
-    "output_root": "/work/scratch/pafina/objectx-data-fullscene-8f0f144b-pi3x",
+    "output_root": "${OBJECTX_DEMO_PI3X_RECON_ROOT}",
     "mask_dirname": "sam2_projection",
     "objects_filename": "objects_sam2.json",
     "scenes_dirname": "scenes_sam2_pi3x",
@@ -154,7 +154,7 @@
       "OBJECTX_PI3X_OVERLAP": "0",
       "OBJECTX_PI3X_ANCHOR_COUNT": "0",
       "OBJECTX_PI3X_FRAME_STRIDE": "1",
-      "OBJECTX_PI3X_EXTERNAL_POSE_DIR": "/work/scratch/pafina/objectx-data-fullscene-8f0f144b-hybrid-sam2mask-must3r/scenes_sam2_must3r/8f0f144b-55de-28ce-8053-2828b87a0cc9/sequence",
+      "OBJECTX_PI3X_EXTERNAL_POSE_DIR": "${OBJECTX_DEMO_MUST3R_RECON_ROOT}/scenes_sam2_must3r/8f0f144b-55de-28ce-8053-2828b87a0cc9/sequence",
       "OBJECTX_PI3X_CONF_THR": "0.10",
       "OBJECTX_PI3X_ALIGN_MODE": "sim3",
       "OBJECTX_PI3X_USE_INTRINSICS": "1",
@@ -170,7 +170,7 @@
       "OBJECTX_PI3X_POSE_JUMP_MAX_ROTATION_DEG": "0.0",
       "OBJECTX_PI3X_POSE_JUMP_RELATIVE_FACTOR": "10.0",
       "OBJECTX_PI3X_ZERO_INVALID_POSE_DEPTHS": "1",
-      "OBJECTX_PI3X_WEIGHTS": "/work/courses/3dv/team35/pafina/models/pi3/Pi3X.safetensors"
+      "OBJECTX_PI3X_WEIGHTS": "${OBJECTX_PI3X_WEIGHTS}"
     },
     "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/debug_8f0f144b_pi3x.log"
   },
@@ -238,15 +238,17 @@
   },
   "render_bundle": {
     "label": "scene_8f0f144b_sam2_pi3x",
-    "data_root": "/work/scratch/pafina/objectx-data-fullscene-8f0f144b-pi3x",
+    "data_root": "${OBJECTX_DEMO_PI3X_RECON_ROOT}",
     "mask_source": "gt_projection",
     "background_remove_mode": "loaded",
     "pose_mode": "raw",
     "lift_coord_system": "pinhole",
     "frame_selection": "diverse_area",
-    "max_views": 103,
-    "bg_max_points": 3000000,
-    "joint_max_points": 3000000,
+    "max_views": 64,
+    "bg_max_points": 300000,
+    "joint_max_points": 300000,
+    "num_frames": 24,
+    "fps": 24,
     "env": {
       "OBJECTX_VOXEL_DEPTH_SOURCE": "must3r_xyz_if_available",
       "OBJECTX_VIS_DEPTH_SOURCE": "must3r_xyz_if_available",
@@ -264,10 +266,10 @@
     }
   },
   "samobject": {
-    "samobject_venv": "/work/courses/3dv/team35/pafina/.venv_sam2object/bin/activate",
-    "root_dir": "/work/scratch/pafina/sam2object",
+    "samobject_venv": "${OBJECTX_SAMOBJECT_VENV}",
+    "root_dir": "${OBJECTX_SAMOBJECT_DATA_ROOT}",
     "baseline_root": "${OBJECTX_BASELINE_ROOT}",
-    "source_sequence_dir": "/work/scratch/pafina/objectx-data-fullscene-8f0f144b-pi3x/scenes_sam2_pi3x/8f0f144b-55de-28ce-8053-2828b87a0cc9/sequence",
+    "source_sequence_dir": "${OBJECTX_DEMO_PI3X_RECON_ROOT}/scenes_sam2_pi3x/8f0f144b-55de-28ce-8053-2828b87a0cc9/sequence",
     "projection_dilation": 2,
     "log": "${OBJECTX_WORKFLOW_LOG_ROOT}/samobject_pipeline_8f0f144b.log",
     "env": {
