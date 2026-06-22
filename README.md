@@ -36,11 +36,8 @@ git clone git@github.com:<org>/object-x.git
 cd object-x
 ```
 
-2. Install dependencies:
-```bash
-conda env create -f environment.yaml
-conda activate object-x
-```
+2. Install the Python environments, CUDA dependencies, and model weights as
+described in [SETUP.md](SETUP.md).
 
 3. Set the two storage roots in `configs/workflows/local_paths.env`:
 
@@ -104,7 +101,7 @@ bash scripts/workflows/run_scene_profile.sh "$PROFILE" render
 ```
 ├── LICENSE
 ├── README.md
-├── environment.yaml
+├── SETUP.md
 ├── configs
 │   └── workflows
 │       └── scene_profiles
